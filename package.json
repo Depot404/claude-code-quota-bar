@@ -2,7 +2,7 @@
   "name": "claude-code-quota-bar",
   "displayName": "Claude Convs — Conversations & Quota Panel",
   "description": "See which Claude Code conversations are working, click to jump to the right VS Code window, and hear when Claude needs you. Plus 5h/7d/scoped quota bars coloured by projected burn-rate pace, not just %used. Unofficial, Windows-only.",
-  "version": "2.12.4",
+  "version": "2.12.5",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",

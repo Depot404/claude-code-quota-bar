@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.12.5] - 2026-07-17
+
+### Fixed
+- **Sounds toggle was silently useless without the hooks.** Flagged by the user reviewing the public listing: a Marketplace install that enables 🔊 but never runs **Claude Convs: Install Hooks** would see every conversation stuck at `idle` forever (README § Setup) and therefore never hear anything — nothing told them why. Enabling the toggle (via the icon, or a pre-set `true` found at startup — settings synced from another machine, hand-edited `settings.json`) now checks for `~/.claude/scripts/hook-session-state.js` (the hooks' own marker file) and, if missing, shows a one-time warning offering **Install hooks** / **Enable anyway** / **Turn sounds back off**. Same dismissal style as the existing accessibility-signals conflict prompt — never re-asked once accepted, and moot anyway the moment the hooks actually get installed.
+
 ## [2.12.4] - 2026-07-17
 
 ### Changed

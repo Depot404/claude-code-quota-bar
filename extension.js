@@ -54,6 +54,16 @@ let lastSource = null;
 const ACCESSIBILITY_SIGNALS = ['chatResponseReceived', 'chatUserActionRequired'];
 const ACCESSIBILITY_PROMPT_DISMISSED_KEY = 'soundsAccessibilityPromptDismissed';
 
+// Sons sans hooks (signalé par l'user 2026-07-17) : sans les hooks, aucune
+// conversation ne quitte jamais `idle` (README § Setup) — donc aucune
+// transition busy→done/waiting ne se produit jamais, et le son activé via le
+// toggle 🔈 ne joue jamais, sans un mot d'explication. Même refus mémorisé
+// qu'ACCESSIBILITY_PROMPT_DISMISSED_KEY : si les hooks arrivent plus tard,
+// hooksAppearInstalled() redevient vrai et ce garde-fou ne se déclenche plus
+// de toute façon, donc mémoriser le refus ne bloque rien de durable.
+const HOOKS_MARKER_PATH = path.join(os.homedir(), '.claude', 'scripts', 'hook-session-state.js');
+const NO_HOOKS_SOUNDS_PROMPT_DISMISSED_KEY = 'soundsNoHooksPromptDismissed';
+
 // Lot 9 : dernier état connu par conv, pour ne détecter que de VRAIES
 // transitions (busy→done, busy→waiting…). renderKey() de state.js notifie
 // aussi sur un ctx% qui bouge ou un acked qui change sans transition d'état —
@@ -135,6 +145,7 @@ function activate(context) {
   // Le toggle peut déjà être `true` (settings.json édité à la main, ou profil
   // repris d'une machine où on l'avait activé) — pas seulement via l'icône.
   maybeWarnAccessibilityConflict(context);
+  maybeWarnNoHooksForSounds(context);
 
   // Panneau sidebar secondaire (droite). retainContextWhenHidden : l'état est
   // poussé par événement ; sans ça, un panneau masqué se réveille vide jusqu'au
@@ -147,7 +158,7 @@ function activate(context) {
     // — c'est le seul cas où aucune bascule/transition ne peut jamais se
     // produire, donc le seul chemin d'ack possible en mono-onglet.
     focusConv: (msg) => { focusConversation(msg); ackConversationById(msg && msg.id); },
-    toggleSounds: () => toggleSounds(),
+    toggleSounds: () => toggleSounds(context),
   });
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ClaudePanelProvider.viewType, panelProvider, {
@@ -590,10 +601,51 @@ async function installHooks(context) {
 // Icône haut-parleur du panneau (lot 1, point 6) : bascule le setting user en
 // un clic. `onDidChangeConfiguration` (activate()) repousse ensuite l'état à
 // TOUTES les fenêtres, y compris celle qui n'a pas cliqué.
-async function toggleSounds() {
+async function toggleSounds(context) {
   const cfg = vscode.workspace.getConfiguration('claudeCodeQuotaBar');
   const current = cfg.get('sounds.enabled', false);
-  try { await cfg.update('sounds.enabled', !current, vscode.ConfigurationTarget.Global); } catch {}
+  const next = !current;
+  try { await cfg.update('sounds.enabled', next, vscode.ConfigurationTarget.Global); } catch {}
+  // Seulement au moment où ça s'ALLUME : pas d'intérêt à avertir en éteignant.
+  if (next && context) maybeWarnNoHooksForSounds(context);
+}
+
+// hook-session-state.js est le fichier que install.ps1 déploie pour Stop/
+// Notification/SessionEnd (README § Setup) — sa présence est un signal fiable
+// que les hooks ont tourné au moins une fois avec succès. Pas besoin de parser
+// settings.json : si ce fichier manque, aucune conversation ne peut jamais
+// sortir d'`idle`, donc aucun son ne jouera jamais, quoi que dise le setting.
+function hooksAppearInstalled() {
+  try { return fs.existsSync(HOOKS_MARKER_PATH); } catch { return false; }
+}
+
+// Sans hooks, le toggle 🔈 s'allume pour rien : aucune transition busy→done/
+// waiting ne se produit jamais (state.js rend tout en `idle`), donc le son ne
+// joue jamais — silencieusement, sans que rien ne le dise. Même style de
+// garde-fou qu'maybeWarnAccessibilityConflict : un message, une fois par
+// machine tant que les hooks manquent, jamais de re-demande une fois accepté
+// ou les hooks installés.
+async function maybeWarnNoHooksForSounds(context) {
+  if (!getConfig().soundsEnabled) return;
+  if (hooksAppearInstalled()) return;
+  if (context.globalState.get(NO_HOOKS_SOUNDS_PROMPT_DISMISSED_KEY)) return;
+
+  let choice;
+  try {
+    choice = await vscode.window.showWarningMessage(
+      'Notification sounds are on, but the Claude Code hooks aren\'t installed — without them, conversations never leave the "idle" state, so the sound will never actually play. Install the hooks now?',
+      'Install hooks', 'Enable anyway', 'Turn sounds back off'
+    );
+  } catch { choice = undefined; }
+
+  if (choice === 'Install hooks') {
+    await installHooks(context);
+  } else if (choice === 'Turn sounds back off') {
+    const cfg = vscode.workspace.getConfiguration('claudeCodeQuotaBar');
+    try { await cfg.update('sounds.enabled', false, vscode.ConfigurationTarget.Global); } catch {}
+    return; // pas de dismissal permanent : rien à mémoriser, le setting est déjà retombé à false.
+  }
+  try { context.globalState.update(NO_HOOKS_SOUNDS_PROMPT_DISMISSED_KEY, true); } catch {}
 }
 
 // Conflit avec les signaux d'accessibilité natifs de VS Code (lot 1, point 5)
