@@ -11,6 +11,14 @@ const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'qb-event-fetch-'));
 os.homedir = () => SANDBOX;                       // AVANT tout require du module
 fs.mkdirSync(path.join(SANDBOX, '.claude'), { recursive: true });
 
+// Depuis 2.12.0, `braveUserDataDir` vide (le défaut) court-circuite la voie
+// cookie sans AUCUN appel réseau (avant, son ping CDP passait par http.get et
+// c'est lui que netStub comptait). Le fetch observable passe donc par le
+// fallback OAuth, qui exige un token — sans lui, zéro octet ne part et le
+// test ne compte plus rien.
+fs.writeFileSync(path.join(SANDBOX, '.claude', '.credentials.json'),
+  JSON.stringify({ claudeAiOauth: { accessToken: 'test-token' } }));
+
 // Throttle raccourci pour le banc (couture de test, cf. extension.js).
 process.env.CLAUDE_QUOTA_EVENT_FETCH_THROTTLE_MS = '1000';
 

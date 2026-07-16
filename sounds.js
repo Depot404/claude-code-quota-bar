@@ -31,9 +31,17 @@ const CLAIMS_PATH = path.join(os.homedir(), '.claude', 'sound-claims.json');
 const PRUNE_MS = 24 * 60 * 60 * 1000; // même règle que sessions-state.json
 const DONE_DEBOUNCE_MS = 2500;
 
+// SystemSound.Play() est ASYNCHRONE (PlaySound SND_ASYNC) : sans le sleep,
+// powershell.exe se termine juste après l'appel et tue la lecture avant
+// qu'elle démarre — silence total, constaté le 2026-07-16. Le process est
+// détaché (fire-and-forget), le sleep ne coûte rien à personne.
 const SOUND_COMMANDS = {
-  done: '[System.Media.SystemSounds]::Asterisk.Play()',
-  waiting: '[System.Media.SystemSounds]::Exclamation.Play()',
+  // ding.wav choisi a l'oreille par l'user le 2026-07-16 (vs Windows Ding,
+  // Windows Notify, chimes) : le plus court/leger de la palette testee.
+  // PlaySync() est synchrone -> pas besoin du Start-Sleep requis par
+  // SystemSounds.Play() (asynchrone, cf. hotfix 2.12.2 plus haut).
+  done: "(New-Object System.Media.SoundPlayer 'C:\\Windows\\Media\\ding.wav').PlaySync()",
+  waiting: '[System.Media.SystemSounds]::Exclamation.Play(); Start-Sleep -Milliseconds 1500',
 };
 
 function readClaims() {
@@ -85,10 +93,14 @@ function playSoundImpl(kind) {
   const cmd = SOUND_COMMANDS[kind];
   if (!cmd) return;
   try {
+    // JAMAIS `detached: true` ici : sous Windows il prive powershell.exe de
+    // console et le process meurt en ~150 ms (code 0) sans exécuter la
+    // commande — mesuré le 2026-07-16 (50-152 ms avec detached, 1,6 s sans).
+    // Même recette que focus.js/raiseWindow, qui n'a jamais eu le problème.
     const child = spawn(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', cmd],
-      { detached: true, stdio: 'ignore', windowsHide: true }
+      { stdio: 'ignore', windowsHide: true }
     );
     child.on('error', () => {});
     child.unref();

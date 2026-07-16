@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.12.3] - 2026-07-16
+
+### Changed
+- **`done` sound switched to `ding.wav`.** The user A/B-tested `Windows Ding.wav`, `Windows Notify.wav`, `chimes.wav`, and `ding.wav` against the actual PC speakers and picked `ding.wav` — the shortest/lightest of the set. Played via `System.Media.SoundPlayer(...).PlaySync()` (synchronous, no `Start-Sleep` needed) instead of `SystemSounds.Asterisk`. `waiting` (`SystemSounds.Exclamation`) unchanged.
+
+## [2.12.2] - 2026-07-16
+
+### Fixed
+- **Sounds were still silent after 2.12.1**: `detached: true` on the spawn starves powershell.exe of a console on Windows — the process dies in ~150 ms (exit 0) without ever running the command, sleep or not (measured; without `detached` the same spawn lives its full ~1.6 s and plays). Option removed — same recipe as `focus.js`/raiseWindow, which never had the problem. Root-caused by process-watching a real end-of-turn: the claim was written, no powershell ever appeared.
+- `package.json` `displayName` and two setting descriptions had their em-dashes mojibake'd (`â€”`) by the 2.12.1 release tooling (PowerShell 5.1 `Get-Content` reads BOM-less UTF-8 as ANSI). Restored.
+
+## [2.12.1] - 2026-07-16
+
+### Fixed
+- **Notification sounds were completely silent.** `SystemSound.Play()` is asynchronous (PlaySound `SND_ASYNC`): the hidden PowerShell exited right after the call, killing playback before it started. The spawned command now sleeps 1.5 s after `Play()` — the process is detached and fire-and-forget, so the sleep blocks nothing.
+
 ## [2.12.0] - 2026-07-16
 
 ### Added

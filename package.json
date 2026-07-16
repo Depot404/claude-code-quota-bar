@@ -2,21 +2,21 @@
   "name": "claude-code-quota-bar",
   "displayName": "Claude Convs — Conversations & Quota Panel",
   "description": "Sidebar panel showing your Claude Code conversations (state, model, context %) and 5-hour/7-day/scoped usage with self-explanatory, auto-refreshing burn-rate colouring. Unofficial.",
-  "version": "2.12.0",
-  "publisher": "octopus-tools",
+  "version": "2.12.3",
+  "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
   "author": {
-    "name": "octopus-tools"
+    "name": "Anthony Dame"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/octopus-tools/claude-code-quota-bar"
+    "url": "https://github.com/Depot404/claude-code-quota-bar"
   },
   "bugs": {
-    "url": "https://github.com/octopus-tools/claude-code-quota-bar/issues"
+    "url": "https://github.com/Depot404/claude-code-quota-bar/issues"
   },
-  "homepage": "https://github.com/octopus-tools/claude-code-quota-bar#readme",
+  "homepage": "https://github.com/Depot404/claude-code-quota-bar#readme",
   "engines": {
     "vscode": "^1.106.0"
   },
