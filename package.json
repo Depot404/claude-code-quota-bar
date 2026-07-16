@@ -1,0 +1,121 @@
+{
+  "name": "claude-code-quota-bar",
+  "displayName": "Claude Convs — Conversations & Quota Panel",
+  "description": "Sidebar panel showing your Claude Code conversations (state, model, context %) and 5-hour/7-day/scoped usage with self-explanatory, auto-refreshing burn-rate colouring. Unofficial.",
+  "version": "2.12.0",
+  "publisher": "octopus-tools",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "author": {
+    "name": "octopus-tools"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/octopus-tools/claude-code-quota-bar"
+  },
+  "bugs": {
+    "url": "https://github.com/octopus-tools/claude-code-quota-bar/issues"
+  },
+  "homepage": "https://github.com/octopus-tools/claude-code-quota-bar#readme",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "quota",
+    "usage",
+    "conversations",
+    "sidebar",
+    "anthropic"
+  ],
+  "galleryBanner": {
+    "color": "#1F1F1F",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "claudeCodeQuotaBar",
+          "title": "Claude Convs",
+          "icon": "images/panel-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeCodeQuotaBar": [
+        {
+          "id": "claudeCodeQuotaBar.panel",
+          "name": "Conversations & quota",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claude-code-quota-bar.open",
+        "title": "Claude Code Quota: Open Usage Page"
+      },
+      {
+        "command": "claude-code-quota-bar.refresh",
+        "title": "Claude Code Quota: Refresh Now"
+      },
+      {
+        "command": "claude-code-quota-bar.installHooks",
+        "title": "Claude Convs: Install Hooks"
+      }
+    ],
+    "configuration": {
+      "title": "Quota Bar for Claude Code",
+      "properties": {
+        "claudeCodeQuotaBar.refreshIntervalMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "How often to refresh the usage data, in minutes."
+        },
+        "claudeCodeQuotaBar.burnRateGreenMax": {
+          "type": "number",
+          "default": 0.85,
+          "minimum": 0,
+          "description": "Burn-rate pace (percent used divided by percent of window elapsed) at or below which a quota bar is coloured green — the projected end-of-window usage is comfortably under the quota."
+        },
+        "claudeCodeQuotaBar.burnRateYellowMax": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "description": "Burn-rate pace at or below which a quota bar is coloured yellow instead of red. At the default of 1.0, red means the projected end-of-window usage exceeds 100% of the quota."
+        },
+        "claudeCodeQuotaBar.sounds.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default — no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here."
+        },
+        "claudeCodeQuotaBar.braveUserDataDir": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a dedicated Brave user-data directory (e.g. C:\\OctopusData\\BraveOctopus) with a claude.ai session logged in, used for the fast cookie-based usage fetch. Empty by default: the cookie path is disabled cleanly (no browser spawn) and the extension falls back to your Claude Code OAuth token instead. Set BRAVE_EXE if brave.exe isn't in the standard Program Files location."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  }
+}
