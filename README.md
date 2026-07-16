@@ -2,12 +2,17 @@
 
 ![Claude Convs panel — conversation list with state icons and quota bars](images/screenshot.png)
 
-A VS Code panel, docked in the **Secondary Side Bar** (right side), that shows your **Claude Code** state at a glance:
+**See which of your Claude Code conversations are actually working, click one to jump straight to its tab — in any VS Code window, even a hidden one — and hear the difference between "done" and "Claude needs you".**
 
-- **Every conversation in the current workspace** — state (working / waiting for you / done / stale), title, model, and context-window occupation (`ctx:NN%`). A finished conversation keeps a **bright ✓ until you've read it** ([read receipts](#read-receipts))
-- **A quota bar per active window** — 5h, 7d, and any model-scoped weekly limit the API is currently reporting (e.g. a promotional Fable allowance) — utilization %, reset time, a **burn-rate colour** (green/yellow/red), and a **▲ marker** showing where you "should" be at this instant if you paced usage evenly across the window
-- Click a conversation → focuses its tab, in any editor group and **in any VS Code window** (see [Clicking a conversation](#clicking-a-conversation))
+Most Claude Code usage trackers on the Marketplace stop at a status-bar percentage. This one is a full panel, docked in the **Secondary Side Bar** (right side):
+
+- **Every conversation in the current workspace, with live state** — working / waiting for you / done / stale — not just the tab dot VS Code's own extension shows (a blue dot for a pending permission, an orange one for a finished hidden tab — nothing at all for a conversation asking you a question). A finished conversation keeps a **bright ✓ until you've read it** ([read receipts](#read-receipts))
+- **Click a row → the right tab comes to the front**, in any editor group, **in any VS Code window** — VS Code exposes no API to do this, so the panel works around it (see [Clicking a conversation](#clicking-a-conversation))
+- **Two distinct sounds** — one when a conversation finishes, a different one when Claude is waiting on you (a question, a permission prompt) — so you don't have to keep the panel visible to notice ([Sounds](#sounds); off by default)
+- **A quota bar per active window** — 5h, 7d, and any model-scoped weekly limit the API is currently reporting (e.g. a promotional Fable allowance) — coloured by **projected pace** (are you on track to run out before the reset, not just "how full does it look right now"), with a **▲ marker** showing where you "should" be at this instant if you paced usage evenly across the window
 - Click **Usage page** → opens `https://claude.ai/settings/usage`
+
+> **Windows only**, and talks to an Anthropic endpoint that **isn't part of the documented public API** — see [Requirements](#requirements) and [Known limitations](#known-limitations) before installing.
 
 > **v1.x note.** Earlier versions (`< 2.0.0`) shipped a status bar item instead. It has been **removed**: the panel carries strictly more information (per-conversation state, not just the current tab) with real formatting a status bar text segment can't do (colour, bars, spinners). See `CHANGELOG.md`.
 
@@ -56,6 +61,8 @@ The denominator (200k vs 1M) is **auto-detected** by `hooks/model-id.js`, most-c
 6. Otherwise **200k**.
 
 ## Conversation state engine
+
+![All five states side by side — busy, waiting, done (unread), done (read), stale — illustrated with mock conversations, real panel styling](images/screenshot-states-illustrated.png)
 
 `state.js` tells you **which conversations are working**, which VS Code itself doesn't expose (only a blue dot for a pending permission, orange for a hidden finished tab — Anthropic feature request [#34309](https://github.com/anthropics/claude-code/issues/34309)). It aggregates, for the current workspace:
 
@@ -251,6 +258,8 @@ Edit the hooks in `hooks/` (not the deployed copies in `~/.claude/scripts/`), th
 | `claudeCodeQuotaBar.braveUserDataDir` | `""` | Path to a Brave user-data directory with a `claude.ai` session logged in, for the faster cookie-based quota fetch. Empty (default) disables that path cleanly — no browser spawn, no error — and the OAuth fallback is used instead. Set `BRAVE_EXE` too if `brave.exe` isn't in the standard install location. |
 
 ## Burn-rate colouring
+
+![Panel in dark theme, 5h window red at 90% pace, one 7d weekly limit red and one green side by side](images/screenshot-dark-burnrate.png)
 
 Each quota bar (5h, 7d) is coloured by **pace** — how fast you're spending the window relative to how much of it has elapsed:
 

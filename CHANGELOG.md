@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.12.4] - 2026-07-17
+
+### Changed
+- **Marketplace listing copy rewritten** after checking what competing Claude Code quota/usage extensions actually offer (Clusage, Claude Quota Tracker, ClaudeProUsage, Claude Code and Codex Assist — all status-bar quota monitors or past-session viewers; none show live per-conversation state, none focus a VS Code window on click, none play distinct done/waiting sounds, none colour quota by projected pace rather than a flat %-used threshold). README hook, `package.json` description and `keywords` updated to lead with those three verified differentiators instead of a feature list.
+- **Two new screenshots.** `images/screenshot-dark-burnrate.png` (real capture, dark theme, a genuine red 90%-pace 5h window next to a green 7d one — added to the Burn-rate colouring section) and `images/screenshot-states-illustrated.png` (all five conversation states — busy/waiting/done unread/done read/stale — side by side with mock conversation titles, since no real workspace has all five at once; built from the panel's actual CSS so the styling is real even though the data is a demo, labelled as such in the caption — added to the Conversation state engine section).
+
 ## [2.12.3] - 2026-07-16
 
 ### Changed

@@ -1,8 +1,8 @@
 {
   "name": "claude-code-quota-bar",
   "displayName": "Claude Convs — Conversations & Quota Panel",
-  "description": "Sidebar panel showing your Claude Code conversations (state, model, context %) and 5-hour/7-day/scoped usage with self-explanatory, auto-refreshing burn-rate colouring. Unofficial.",
-  "version": "2.12.3",
+  "description": "See which Claude Code conversations are working, click to jump to the right VS Code window, and hear when Claude needs you. Plus 5h/7d/scoped quota bars coloured by projected burn-rate pace, not just %used. Unofficial, Windows-only.",
+  "version": "2.12.4",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -28,9 +28,16 @@
     "claude code",
     "quota",
     "usage",
+    "usage tracker",
     "conversations",
+    "conversation manager",
     "sidebar",
-    "anthropic"
+    "anthropic",
+    "notifications",
+    "sound",
+    "burn rate",
+    "context window",
+    "focus window"
   ],
   "galleryBanner": {
     "color": "#1F1F1F",
