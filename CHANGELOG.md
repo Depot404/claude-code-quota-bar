@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.12.7] - 2026-07-17
+
+### Changed
+- **Last French example in the README replaced.** `Implémenter lot 4 burn-r…` — a real conversation title from the author's machine, used as the tab-truncation example in an otherwise English document — is now `Refactor auth middlewar…`, matching the screenshot's mock data. Textual survivor of the same problem as the screenshots in 2.12.6.
+
 ## [2.12.6] - 2026-07-17
 
 ### Changed
@@ -132,7 +137,7 @@
 ## [2.1.0] - 2026-07-15
 
 ### Fixed
-- **Clicking a conversation now actually focuses its tab.** The label match introduced in 2.0.0 was exact, but the Claude Code extension truncates tab labels to 24 characters plus an ellipsis (`Refactor auth middlewar…`) while the panel shows the full `ai-title` — so any conversation with a title longer than 24 characters silently matched nothing. Truncated labels are now matched as a prefix of the title.
+- **Clicking a conversation now actually focuses its tab.** The label match introduced in 2.0.0 was exact, but the Claude Code extension truncates tab labels to 24 characters plus an ellipsis (`Implémenter lot 4 burn-r…`) while the panel shows the full `ai-title` — so any conversation with a title longer than 24 characters silently matched nothing. Truncated labels are now matched as a prefix of the title.
 - **Burn-rate thresholds now mean what the colours claim.** Red is `pace > 1.0`, i.e. red exactly when the projected end-of-window usage exceeds the quota. The previous defaults (green ≤ 0.8, yellow ≤ 1.2) painted a projection of 120% as merely "yellow". New defaults: `burnRateGreenMax` `0.8` → `0.85`, `burnRateYellowMax` `1.2` → `1.0`.
 
 ### Added
