@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.12.6] - 2026-07-17
+
+### Changed
+- **All screenshots replaced with a single mock-data one.** Every previous screenshot was a real capture of the author's own machine: real conversation titles, in French, on a light theme — published on a public listing page. The listing now carries one image built from mock English conversations (`images/screenshot.png`), on the dark theme, showing **all five states at once** (working, waiting for you, done-unread with the bright ✓, done-read with the dimmed one, stale) above the three quota bars in red/yellow/green with their ▲ pace markers. The old captures (`screenshot-dark-burnrate.png`, `screenshot-states-illustrated.png`) are gone, and their README sections read fine without them.
+
 ## [2.12.5] - 2026-07-17
 
 ### Fixed

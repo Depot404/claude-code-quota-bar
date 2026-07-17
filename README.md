@@ -1,6 +1,6 @@
 # Claude Convs — Conversations & Quota Panel
 
-![Claude Convs panel — conversation list with state icons and quota bars](images/screenshot.png)
+![Claude Convs panel — every conversation state (working, waiting for you, done unread, done read, stale) above quota bars coloured by burn-rate pace](images/screenshot.png)
 
 **See which of your Claude Code conversations are actually working, click one to jump straight to its tab — in any VS Code window, even a hidden one — and hear the difference between "done" and "Claude needs you".**
 
@@ -61,8 +61,6 @@ The denominator (200k vs 1M) is **auto-detected** by `hooks/model-id.js`, most-c
 6. Otherwise **200k**.
 
 ## Conversation state engine
-
-![All five states side by side — busy, waiting, done (unread), done (read), stale — illustrated with mock conversations, real panel styling](images/screenshot-states-illustrated.png)
 
 `state.js` tells you **which conversations are working**, which VS Code itself doesn't expose (only a blue dot for a pending permission, orange for a hidden finished tab — Anthropic feature request [#34309](https://github.com/anthropics/claude-code/issues/34309)). It aggregates, for the current workspace:
 
@@ -258,8 +256,6 @@ Edit the hooks in `hooks/` (not the deployed copies in `~/.claude/scripts/`), th
 | `claudeCodeQuotaBar.braveUserDataDir` | `""` | Path to a Brave user-data directory with a `claude.ai` session logged in, for the faster cookie-based quota fetch. Empty (default) disables that path cleanly — no browser spawn, no error — and the OAuth fallback is used instead. Set `BRAVE_EXE` too if `brave.exe` isn't in the standard install location. |
 
 ## Burn-rate colouring
-
-![Panel in dark theme, 5h window red at 90% pace, one 7d weekly limit red and one green side by side](images/screenshot-dark-burnrate.png)
 
 Each quota bar (5h, 7d) is coloured by **pace** — how fast you're spending the window relative to how much of it has elapsed:
 
