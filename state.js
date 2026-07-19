@@ -4,6 +4,7 @@
 //   - ~/.claude/sessions-state.json  → état posé par les hooks (busy/waiting/done)
 //   - ~/.claude/projects/<ws>/*.jsonl → modèle réel, ctx%, titre, activité (mtime)
 //   - ~/.claude/active-session.json  → quelle conv a reçu le dernier prompt
+//     (repli du surlignage seulement — le surlignage suit l'onglet sélectionné)
 //
 // Réactif : fs.watch sur les deux dossiers → push instantané, AUCUN poll 5 min
 // pour l'état (le poll réseau ne subsiste que pour le quota, dans extension.js).
@@ -21,7 +22,9 @@
 //   engine.getSnapshot();        // { conversations: [...], activeSessionId, generatedAt }
 //   engine.markClosed([ids]);    // onglets fermés → retrait immédiat
 //   engine.dispose();
-//   tabs: () => ({ known: boolean, labels: string[] })  — union de toutes les fenêtres
+//   tabs: () => ({ known: boolean, labels: string[], activeLabel: string|null })
+//         — union de toutes les fenêtres ; activeLabel = onglet Claude
+//           sélectionné dans CETTE fenêtre (surlignage par fenêtre)
 //
 // Une conversation du snapshot :
 //   { sessionId, title, state, acked, since, busySince, model, modelId,
@@ -369,10 +372,28 @@ function buildSnapshot(opts, readTranscript) {
       modelId: (t && t.modelId) || null,
       ctx: (t && t.ctx) || null,
       message: state === 'waiting' && c.entry ? (c.entry.message || null) : null,
-      isActive: c.sessionId === activeSessionId,
+      isActive: false,
       transcript: c.transcript,
       mtime: c.mtime,
     });
+  }
+
+  // Surlignage « conversation courante » = la conv dont l'ONGLET est sélectionné
+  // dans cette fenêtre (tabs.activeLabel, mémorisé par tabs.js). Avant le
+  // 2026-07-19 il suivait active-session.json — la conv du DERNIER PROMPT
+  // SOUMIS — et ne bougeait donc jamais au clic sur un onglet. Ce fichier ne
+  // sert plus que de repli quand la fenêtre n'a encore jamais eu d'onglet Claude
+  // sélectionné (fenêtre fraîche, panneau seul). Un activeLabel qui ne matche
+  // AUCUNE conv listée (titre renommé onglet inactif, conv hors maxItems) ne se
+  // rabat PAS sur le repli : aucun surlignage vaut mieux qu'un surlignage faux.
+  // findIndex = premier match dans l'ordre du tri (le plus récemment actif),
+  // même arbitrage d'ambiguïté de préfixe tronqué que focus.js.
+  const activeLabel = (tabs && tabs.activeLabel) || null;
+  if (activeLabel) {
+    const i = conversations.findIndex((c) => labelMatches(activeLabel, c.title));
+    if (i >= 0) conversations[i].isActive = true;
+  } else {
+    for (const c of conversations) c.isActive = c.sessionId === activeSessionId;
   }
 
   // Déjà trié (plus récemment actif en tête) et borné à maxItems ci-dessus.

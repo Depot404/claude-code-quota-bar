@@ -15,7 +15,7 @@ const vscode = require('vscode');
 //       ctx: { pct, tokens, denom } | null,
 //       state: 'busy'|'waiting'|'done'|'stale'|'idle',
 //       acked: boolean,       // ✓ déjà lu (onglet consulté après la fin du tour)
-//       active: boolean,      // conv où le dernier prompt a été soumis
+//       active: boolean,      // conv de l'onglet sélectionné dans cette fenêtre
 //     }],
 //     quota: {
 //       windows: [{

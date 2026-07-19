@@ -57,6 +57,18 @@ function localLabels() {
   try { return claudeTabLabels(vscode.window.tabGroups.all); } catch { return []; }
 }
 
+// Libellé de l'onglet Claude ACTIF (onglet actif du groupe actif de CETTE
+// fenêtre), ou null si l'onglet actif n'est pas une conversation Claude.
+// Même définition que l'ack (ack.js) : ailleurs = simplement affiché, pas
+// sélectionné.
+function localActiveLabel() {
+  try {
+    const group = vscode.window.tabGroups.activeTabGroup;
+    const tab = group && group.activeTab;
+    return tab && isClaudeTab(tab) && tab.label ? tab.label : null;
+  } catch { return null; }
+}
+
 // process.kill(pid, 0) ne tue rien : il teste l'existence. EPERM = le process
 // existe mais ne nous appartient pas → vivant (cas d'une autre session Windows).
 function pidAlive(pid) {
@@ -111,6 +123,21 @@ function createTabTracker(handlers = {}) {
   const pendingClosed = new Set();
   let confirmTimer = null;
 
+  // Dernier onglet Claude SÉLECTIONNÉ dans cette fenêtre — c'est lui que le
+  // panneau surligne (state.js). On MÉMORISE plutôt que de lire à la volée :
+  // basculer sur un onglet fichier ne doit pas éteindre le surlignage — la
+  // « conversation courante » reste la dernière visitée. Le libellé se rafraîchit
+  // aussi sur `changed` (bascule prompt → ai-title pendant que l'onglet est
+  // actif), sinon il ne matcherait plus aucun titre après renommage.
+  let lastActiveLabel = localActiveLabel();
+
+  function refreshActiveLabel() {
+    const l = localActiveLabel();
+    if (!l || l === lastActiveLabel) return false;
+    lastActiveLabel = l;
+    return true;
+  }
+
   publish(localLabels());
 
   function allLabels() {
@@ -143,6 +170,7 @@ function createTabTracker(handlers = {}) {
     // republication, l'union resterait sur l'ancien libellé et la conv
     // paraîtrait sans onglet.
     publish(localLabels());
+    refreshActiveLabel();
 
     for (const t of (e && e.closed) || []) {
       if (isClaudeTab(t) && t.label) pendingClosed.add(t.label);
@@ -152,6 +180,19 @@ function createTabTracker(handlers = {}) {
     }
     onChange();
   });
+
+  // Basculer d'un GROUPE d'éditeurs à l'autre change l'onglet actif de la
+  // fenêtre sans émettre onDidChangeTabs (seul onDidChangeTabGroups tire,
+  // cf. TabGroupChangeEvent.changed « e.g. have changed their active state »).
+  // API absente d'une version → subscription vide, le surlignage rate juste
+  // les bascules de groupe.
+  let groupSub = { dispose() {} };
+  try {
+    groupSub = vscode.window.tabGroups.onDidChangeTabGroups(() => {
+      if (disposed) return;
+      if (refreshActiveLabel()) onChange();
+    }) || groupSub;
+  } catch {}
 
   // Les autres fenêtres republient sur leurs propres changements d'onglets :
   // il faut recomputer ici aussi, sinon une conv rouverte ailleurs resterait
@@ -165,13 +206,16 @@ function createTabTracker(handlers = {}) {
   return {
     // Contrat consommé par state.js (buildSnapshot) : `known` dit si l'on sait
     // quelque chose des onglets. À false, AUCUNE conv n'est masquée.
+    // `activeLabel` : dernier onglet Claude sélectionné ICI (le surlignage est
+    // par fenêtre — chaque instance surligne ce que SA fenêtre regarde).
     getTabs() {
-      return { known: !disposed, labels: allLabels() };
+      return { known: !disposed, labels: allLabels(), activeLabel: disposed ? null : lastActiveLabel };
     },
     dispose() {
       disposed = true;
       clearTimeout(confirmTimer);
       try { sub.dispose(); } catch {}
+      try { groupSub.dispose(); } catch {}
       try { if (watcher) watcher.close(); } catch {}
       // Notre fenêtre s'en va : ses onglets ne doivent plus compter dans l'union
       // des autres. En cas de crash, otherLabels() nettoie via pidAlive().

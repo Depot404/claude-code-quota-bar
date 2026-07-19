@@ -66,7 +66,7 @@ The denominator (200k vs 1M) is **auto-detected** by `hooks/model-id.js`, most-c
 
 - `~/.claude/sessions-state.json` — state written by hooks (below)
 - `~/.claude/projects/<workspace>/*.jsonl` — real model, `ctx:%`, title, activity (`mtime`)
-- `~/.claude/active-session.json` — which conversation received the last prompt
+- `~/.claude/active-session.json` — which conversation received the last prompt (model display; also the highlight's fallback when the window never had a Claude tab selected — the highlighted row otherwise follows the currently selected tab, per window)
 
 Reactive by design: `fs.watch` on both directories → instant push. **No 5-minute poll for state** (the poll only survives for the network quota).
 

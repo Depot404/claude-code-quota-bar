@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.13.0] - 2026-07-19
+
+### Fixed
+- **The highlighted conversation now follows the selected tab.** The highlight was driven by `~/.claude/active-session.json` — the conversation that last *received a prompt* — so clicking another Claude tab (in the editor, or via the panel itself) never moved it, and it routinely sat on the wrong row. The tab tracker now remembers the last selected Claude tab of each window (`onDidChangeTabs` for switches inside a group, `onDidChangeTabGroups` for switches between groups) and the snapshot highlights the matching conversation instead. Selecting a non-Claude tab (a file) keeps the last conversation highlighted rather than clearing it. `active-session.json` survives only as a fallback for a window where no Claude tab was ever selected; an active tab whose label matches no listed conversation highlights nothing rather than falling back to a wrong row. The highlight is per-window — each window's panel shows what *that* window is looking at.
+
 ## [2.12.7] - 2026-07-17
 
 ### Changed

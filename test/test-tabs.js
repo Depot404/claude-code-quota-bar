@@ -15,11 +15,14 @@ fs.mkdirSync(path.join(SANDBOX, '.claude'), { recursive: true });
 
 let GROUPS = [];
 let onDidChangeTabs = null;
+let onDidChangeTabGroups = null;
 const stub = {
   window: {
     tabGroups: {
       get all() { return GROUPS; },
+      get activeTabGroup() { return GROUPS.find((g) => g.isActive) || null; },
       onDidChangeTabs: (cb) => { onDidChangeTabs = cb; return { dispose() { onDidChangeTabs = null; } }; },
+      onDidChangeTabGroups: (cb) => { onDidChangeTabGroups = cb; return { dispose() { onDidChangeTabGroups = null; } }; },
     },
   },
 };
@@ -139,11 +142,40 @@ async function run() {
     !labels.includes('Onglet de la fenêtre B'), JSON.stringify(labels));
   check('son fichier résiduel est supprimé', !fs.existsSync(childFile));
 
-  console.log('\n6. dispose');
+  console.log('\n6. Onglet actif → activeLabel (surlignage du panneau)');
+  check('aucun onglet Claude jamais sélectionné → activeLabel null',
+    tracker.getTabs().activeLabel === null, String(tracker.getTabs().activeLabel));
+
+  // Sélection d'un onglet Claude (bascule de groupe : seul onDidChangeTabGroups tire).
+  let changesBefore = changes;
+  const tabA = claude('Conv A sélectionnée');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabA, tabs: [tabA] }];
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('activeLabel suit l\'onglet Claude sélectionné',
+    tracker.getTabs().activeLabel === 'Conv A sélectionnée', String(tracker.getTabs().activeLabel));
+  check('changement d\'onglet actif → onChange (le panneau se rafraîchit)', changes > changesBefore);
+
+  // Bascule d'onglet DANS le groupe : onDidChangeTabs `changed`.
+  const tabB = claude('Conv B sélectionnée');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabB, tabs: [tabA, tabB] }];
+  onDidChangeTabs({ opened: [], closed: [], changed: [tabB] });
+  check('bascule dans le groupe (onDidChangeTabs) → activeLabel mis à jour',
+    tracker.getTabs().activeLabel === 'Conv B sélectionnée', String(tracker.getTabs().activeLabel));
+
+  // Sélection d'un onglet NON-Claude : le dernier onglet Claude reste mémorisé
+  // (basculer sur un fichier ne doit pas éteindre le surlignage).
+  const tabFile = other('README.md');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabFile, tabs: [tabA, tabB, tabFile] }];
+  onDidChangeTabs({ opened: [], closed: [], changed: [tabFile] });
+  check('onglet fichier sélectionné → le dernier onglet Claude reste mémorisé',
+    tracker.getTabs().activeLabel === 'Conv B sélectionnée', String(tracker.getTabs().activeLabel));
+
+  console.log('\n7. dispose');
   tracker.dispose();
   check('notre fichier est retiré (nos onglets ne comptent plus ailleurs)',
     !fs.existsSync(tabsMod.OWN_FILE));
   check('après dispose, known:false → plus aucun masquage', tracker.getTabs().known === false);
+  check('après dispose, activeLabel null', tracker.getTabs().activeLabel === null);
 
   try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
   console.log(`\n${pass} ok, ${fail} fail`);
