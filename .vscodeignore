@@ -16,6 +16,12 @@ PUBLISH.md
 CLAUDE.md
 PLAN_*.md
 Publish.ps1
+
+# Captures d ecran de la procedure d upload (publish-vsix-marketplace.mjs) :
+# elles montrent le back-office Marketplace de l editeur - nom, adresse mail,
+# chiffres d installation. Deposees dans ce dossier par un run du 2026-07-22,
+# elles se sont retrouvees DANS le .vsix (188 -> 283 Ko) a un clic de l upload.
+mkt-*.png
 .git/**
 .gitignore
 .github/**
