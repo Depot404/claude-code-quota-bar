@@ -1,6 +1,6 @@
 {
   "name": "claude-code-quota-bar",
-  "displayName": "Claude Convs ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Conversations & Quota Panel",
+  "displayName": "Claude Convs ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Conversations & Quota Panel",
   "description": "See which Claude Code conversations are working, click to jump to the right VS Code window, and hear when Claude needs you. Plus 5h/7d/scoped quota bars coloured by projected burn-rate pace, not just %used. Unofficial, Windows-only.",
   "version": "2.16.0",
   "publisher": "AnthonyDame",
@@ -98,7 +98,7 @@
           "type": "number",
           "default": 0.85,
           "minimum": 0,
-          "description": "Burn-rate pace (percent used divided by percent of window elapsed) at or below which a quota bar is coloured green ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the projected end-of-window usage is comfortably under the quota."
+          "description": "Burn-rate pace (percent used divided by percent of window elapsed) at or below which a quota bar is coloured green ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â the projected end-of-window usage is comfortably under the quota."
         },
         "claudeCodeQuotaBar.burnRateYellowMax": {
           "type": "number",
@@ -109,7 +109,7 @@
         "claudeCodeQuotaBar.sounds.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here."
+          "description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here."
         },
         "claudeCodeQuotaBar.braveUserDataDir": {
           "type": "string",
