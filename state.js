@@ -36,7 +36,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
-const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool } = require('./hooks/transcript.js');
+const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool, wasInterrupted } = require('./hooks/transcript.js');
 const { labelMatches } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 
@@ -211,6 +211,20 @@ function isGone(c, tabs, closedAt) {
 function createTranscriptReader() {
   const cache = new Map();
   const titleScans = new Map();
+  // Dernier état assistant connu par fichier (modèle + ctx), CONSERVÉ à travers
+  // les recomputes — comme titleScans, contrairement au cache (mtime,size)
+  // jetable ci-dessus. extractLastAssistant ne lit que TAIL_BYTES (64 Ko) : un
+  // seul tool_result géant en queue (screenshot base64, gros fichier lu, longue
+  // sortie de commande) tient sur une ligne > 64 Ko et pousse le dernier message
+  // assistant hors de la fenêtre → extractLastAssistant rend null, et le modèle
+  // ET le ctx% disparaissaient du panneau (« — » intermittent, signalé
+  // 2026-07-22 : « finit par s'afficher au bout d'un moment », c.-à-d. quand un
+  // assistant repasse dans la fenêtre). On réaffiche alors le dernier connu :
+  // jamais faux (le modèle d'une session ne change pas), ctx% éventuellement un
+  // peu ancien — préférable à un blanc clignotant. La toute première ouverture
+  // (aucun assistant encore écrit) reste « — » quelques secondes : rien à
+  // mémoriser tant que le premier tour n'a pas produit de réponse.
+  const lastAssistant = new Map();
   return function read(filePath) {
     let stat;
     try { stat = fs.statSync(filePath); } catch { return null; }
@@ -218,9 +232,10 @@ function createTranscriptReader() {
     const hit = cache.get(filePath);
     if (hit && hit.key === key) return hit.value;
 
-    let value = { title: null, titleSource: null, modelId: null, model: null, ctx: null, mtime: stat.mtimeMs, pendingInteractive: false };
+    let value = { title: null, titleSource: null, modelId: null, model: null, ctx: null, mtime: stat.mtimeMs, pendingInteractive: false, interrupted: false };
     try {
       value.pendingInteractive = hasPendingInteractiveTool(filePath);
+      value.interrupted = wasInterrupted(filePath);
       const last = extractLastAssistant(filePath);
       if (last) {
         value.modelId = last.modelId;
@@ -230,6 +245,12 @@ function createTranscriptReader() {
           const denom = detectContextWindow(last.modelId, tokens);
           value.ctx = { tokens, denom, pct: Math.min(100, (tokens / denom) * 100) };
         }
+        lastAssistant.set(filePath, { modelId: value.modelId, model: value.model, ctx: value.ctx });
+      } else {
+        // Dernier assistant hors des 64 Ko (gros tool_result en queue) : garder
+        // l'affichage précédent plutôt que l'effacer.
+        const prev = lastAssistant.get(filePath);
+        if (prev) { value.modelId = prev.modelId; value.model = prev.model; value.ctx = prev.ctx; }
       }
       let titleState = titleScans.get(filePath);
       if (!titleState) {
@@ -343,14 +364,23 @@ function buildSnapshot(opts, readTranscript) {
     if (conversations.length >= maxItems) break;
     const t = c.transcript ? readTranscript(c.transcript) : null;
     let state = effectiveState(c.entry, c.mtime, now);
-    // Lot 11 : AskUserQuestion/ExitPlanMode ne déclenchent AUCUN hook — sans ce
-    // détour par le transcript, la conv reste affichée `busy` (voire `stale`
-    // après STALE_MS si la réponse tarde) jusqu'au hook Notification
-    // `idle_prompt`, qui ne tire qu'après 60 s d'inactivité fixes. Prioritaire
-    // sur `busy`/reprise-transcript ; ne s'applique qu'aux sessions posées
-    // `busy` par les hooks — un `waiting` (permission) ou `done` (déjà fini)
-    // n'a pas besoin de ce détour et ne doit pas être perturbé par lui.
-    if (c.entry && c.entry.state === 'busy' && t && t.pendingInteractive) state = 'waiting';
+    // Interruption manuelle (bouton Stop / Échap) : aucun hook ne tire (by
+    // design, anthropics/claude-code#45289), donc l'entrée reste `busy` — le
+    // transcript est seul à savoir (wasInterrupted). Prioritaire sur le détour
+    // interactif ci-dessous (le dernier message n'est plus un tool_use en
+    // attente mais l'interruption elle-même) ET sur le vieillissement
+    // busy→stale : on retombe `idle` tout de suite, fin du spinner qui tournait
+    // jusqu'à STALE_MS (5 min) dans le vide. `idle` et pas `done` : l'user vient
+    // de couper lui-même, il regarde déjà la conv — aucun ✓ vif « va voir » à
+    // armer, et aucun son (onTransition n'émet que sur done/waiting).
+    //
+    // Lot 11 : AskUserQuestion/ExitPlanMode ne déclenchent AUCUN hook non plus —
+    // sans ce détour, la conv reste `busy` (voire `stale` après STALE_MS) jusqu'au
+    // hook Notification `idle_prompt`, qui ne tire qu'après 60 s fixes. Ne
+    // s'applique qu'aux sessions posées `busy` par les hooks — un `waiting`
+    // (permission) ou `done` (déjà fini) ne doit pas être perturbé.
+    if (c.entry && c.entry.state === 'busy' && t && t.interrupted) state = 'idle';
+    else if (c.entry && c.entry.state === 'busy' && t && t.pendingInteractive) state = 'waiting';
     const title = (t && t.title) || 'Conversation';
     const gone = isGone(
       { sessionId: c.sessionId, title, titleSource: t && t.titleSource, state, mtime: c.mtime },

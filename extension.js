@@ -71,6 +71,14 @@ const NO_HOOKS_SOUNDS_PROMPT_DISMISSED_KEY = 'soundsNoHooksPromptDismissed';
 // pour rien (cf. plan lot 9, point 4).
 let lastConvStates = new Map();
 let lastEventFetchAt = 0;
+// Circuit breaker de la voie cookie : quand refreshSessionKeyViaCdp échoue
+// (cas le plus courant : le profil Brave n'est PAS loggué claude.ai, donc aucun
+// sessionKey à en extraire — constaté 2026-07-22), relancer Brave à chaque fetch
+// est du pur gaspillage (le refresh rééchouera à l'identique). On retombe sur
+// OAuth et on ne retente le spawn qu'après ce délai. Un Refresh manuel (force)
+// court-circuite le breaker — l'utilisateur vient peut-être de se logger.
+let cookieRefreshBlockedUntil = 0;
+const COOKIE_REFRESH_BACKOFF_MS = 60 * 60 * 1000;
 // Couture de test (comme CLAUDE_QUOTA_PANEL_DEMO) : un banc ne peut pas
 // attendre 45 s en conditions réelles pour prouver le throttle.
 const EVENT_FETCH_THROTTLE_MS = Number(process.env.CLAUDE_QUOTA_EVENT_FETCH_THROTTLE_MS) || 45 * 1000;
@@ -293,13 +301,20 @@ async function fetchAndUpdate(force = false) {
     // braveUserDataDir vide (défaut marketplace, lot 2 §1) : pas de profil
     // Brave à lire → on saute la voie cookie sans tenter de spawn ni logguer
     // quoi que ce soit, direct au fallback OAuth ci-dessous.
-    if (getConfig().braveUserDataDir && /no cached sessionKey|session_invalid|HTTP 40[13]|no org_id/.test(e.message)) {
+    // `force` (Refresh manuel) court-circuite le circuit breaker ci-dessous.
+    if (getConfig().braveUserDataDir && (force || Date.now() >= cookieRefreshBlockedUntil)
+        && /no cached sessionKey|session_invalid|HTTP 40[13]|no org_id/.test(e.message)) {
       try {
         await refreshSessionKeyViaCdp();
         data = await fetchUsageWithSessionKey();
         source = 'cookie-refreshed';
+        cookieRefreshBlockedUntil = 0;   // succès → breaker réarmé
       } catch (e2) {
         cookieErr = e2;
+        // Échec (profil non loggué, Brave qui ne démarre pas…) : ne pas
+        // respawner Brave à chaque fetch — on retombe sur OAuth et on ferme le
+        // breaker pour COOKIE_REFRESH_BACKOFF_MS.
+        cookieRefreshBlockedUntil = Date.now() + COOKIE_REFRESH_BACKOFF_MS;
       }
     }
   }
@@ -773,10 +788,19 @@ function startOctopusBrave(userDataDir) {
     `--remote-debugging-port=${CDP_PORT}`,
     `--user-data-dir=${userDataDir}`,
     `--profile-directory=Default`,
+    // Démarre SANS fenêtre : le process et son endpoint CDP vivent, mais aucune
+    // fenêtre « Nouvel onglet – Brave » n'apparaît — donc plus de vol de focus
+    // (mesuré 2026-07-22 : sans ce flag, la fenêtre Brave capte le foreground
+    // ~230 ms à chaque spawn, ce qui coupait l'utilisateur en pleine frappe à
+    // chaque question/fin de tour, cf. maybeFetchOnTransition). Storage.getCookies
+    // est browser-level et fonctionne sans fenêtre (vérifié : 122 cookies lus).
+    '--no-startup-window',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-default-apps',
     '--disable-features=ChromeWhatsNewUI',
+    // Filet si --no-startup-window venait à ne pas s'appliquer : la fenêtre
+    // éventuelle reste hors écran.
     '--window-position=-32000,-32000',
     '--window-size=1280,900',
   ];

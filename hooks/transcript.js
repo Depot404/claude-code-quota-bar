@@ -264,8 +264,38 @@ function hasPendingInteractiveTool(filePath) {
   return true;
 }
 
+// Interruption manuelle (bouton Stop / Échap) : Claude Code écrit un message
+// user « [Request interrupted by user…] » dans le transcript mais ne déclenche
+// AUCUN hook — le hook Stop ne tire pas sur interruption, by design
+// (anthropics/claude-code#45289 ; hooks reference). Sans ce détour, l'entrée
+// d'état posée `busy` par UserPromptSubmit n'est jamais corrigée : le spinner
+// tourne jusqu'à STALE_MS (5 min) dans le vide, puis bascule zombie. Même
+// principe que hasPendingInteractiveTool : les hooks disent ce qui s'est passé,
+// le transcript dit ce qui se passe. Deux formes observées sur transcripts
+// réels : « [Request interrupted by user] » et « … by user for tool use] ».
+const INTERRUPT_RE = /^\s*\[Request interrupted by user/;
+
+// Le DERNIER message conversationnel du transcript est-il une interruption user
+// encore « à vif » (aucun tour assistant repris derrière) ? On saute les lignes
+// non conversationnelles que le CLI intercale après coup (queue-operation,
+// ai-title, last-prompt, attachment) : seul un vrai message user/assistant
+// tranche. Un assistant plus récent = le travail a repris → pas interrompu. Un
+// message user isMeta (contexte injecté par un hook) n'est pas une reprise → on
+// continue de remonter vers le dernier message user réel.
+function wasInterrupted(filePath) {
+  const entries = parseSlice(readSlice(filePath, TAIL_BYTES, 'tail'));
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.type !== 'user' && e.type !== 'assistant') continue;
+    if (e.type === 'assistant') return false;
+    if (e.isMeta) continue;
+    return INTERRUPT_RE.test(firstTextBlock(e.message && e.message.content) || '');
+  }
+  return false;
+}
+
 module.exports = {
   readSlice, parseSlice, usageTokens, extractLastAssistant, extractTitleInfo,
   scanAiTitleIncremental, cleanTitle, TITLE_MAX,
-  hasPendingInteractiveTool, INTERACTIVE_TOOLS,
+  hasPendingInteractiveTool, wasInterrupted, INTERACTIVE_TOOLS,
 };

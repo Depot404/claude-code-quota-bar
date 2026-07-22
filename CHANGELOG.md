@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.1] - 2026-07-22
+
+### Fixed
+- **The spinner no longer keeps turning after you interrupt a conversation.** Pressing Stop (or Esc) fires no hook at all — the Stop hook does not run on a user interrupt, by design (anthropics/claude-code#45289) — so the `busy` state set by `UserPromptSubmit` was never cleared and the conversation kept spinning until it aged into `stale` after 5 minutes. The state engine now reads the interruption straight from the transcript (the `[Request interrupted by user…]` user message Claude Code writes there) and drops the row to `idle` at once, the same way it already reads `AskUserQuestion`/`ExitPlanMode`. It flips back to `busy` on its own as soon as you send the next prompt.
+- **The model name no longer blanks out to `—` mid-conversation.** The last-assistant lookup only reads the final 64 KB of the transcript; a single oversized `tool_result` in the tail (a base64 screenshot, a large file read, a long command output) pushes the last assistant message out of that window, and both the model and the ctx% vanished until an assistant message came back into range. The reader now remembers the last known model/ctx per conversation and keeps showing it instead of clearing it. (The very first moment of a brand-new conversation, before any assistant reply exists, still shows `—` for a second or two — there is nothing to remember yet.)
+- **Opening a question no longer steals your keyboard focus.** When a conversation turned to `waiting`/`done`, the event-driven quota refresh would, if the cached claude.ai cookie was stale, launch Brave to re-extract it — and a spawning browser window grabs the foreground for ~230 ms (measured), cutting you off mid-typing. Brave is now started with `--no-startup-window`: the process and its DevTools endpoint come up with no window at all (cookie extraction is browser-level and works without one — verified), so nothing takes the foreground. A circuit breaker also stops re-launching Brave on every fetch when the refresh keeps failing (e.g. the configured Brave profile isn't logged into claude.ai): it falls back to the OAuth token and only retries the browser path after an hour, or immediately on a manual **Refresh**.
+
 ## [2.13.0] - 2026-07-19
 
 ### Fixed
