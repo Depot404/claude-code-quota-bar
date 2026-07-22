@@ -369,17 +369,29 @@ function buildSnapshot(opts, readTranscript) {
     // transcript est seul à savoir (wasInterrupted). Prioritaire sur le détour
     // interactif ci-dessous (le dernier message n'est plus un tool_use en
     // attente mais l'interruption elle-même) ET sur le vieillissement
-    // busy→stale : on retombe `idle` tout de suite, fin du spinner qui tournait
-    // jusqu'à STALE_MS (5 min) dans le vide. `idle` et pas `done` : l'user vient
-    // de couper lui-même, il regarde déjà la conv — aucun ✓ vif « va voir » à
-    // armer, et aucun son (onTransition n'émet que sur done/waiting).
+    // busy→stale : on retombe tout de suite dans un état de repos, fin du
+    // spinner qui tournait jusqu'à STALE_MS (5 min) dans le vide. Surtout pas
+    // `done` : l'user vient de couper lui-même, il regarde déjà la conv — aucun
+    // ✓ vif « va voir » à armer, et aucun son (onTransition n'émet que sur
+    // done/waiting).
+    //
+    // ÉTAT PROPRE `interrupted` (2026-07-22) — c'était `idle` jusque-là, donc
+    // rendu par le même ✓ vert pâle que « rien en cours ». Or les deux disent
+    // l'inverse l'un de l'autre : le ✓ pâle veut dire « rien à faire ici », une
+    // interruption veut dire « travail inachevé, tu voulais y revenir » — c'est
+    // justement la conv qu'on cherche dans la liste 20 min plus tard. Aucun
+    // consommateur de `state` ne teste `idle` (sons, ack, canari, isGone ne
+    // regardent que busy/waiting/done), donc un état à part se comporte
+    // exactement comme `idle` partout ailleurs et ne change QUE le rendu.
+    // Il s'efface tout seul à la reprise : `wasInterrupted` redevient faux dès
+    // qu'un vrai prompt ou une réponse assistant suit le marqueur.
     //
     // Lot 11 : AskUserQuestion/ExitPlanMode ne déclenchent AUCUN hook non plus —
     // sans ce détour, la conv reste `busy` (voire `stale` après STALE_MS) jusqu'au
     // hook Notification `idle_prompt`, qui ne tire qu'après 60 s fixes. Ne
     // s'applique qu'aux sessions posées `busy` par les hooks — un `waiting`
     // (permission) ou `done` (déjà fini) ne doit pas être perturbé.
-    if (c.entry && c.entry.state === 'busy' && t && t.interrupted) state = 'idle';
+    if (c.entry && c.entry.state === 'busy' && t && t.interrupted) state = 'interrupted';
     else if (c.entry && c.entry.state === 'busy' && t && t.pendingInteractive) state = 'waiting';
     const title = (t && t.title) || 'Conversation';
     const gone = isGone(

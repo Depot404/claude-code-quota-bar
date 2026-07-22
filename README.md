@@ -78,9 +78,12 @@ Reactive by design: `fs.watch` on both directories → instant push. **No 5-minu
 | `waiting` | **?** | Hands you back control: a question was asked, a permission prompt, an elicitation dialog, or 60 s of silence. One visual state for all three — see below |
 | `done` | **bright ✓** / dim ✓ | Finished replying (`Stop`). Bright until you've actually read it — see [Read receipts](#read-receipts) |
 | `stale` | dashed circle | Claimed `busy` but the transcript has been silent for 5+ min → zombie (crash, killed process, VS Code closed without `SessionEnd`). **Display only — nothing is ever killed.** |
+| `interrupted` | hollow square | You stopped it yourself (Stop button / Esc) mid-turn. Read from the transcript, since no hook fires on an interrupt ([#45289](https://github.com/anthropics/claude-code/issues/45289)). Clears itself on your next prompt |
 | `idle` | dim ✓ | No hook state at all (conversation older than the hooks). Nothing to read |
 
 There is no grey dot: a conversation that is simply finished shows a dim ✓, not a "this was pointless" pellet.
+
+An interruption gets its own shape rather than a shade of the ✓, because it means the opposite: a dim ✓ says "nothing to do here", while a stopped conversation is *unfinished work you meant to come back to* — the row you go looking for twenty minutes later.
 
 A conversation is only listed while its tab is open somewhere — see [When a conversation disappears](#when-a-conversation-disappears).
 
@@ -96,13 +99,14 @@ Three corrections are applied on read, because the hooks alone can't express the
 The ✓ of a finished conversation stays **bright until you have actually looked at it**, and only then dims. It never expires on a timer.
 
 - **Read** = the matching tab is *active* **and** the window has focus, held for ~2 s (`ack.js`). The dwell rejects a `Ctrl+Tab` passing through, and the neighbouring tab that VS Code auto-activates when you close one.
-- It also covers arriving on the tab **while Claude is still working**, then staying there through the `Stop` — no tab switch will happen at that point, so it's the arrival of `Stop` that goes and asks whether a dwell is already underway.
+- **The 2 s run after the turn ends**, never before: being parked on the tab while Claude works proves nothing about a result that isn't written yet. It does cover arriving on the tab **while Claude is still working** and staying there past the `Stop` — no tab switch happens at that point, so the extension schedules its own re-check once the threshold is due.
+- **A visit is identified by the tab, not by its label.** The official Claude Code extension rewrites the tab at the end of every turn (`rename_tab`: new title, `claude-logo-done.svg` icon). Keying on the label made that rewrite look like a fresh arrival — the ✓ dimmed itself ~2 s after every `Stop`, and the fake visit's start time even laundered the strict rule below. `ack.js` now compares the `Tab` object (falling back to its column#index position); the label is only a caption, refreshed in place.
 - **Strict: only an *observed* act counts** (2026-07-15 incident: a tab left active for an hour while you worked elsewhere in the *same* window, still satisfied "active + focused + 2 s", dimmed the ✓ of a reply nobody had looked at). A dwell only counts if it **started after this run's `busy_since`** — coming to watch it work is an observed act, "I was already there before I even launched it" no longer is. `ack.js` can't tell the difference on its own (it only sees an uninterrupted dwell, not when it began relative to the run); `extension.js` compares the dwell's start to the conversation's `busySince`. A false "unread" is acceptable; a false "read" is not.
 - **Clicking the row in the panel is an explicit read receipt**, unconditionally — even if the tab is already active. That's the one case where no tab switch can ever happen (single-tab workflow), so it's the escape hatch: without it, a conversation you only ever view through the panel could never dim.
 - Persisted as `ack_ts` in `sessions-state.json`, so it survives a restart, and a read in one window dims the ✓ in all the others (they all watch that file). The extension is the *second* writer of that file, hence the shared lock in `hooks/sessions-state.js` — never a hand-rolled write.
 - A new `Stop` re-arms the bright ✓ on its own: the state's timestamp simply moves back ahead of `ack_ts`.
 
-Earlier versions faded the ✓ after 30 min. An arbitrary delay knows nothing about you: it erased the ✓ of a result you never read, and kept bright one you'd read 29 minutes ago. A later version acknowledged any dwell in progress at `Stop`, regardless of when it started — the incident above.
+Earlier versions faded the ✓ after 30 min. An arbitrary delay knows nothing about you: it erased the ✓ of a result you never read, and kept bright one you'd read 29 minutes ago. A later version acknowledged any dwell in progress at `Stop`, regardless of when it started — the incident above. The version after that still keyed the dwell on the tab's label, so the official extension's end-of-turn `rename_tab` fabricated a visit and dimmed the ✓ by itself — visible as an ack timestamp landing a constant `done + 2266 ms`.
 
 ### When a conversation disappears
 

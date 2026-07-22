@@ -100,6 +100,7 @@ const STATE = {
     { id: 'c3', title: 'Terminée déjà lue', model: 'Sonnet 5', ctx: { pct: 12 }, state: 'done', acked: true, active: false },
     { id: 'c4', title: 'Sans état hooks', model: null, ctx: null, state: 'idle', acked: true, active: false },
     { id: 'c5', title: 'Attend une réponse', model: 'Haiku 4.5', ctx: { pct: 8 }, state: 'waiting', acked: true, active: false },
+    { id: 'c6', title: 'Coupée au clavier', model: 'Opus 4.8', ctx: { pct: 41 }, state: 'interrupted', acked: true, active: false },
   ],
   quota: {
     windows: [
@@ -227,7 +228,7 @@ async function run() {
     await sleep(120);
 
     console.log('\n1. Rendu des états');
-    check('une ligne par conversation', await cdp.evaluate(`document.querySelectorAll('.conv').length`) === 5);
+    check('une ligne par conversation', await cdp.evaluate(`document.querySelectorAll('.conv').length`) === 6);
     check('la conv au travail porte l\'arc animé',
       await cdp.evaluate(`document.querySelectorAll('.ico-busy').length`) === 1);
     check('plus AUCUNE pastille grise « idle » dans le panneau',
@@ -245,6 +246,22 @@ async function run() {
       waitIco.content.replace(/"/g, '') === '?' && waitIco.cls.includes('ico-waiting'), JSON.stringify(waitIco));
     check('pas d\'animation sur l\'icône waiting (contrairement au spinner busy)',
       waitIco.anims === 0, JSON.stringify(waitIco));
+
+    // Une interruption ne doit RIEN partager avec le ✓ : ni le glyphe, ni la
+    // couleur verte. Le carré creux muted est le seul état qui dit « inachevé ».
+    console.log('\n1c. Carré « stop » pour interrupted');
+    const intIco = await cdp.evaluate(`(() => {
+      const i = document.querySelectorAll('.conv')[5].querySelector('.ico');
+      const cs = getComputedStyle(i);
+      return { text: i.textContent, cls: i.className, radius: cs.borderTopLeftRadius,
+               style: cs.borderTopStyle, tip: document.querySelectorAll('.conv')[5].title };
+    })()`);
+    check('interrupted rendu en carré (classe dédiée, aucun ✓ dans la pastille)',
+      intIco.cls.includes('ico-interrupted') && intIco.text === '', JSON.stringify(intIco));
+    check('trait plein et angles droits — ni le ✓ done, ni le cercle pointillé stale',
+      intIco.style === 'solid' && parseFloat(intIco.radius) <= 2, JSON.stringify(intIco));
+    check('infobulle explicite « unfinished »',
+      /interrupted — unfinished/.test(intIco.tip), JSON.stringify(intIco.tip));
 
     console.log('\n2. Les deux teintes du ✓ (6b)');
     const tints = await cdp.evaluate(`(() => {

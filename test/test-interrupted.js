@@ -71,7 +71,7 @@ console.log('\n6. Texte utilisateur qui PARLE d\'interruption sans en être une 
   check('mention du mot au milieu d\'un prompt ≠ marqueur en tête → false', wasInterrupted(p) === false);
 }
 
-console.log('\n7. Intégration state.js : busy + interruption → snapshot dit idle (fin du spinner)');
+console.log('\n7. Intégration state.js : busy + interruption → snapshot dit interrupted (fin du spinner)');
 {
   const SANDBOX2 = fs.mkdtempSync(path.join(os.tmpdir(), 'qb-int-state-'));
   const realHomedir = os.homedir;
@@ -99,8 +99,12 @@ console.log('\n7. Intégration state.js : busy + interruption → snapshot dit i
 
   const snap = state.buildSnapshot({ workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12 }, state.createTranscriptReader());
   const conv = snap.conversations.find((c) => c.sessionId === sessionId);
-  check('état hooks busy + transcript interrompu → snapshot dit idle (plus busy)',
-    !!conv && conv.state === 'idle', JSON.stringify(conv && conv.state));
+  // État PROPRE, pas `idle` : le panneau doit pouvoir distinguer « rien en
+  // cours » (✓ pâle) de « coupé en plein travail » (carré stop).
+  check('état hooks busy + transcript interrompu → snapshot dit interrupted (plus busy)',
+    !!conv && conv.state === 'interrupted', JSON.stringify(conv && conv.state));
+  check('interrupted ≠ idle : le rendu ne peut pas les confondre',
+    !!conv && conv.state !== 'idle', JSON.stringify(conv && conv.state));
 
   // L'utilisateur relance : nouveau prompt → le travail reprend → busy.
   fs.appendFileSync(transcriptPath, JSON.stringify(userMsg('reprends et corrige')) + '\n');

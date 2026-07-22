@@ -2,7 +2,7 @@
   "name": "claude-code-quota-bar",
   "displayName": "Claude Convs — Conversations & Quota Panel",
   "description": "See which Claude Code conversations are working, click to jump to the right VS Code window, and hear when Claude needs you. Plus 5h/7d/scoped quota bars coloured by projected burn-rate pace, not just %used. Unofficial, Windows-only.",
-  "version": "2.13.1",
+  "version": "2.14.0",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -98,7 +98,7 @@
         },
         "claudeCodeQuotaBar.burnRateYellowMax": {
           "type": "number",
-          "default": 1.0,
+          "default": 1,
           "minimum": 0,
           "description": "Burn-rate pace at or below which a quota bar is coloured yellow instead of red. At the default of 1.0, red means the projected end-of-window usage exceeds 100% of the quota."
         },

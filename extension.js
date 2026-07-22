@@ -10,7 +10,7 @@ const { ClaudePanelProvider } = require('./panel');
 const { createStateEngine, DEFAULTS: STATE_DEFAULTS } = require('./state');
 const { focusConversation, createFocusRelay } = require('./focus');
 const { createTabTracker } = require('./tabs');
-const { createAckTracker } = require('./ack');
+const { createAckTracker, DWELL_MS: ACK_DWELL_MS } = require('./ack');
 const { labelMatches } = require('./labels');
 const { createSoundPlayer } = require('./sounds');
 // Purge d'une conv fermée (lot 5) et accusé de lecture (lot 6). On require la
@@ -44,6 +44,7 @@ let panelProvider;
 let stateEngine;
 let tabTracker;
 let ackTracker;
+let ackRecheckTimer = null;
 let soundPlayer;
 let lastSource = null;
 
@@ -191,7 +192,9 @@ function activate(context) {
   // Accusé de lecture (lot 6) : consulter l'onglet éteint le ✓ vif. Créé avant
   // le moteur, qui l'interroge à chaque snapshot.
   ackTracker = createAckTracker({ onDwell: () => ackConversations() });
-  context.subscriptions.push({ dispose: () => ackTracker.dispose() });
+  context.subscriptions.push({
+    dispose: () => { clearTimeout(ackRecheckTimer); ackRecheckTimer = null; ackTracker.dispose(); },
+  });
 
   stateEngine = createStateEngine({
     workspacePath,
@@ -260,6 +263,8 @@ function restartTimer() {
 
 function deactivate() {
   clearInterval(timer);
+  clearTimeout(ackRecheckTimer);
+  ackRecheckTimer = null;
 }
 
 // `force` (commande Refresh / bouton du panneau, lot 13 §2) court-circuite la
@@ -353,6 +358,7 @@ const DEMO_CONVERSATIONS = [
   { id: 'd4', title: 'Portage web PlanningTP', model: 'Opus 4.8', ctx: { pct: 88, tokens: 880000, denom: 1000000 }, state: 'stale', acked: true, active: false },
   { id: 'd5', title: 'Tri des scans', model: null, ctx: null, state: 'idle', acked: true, active: false },
   { id: 'd6', title: 'Sondage BBQ Cloudflare Pages', model: 'Sonnet 5', ctx: { pct: 22, tokens: 44000, denom: 200000 }, state: 'done', acked: true, active: false },
+  { id: 'd7', title: 'Migration des scripts PowerShell', model: 'Opus 4.8', ctx: { pct: 47, tokens: 470000, denom: 1000000 }, state: 'interrupted', acked: true, active: false },
 ];
 
 // Onglet(s) Claude fermé(s) → les convs correspondantes quittent le panneau.
@@ -393,16 +399,39 @@ function closeConversations(labels) {
 // « j'y étais déjà » ne l'est plus). `busySince` absent (conv d'avant ce lot,
 // ou hooks pas encore redéployés) → on ne peut rien exclure, le doute profite
 // à l'affichage (même logique que `tabs.known:false` au lot 5).
+//
+// LE SEUIL COURT APRÈS LA FIN DU TOUR (2026-07-22) — le lot 10 comparait le
+// séjour au DÉBUT du run (`busySince`) : « être venu regarder travailler »
+// valait donc « avoir lu le résultat », alors que le résultat n'était pas encore
+// écrit. Combiné au `rename_tab` de fin de tour (cf. ack.js), ça posait l'accusé
+// ~2,3 s après le `done` sans le moindre acte de l'utilisateur. Le séjour doit
+// désormais couvrir DWELL_MS ENTIÈREMENT POSTÉRIEURES à `since` — les yeux sur
+// l'onglet pendant que le résultat est à l'écran, pas avant. Le garde-fou
+// `busySince` du lot 10 reste en place par-dessus.
+//
+// Un re-check est programmé quand le seuil n'est pas encore atteint : sans lui,
+// une conv qui finit sous les yeux de l'user ne serait jamais acquittée, faute
+// d'événement ultérieur pour rappeler cette fonction.
 function ackConversations() {
   if (!stateEngine || !ackTracker) return;
-  const label = ackTracker.dwellLabel();
+  clearTimeout(ackRecheckTimer);
+  ackRecheckTimer = null;
+  const label = ackTracker.stayLabel();
   if (!label) return;
   const dwellSince = ackTracker.dwellSince();
+  const now = Date.now();
+  let soonest = Infinity;
   for (const c of stateEngine.getSnapshot().conversations) {
     if (c.state !== 'done' || c.acked) continue;
     if (!labelMatches(label, c.title)) continue;
     if (c.busySince != null && dwellSince != null && dwellSince <= c.busySince) continue;
+    const watchedSince = Math.max(dwellSince || 0, c.since || 0);
+    const remaining = ACK_DWELL_MS - (now - watchedSince);
+    if (remaining > 0) { soonest = Math.min(soonest, remaining); continue; }
     try { updateSession(c.sessionId, { ack_ts: Date.now() }); } catch {}
+  }
+  if (soonest !== Infinity) {
+    ackRecheckTimer = setTimeout(() => { ackRecheckTimer = null; ackConversations(); }, soonest + 20);
   }
 }
 

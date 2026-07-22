@@ -144,7 +144,26 @@ async function dwellTests() {
   check('un événement qui ne change rien ne remet pas le dwell à zéro',
     tracker.dwellLabel() === 'Lot 6 deux teintes du c…');
 
+  // Re-titrage de l'onglet ACTIF par l'extension officielle (`rename_tab` en fin
+  // de tour) : même onglet, libellé neuf. Le séjour doit survivre tel quel — un
+  // séjour qui renaît ici est un accusé de lecture fabriqué par l'outil.
+  const stayBefore = tracker.dwellSince();
+  ACTIVE_TAB.label = 'Lot 6 deux teintes du ch…';
+  emit('tabs');
+  check('rename de l\'onglet actif → le séjour n\'est PAS redémarré',
+    tracker.dwellSince() === stayBefore, `${tracker.dwellSince()} vs ${stayBefore}`);
+  check('… et le libellé suivi est bien le nouveau',
+    tracker.stayLabel() === 'Lot 6 deux teintes du ch…', tracker.stayLabel());
+  check('… le dwell reste acquis, sans attendre à nouveau',
+    tracker.dwellLabel() === 'Lot 6 deux teintes du ch…', tracker.dwellLabel());
+
+  // Un VRAI changement d'onglet, lui, redémarre bien le séjour.
+  ACTIVE_TAB = claudeTab('Refonte du digest ma…'); emit('tabs');
+  check('changement d\'onglet réel → nouveau séjour', tracker.dwellSince() > stayBefore
+    && tracker.dwellLabel() === null, `${tracker.dwellSince()} vs ${stayBefore}`);
+
   tracker.dispose();
+  check('après dispose → plus de séjour suivi', tracker.stayLabel() === null);
   check('après dispose → plus rien n\'est acquitté', tracker.dwellLabel() === null);
 }
 
@@ -171,18 +190,30 @@ async function e2eTests() {
     tickMs: 3600000, debounceMs: 10,
   });
   // Réplique fidèle du câblage d'extension.js (ackConversations +
-  // ackConversationById, lot 10 : ack strict — le séjour ne compte comme acte
-  // observé que s'il a commencé APRÈS busySince du run qui vient de finir).
+  // ackConversationById) : lot 10 — ack strict, le séjour ne compte comme acte
+  // observé que s'il a commencé APRÈS busySince du run qui vient de finir ; et
+  // correctif 2026-07-22 — le seuil de séjour court à partir de la FIN du tour
+  // (`since`), avec re-check programmé quand il n'est pas encore atteint.
+  const ACK_DWELL = 120;
+  let recheck = null;
   function ack() {
-    const label = tracker.dwellLabel();
+    clearTimeout(recheck);
+    recheck = null;
+    const label = tracker.stayLabel();
     if (!label) return;
     const dwellSince = tracker.dwellSince();
+    const now = Date.now();
+    let soonest = Infinity;
     for (const c of engine.getSnapshot().conversations) {
       if (c.state !== 'done' || c.acked) continue;
       if (!labelMatches(label, c.title)) continue;
       if (c.busySince != null && dwellSince != null && dwellSince <= c.busySince) continue;
+      const watchedSince = Math.max(dwellSince || 0, c.since || 0);
+      const remaining = ACK_DWELL - (now - watchedSince);
+      if (remaining > 0) { soonest = Math.min(soonest, remaining); continue; }
       updateSession(c.sessionId, { ack_ts: Date.now() });
     }
+    if (soonest !== Infinity) recheck = setTimeout(() => { recheck = null; ack(); }, soonest + 20);
   }
   function ackById(id) {
     const c = engine.getSnapshot().conversations.find((x) => x.sessionId === id);
@@ -240,7 +271,11 @@ async function e2eTests() {
     `dwellSince=${tracker.dwellSince()} busySince=${busyDuringTs}`);
   ack();
   engine.refresh();
-  check('arrivée sur l\'onglet PENDANT le run (après busySince), tenue jusqu\'au done → ack',
+  check('le done tout juste arrivé ne s\'acquitte PAS instantanément (seuil postérieur au résultat)',
+    conv().acked === false, JSON.stringify(conv()));
+  await sleep(ACK_DWELL + 80);              // le re-check programmé fait le travail
+  engine.refresh();
+  check('arrivée sur l\'onglet PENDANT le run, tenue jusqu\'au done PUIS le seuil → ack',
     conv().acked === true, JSON.stringify(conv()));
 
   // Clic panneau (lot 10, point 1c) : même incident (onglet actif depuis avant
@@ -258,6 +293,39 @@ async function e2eTests() {
   engine.refresh();
   check('… mais le clic sur la ligne acquitte, même onglet déjà actif',
     conv().acked === true, JSON.stringify(conv()));
+
+  // CAS DE L'INCIDENT 2026-07-22 (signalé plusieurs fois : « le ✓ vif passe pâle
+  // tout seul au bout de quelques secondes, sans que j'aie regardé l'onglet »).
+  // L'onglet est actif depuis AVANT le run — la garde du lot 10 doit bloquer.
+  // Puis, à la fin du tour, l'extension Claude officielle réécrit l'onglet
+  // (`rename_tab` : title réaffecté + iconPath → claude-logo-done.svg). Avant le
+  // correctif, cette réécriture fabriquait un séjour tout neuf, postérieur à
+  // busySince, qui BLANCHISSAIT la garde du lot 10 → ack ~2 s après le done.
+  await sleep(5);
+  ACTIVE_TAB = null; emit('tabs');
+  await sleep(ACK_DWELL + 30);
+  ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');
+  await sleep(ACK_DWELL + 30);              // séjour bien établi AVANT le run
+  const busyBeforeRename = Date.now();
+  updateSession('sess', { state: 'busy', busy_since: busyBeforeRename });
+  engine.refresh();
+  await sleep(10);
+  updateSession('sess', { state: 'done' });
+  engine.refresh();
+  ack();
+  check('rename : ✓ vif au moment du done (séjour antérieur au run)',
+    conv().acked === false, JSON.stringify(conv()));
+  // La réécriture de l'onglet par l'extension officielle : MÊME objet Tab, seuls
+  // le libellé et l'icône changent.
+  ACTIVE_TAB.label = 'Lot 6 deux teintes du ch…';
+  emit('tabs');
+  check('le rename ne redémarre pas le séjour (dwellSince reste antérieur au run)',
+    tracker.dwellSince() < busyBeforeRename,
+    `dwellSince=${tracker.dwellSince()} busySince=${busyBeforeRename}`);
+  await sleep(ACK_DWELL + 80);
+  engine.refresh();
+  check('INCIDENT REJOUÉ : rename_tab de fin de tour → toujours PAS d\'ack automatique',
+    conv().acked === false, JSON.stringify(conv()));
 
   // Réarmement automatique : un nouveau Stop doit redonner un ✓ vif.
   await sleep(5);
@@ -282,6 +350,7 @@ async function e2eTests() {
   check('conv sans état hooks → idle + acked (✓ atténué, jamais de pastille grise)',
     plain && plain.state === 'idle' && plain.acked === true, JSON.stringify(plain));
 
+  clearTimeout(recheck);
   tracker.dispose();
   engine.dispose();
 }

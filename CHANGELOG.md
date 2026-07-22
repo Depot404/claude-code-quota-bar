@@ -1,6 +1,14 @@
 # Changelog
 
-## [2.13.1] - 2026-07-22
+## [2.14.0] - 2026-07-22
+
+### Added
+- **A conversation you interrupted now has its own icon — a hollow square — instead of borrowing the dim ✓.** Since 2.13.2 an interrupt correctly stopped the spinner, but it landed the row on `idle`, which renders exactly like "finished, already read". The two mean opposite things: a dim ✓ says *nothing to do here*, while a conversation you stopped mid-turn is **unfinished work you meant to come back to** — precisely the row you go looking for twenty minutes later, and the one that was impossible to pick out of a list of a dozen. `interrupted` is now a state of its own, drawn as the universal stop shape rather than another shade of green (the panel deliberately carries state in the *shape*, not just the colour, for high-contrast themes and colour vision deficiency). It is muted, not alarm-coloured: it is a fact to find again, not something demanding attention. It clears itself as soon as you send the next prompt, and it stays silent — no sound, no bright ✓ to acknowledge, exactly as before.
+
+## [2.13.2] - 2026-07-22
+
+### Fixed
+- **The bright ✓ of a finished conversation no longer dims on its own a couple of seconds later.** Read receipts tracked "the tab you are sitting on" by its *label*, and the official Claude Code extension rewrites the tab at the end of every turn (a `rename_tab` message that reassigns `panelTab.title` and swaps the icon to `claude-logo-done.svg`). That rewrite fired `onDidChangeTabs` ~250 ms after the `done`, which looked exactly like "the user just arrived on this tab": a brand-new visit was recorded, its 2 s dwell expired, and the ✓ was marked read — by the tooling, never by a human. Worse, because that fake visit started *after* the run began, it also laundered the strict-ack guard added in 2.7.0, which exists precisely to reject a tab you were already parked on. The signature was an ack timestamp landing a constant `done + 2266 ms` in `sessions-state.json`. A visit is now identified by the tab itself (the `Tab` object, falling back to its column#index position); the label is just a caption refreshed in place and can no longer start or restart a visit. On top of that, the dwell now has to elapse **after the turn ends**, not after it starts: being present while Claude works is no longer proof you read a result that did not exist yet. Clicking a row in the panel still acknowledges it outright, as before.
 
 ### Fixed
 - **The spinner no longer keeps turning after you interrupt a conversation.** Pressing Stop (or Esc) fires no hook at all — the Stop hook does not run on a user interrupt, by design (anthropics/claude-code#45289) — so the `busy` state set by `UserPromptSubmit` was never cleared and the conversation kept spinning until it aged into `stale` after 5 minutes. The state engine now reads the interruption straight from the transcript (the `[Request interrupted by user…]` user message Claude Code writes there) and drops the row to `idle` at once, the same way it already reads `AskUserQuestion`/`ExitPlanMode`. It flips back to `busy` on its own as soon as you send the next prompt.

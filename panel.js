@@ -13,7 +13,7 @@ const vscode = require('vscode');
 //       title: string,        // entrée `ai-title` du JSONL, sinon 1er prompt
 //       model: string|null,   // « Opus 4.8 », ou l'id brut si non reconnu
 //       ctx: { pct, tokens, denom } | null,
-//       state: 'busy'|'waiting'|'done'|'stale'|'idle',
+//       state: 'busy'|'waiting'|'done'|'stale'|'idle'|'interrupted',
 //       acked: boolean,       // ✓ déjà lu (onglet consulté après la fin du tour)
 //       active: boolean,      // conv de l'onglet sélectionné dans cette fenêtre
 //     }],
@@ -187,6 +187,19 @@ function renderHtml(webview) {
     color: var(--done); font-size: 11px; line-height: 10px; text-align: center;
   }
   .ico-done.read { opacity: .45; }
+  /* Interruption manuelle (Stop / Échap) : le carré du « stop » universel, creux
+     et muet. Une forme franche, pas une teinte de plus — la pastille voisine est
+     un ✓ (« rien à faire ») alors qu'une interruption dit l'inverse : le travail
+     est resté en plan. Muted et non coloré : c'est un fait à retrouver dans la
+     liste, pas une alerte qui réclame quelque chose. Distinct du cercle pointillé
+     de l'état stale par la forme comme par le trait. */
+  .ico-interrupted {
+    border: 1.5px solid var(--muted);
+    border-radius: 1px;
+    box-sizing: border-box;
+    width: 9px; height: 9px;
+    margin-top: 4.5px;
+  }
   .ico-busy {
     border: 1.5px solid color-mix(in srgb, var(--busy) 25%, transparent);
     border-top-color: var(--busy);
@@ -333,11 +346,13 @@ function renderHtml(webview) {
     if (c.state === 'waiting') return 'waiting for you';
     if (c.state === 'stale') return 'stale — no activity for a while';
     if (c.state === 'done') return c.acked ? 'done — read' : 'done — not read yet';
+    if (c.state === 'interrupted') return 'interrupted — unfinished';
     return 'nothing running';
   }
 
   // L'état « idle » (aucun état connu des hooks) se rend comme un ✓ déjà lu :
-  // la conv est là, elle ne demande rien.
+  // la conv est là, elle ne demande rien. « interrupted » a sa propre forme —
+  // il dit le contraire du ✓ (cf. le carré ci-dessus dans la feuille de style).
   function icoClass(c) {
     if (c.state === 'done') return 'ico ico-done' + (c.acked ? ' read' : '');
     if (c.state === 'idle') return 'ico ico-done read';

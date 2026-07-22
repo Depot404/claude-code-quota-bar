@@ -35,6 +35,21 @@ const { isClaudeTab } = require('./labels');
 // ne compte comme un acte observé que s'il a commencé APRÈS ce démarrage.
 // Décision user : un faux « non lu » est acceptable, un faux « lu » ne l'est
 // pas — donc en cas de doute, ne pas acquitter.
+//
+// SÉJOUR IDENTIFIÉ PAR L'ONGLET, PAS PAR SON LIBELLÉ (2026-07-22) — incident
+// « le ✓ vif passe pâle tout seul ~2,3 s après la fin, sans qu'on ait regardé »,
+// signalé plusieurs fois. Cause : l'extension Claude officielle réécrit l'onglet
+// à la fin de chaque tour (message `rename_tab` : `panelTab.title` réaffecté ET
+// `iconPath` basculé sur `claude-logo-done.svg` — vérifié dans
+// anthropic.claude-code-2.1.217/extension.js). Cette réécriture déclenche
+// `onDidChangeTabs` ~250 ms après le `done`. Or le séjour était identifié par le
+// LIBELLÉ : la moindre variation le faisait naître à nouveau, `since` repartait
+// à cet instant, et le dwell de 2 s expirait 2 s plus tard → accusé de lecture
+// posé par un événement DE L'OUTIL, jamais par un acte de l'utilisateur (d'où
+// l'offset constant `since + 2266 ms` mesuré dans sessions-state.json).
+// Un séjour est désormais identifié par l'onglet lui-même (référence de l'objet
+// `Tab`, à défaut sa position colonne#index) ; le libellé n'est plus qu'une
+// étiquette rafraîchie en place, incapable de créer ou de réarmer un séjour.
 // ============================================================================
 
 const DWELL_MS = 2000;
@@ -45,12 +60,37 @@ function subscribe(register, cb) {
   try { return register(cb) || { dispose() {} }; } catch { return { dispose() {} }; }
 }
 
-function activeClaudeLabel() {
+// Onglet Claude actif du groupe actif, avec son groupe — on a besoin des deux
+// pour situer l'onglet (cf. tabIdentity).
+function activeClaudeTab() {
   try {
     const group = vscode.window.tabGroups.activeTabGroup;
     const tab = group && group.activeTab;
-    return tab && isClaudeTab(tab) && tab.label ? tab.label : null;
+    return tab && isClaudeTab(tab) && tab.label ? { group, tab } : null;
   } catch { return null; }
+}
+
+// Identité de l'onglet actif INDÉPENDANTE de son libellé et de son icône : sa
+// position (colonne du groupe + rang dans le groupe). Un `rename_tab` n'y touche
+// pas ; un changement d'onglet actif, si. `null` quand l'API ne permet pas de la
+// calculer — l'appelant retombe alors sur la comparaison de libellés.
+function tabIdentity(group, tab) {
+  try {
+    if (!group || !Array.isArray(group.tabs)) return null;
+    const idx = group.tabs.indexOf(tab);
+    if (idx < 0) return null;
+    return `${group.viewColumn != null ? group.viewColumn : '?'}#${idx}`;
+  } catch { return null; }
+}
+
+// Le séjour en cours porte-t-il sur le MÊME onglet que ce qu'on observe ?
+// Trois preuves, de la plus forte à la plus faible : l'objet `Tab` est le même
+// (VS Code mute ses instances en place lors d'un rename), à défaut sa position,
+// à défaut son libellé (dernier repli, celui d'avant ce correctif).
+function sameTab(stay, tab, identity, label) {
+  if (stay.tab && tab && stay.tab === tab) return true;
+  if (stay.identity && identity) return stay.identity === identity;
+  return stay.label === label;
 }
 
 function windowFocused() {
@@ -61,21 +101,40 @@ function windowFocused() {
 function createAckTracker(handlers = {}) {
   const onDwell = typeof handlers.onDwell === 'function' ? handlers.onDwell : () => {};
   const dwellMs = handlers.dwellMs != null ? handlers.dwellMs : DWELL_MS;
-  let current = null;   // { label, since } — séjour en cours
+  let current = null;   // { tab, identity, label, since } — séjour en cours
   let timer = null;
   let disposed = false;
 
   function reevaluate() {
     if (disposed) return;
-    const label = windowFocused() ? activeClaudeLabel() : null;
-    // Même onglet, même situation : surtout ne pas réarmer le compteur, sinon un
-    // événement périodique (une frappe, un changement d'onglet ailleurs) le
-    // remettrait à zéro et le dwell ne serait jamais atteint.
-    if ((current && current.label) === label) return;
+    const found = windowFocused() ? activeClaudeTab() : null;
+    const tab = found ? found.tab : null;
+    const label = tab ? tab.label : null;
+    const identity = found ? tabIdentity(found.group, tab) : null;
+
+    // Plus d'onglet Claude consulté (focus perdu, bascule vers un fichier…) :
+    // le séjour s'arrête net.
+    if (!label) {
+      clearTimeout(timer);
+      timer = null;
+      current = null;
+      return;
+    }
+
+    // Même onglet : on ne réarme surtout pas le compteur, sinon un événement
+    // périodique (une frappe, un changement d'onglet ailleurs) le remettrait à
+    // zéro et le dwell ne serait jamais atteint. On rafraîchit en revanche
+    // l'étiquette et l'identité en place — c'est ici que passe le `rename_tab`
+    // de fin de tour, qui ne doit RIEN redémarrer.
+    if (current && sameTab(current, tab, identity, label)) {
+      current.tab = tab;
+      current.identity = identity;
+      current.label = label;
+      return;
+    }
+
     clearTimeout(timer);
-    timer = null;
-    current = label ? { label, since: Date.now() } : null;
-    if (!current) return;
+    current = { tab, identity, label, since: Date.now() };
     timer = setTimeout(() => {
       timer = null;
       if (disposed || !current) return;
@@ -96,6 +155,14 @@ function createAckTracker(handlers = {}) {
     dwellLabel() {
       if (disposed || !current) return null;
       return Date.now() - current.since >= dwellMs ? current.label : null;
+    },
+    // Libellé de l'onglet où l'on séjourne EN CE MOMENT, sans condition de
+    // durée. L'appelant compare lui-même `dwellSince()` à la fin du tour :
+    // le seuil doit courir à partir de l'affichage du résultat, pas à partir de
+    // l'arrivée sur l'onglet (un séjour antérieur au `done` ne prouve rien sur
+    // ce qui s'affiche après).
+    stayLabel() {
+      return disposed || !current ? null : current.label;
     },
     // Début du séjour en cours (indépendant du seuil du dwell) — lot 10 : l'ack
     // strict compare CE timestamp au démarrage du run (`busySince`), pas la fin
