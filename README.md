@@ -75,7 +75,7 @@ Reactive by design: `fs.watch` on both directories → instant push. **No 5-minu
 | State | Icon | Meaning |
 |---|---|---|
 | `busy` | spinning arc | Working (`UserPromptSubmit` fired, transcript still moving) |
-| `waiting` | **?** | Hands you back control: a question was asked, a permission prompt, an elicitation dialog, or 60 s of silence. One visual state for all three — see below |
+| `waiting` | **?** | Hands you back control — **whatever the form**: a permission dialog, a question, a plan to approve, an MCP elicitation, an agent asking for input. One icon, one sound, for all of them — see below |
 | `done` | **bright ✓** / dim ✓ | Finished replying (`Stop`). Bright until you've actually read it — see [Read receipts](#read-receipts) |
 | `stale` | dashed circle | Claimed `busy` but the transcript has been silent for 5+ min → zombie (crash, killed process, VS Code closed without `SessionEnd`). **Display only — nothing is ever killed.** |
 | `interrupted` | hollow square | You stopped it yourself (Stop button / Esc) mid-turn. Read from the transcript, since no hook fires on an interrupt ([#45289](https://github.com/anthropics/claude-code/issues/45289)). Clears itself on your next prompt |
@@ -92,7 +92,19 @@ Three corrections are applied on read, because the hooks alone can't express the
 - **Permission granted** → Claude resumes work, but *no hook signals it* (there is no "permission granted" event). A transcript write later than the `waiting` timestamp means it resumed → `busy`.
 - **`Stop` doesn't always mean the turn is over** → it also fires on a Stop hook that returns feedback (an `exit 2` that sends Claude back to work) or when you type mid-turn. The conversation used to show ✓ while visibly working. Same remedy: a transcript write later than the `Stop` → back to `busy`. Two guards: writes within ~2 s of the `Stop` don't count (the last assistant message lands right next to it, so *every* turn would bounce), and the fallback is always `done`, **never `stale`** — once the writes stop, the turn really is over; claiming a zombie would just trade a false ✓ for a false alarm.
 - **Ageing** (`busy` → `stale`) is purely temporal and produces no file event — a dead process writes nothing, precisely. A 30 s ticker re-derives it, and only notifies when the rendering actually changes.
-- **A question asked is a `waiting` right away, detected from the transcript, not a hook.** `AskUserQuestion` and `ExitPlanMode` fire *no hook at all* ([#13830](https://github.com/anthropics/claude-code/issues/13830), [#13024](https://github.com/anthropics/claude-code/issues/13024)) — without this, the conversation stayed `busy` (and even `stale` past 5 min) until the `Notification` hook's `idle_prompt` fired, a fixed 60 s later, non-configurable ([#13922](https://github.com/anthropics/claude-code/issues/13922)). Since `fs.watch` already re-reads the tail on every transcript write, the rule is cheap to add: if the *last* assistant message ends in a `tool_use` for one of these two tools with no matching `tool_result` afterwards, the conversation is `waiting` — regardless of what the hook last said. A short, explicit tool list is unavoidable (nothing in a `tool_use`'s shape says it's interactive); a normal in-flight tool (e.g. `Bash`) is untouched. The existing `Notification` paths (immediate `permission_prompt`, 60 s `idle_prompt`) are unchanged — this only gets there earlier for questions. Clears the moment a `tool_result` (or any later transcript event) shows up, handing back to the usual busy/done/stale logic.
+- **A question asked is a `waiting` right away, detected from the transcript, not a hook.** `AskUserQuestion` and `ExitPlanMode` fire *no hook at all* ([#13830](https://github.com/anthropics/claude-code/issues/13830), [#13024](https://github.com/anthropics/claude-code/issues/13024)) — without this, the conversation stayed `busy` (and even `stale` past 5 min) until the `Notification` hook's `idle_prompt` fired, a fixed 60 s later, non-configurable ([#13922](https://github.com/anthropics/claude-code/issues/13922)). Since `fs.watch` already re-reads the tail on every transcript write, the rule is cheap to add: if the *last* assistant message ends in a `tool_use` for one of these two tools with no matching `tool_result` afterwards, the conversation is `waiting` — regardless of what the hook last said. A short, explicit tool list is unavoidable (nothing in a `tool_use`'s shape says it's interactive); a normal in-flight tool (e.g. `Bash`) is untouched. Clears the moment a `tool_result` (or any later transcript event) shows up, handing back to the usual busy/done/stale logic.
+
+### Every wait looks the same, and none of them waits on `Notification`
+
+A permission dialog is the most common way Claude hands control back, and it was the one the panel got *wrong*: the row kept spinning while the dialog sat there asking. The cause is upstream — `Notification:permission_prompt` is only emitted **after 6 seconds of user inactivity** (a 6 s timer plus a "last interaction ≥ 6 s" guard, verifiable in the CLI binary; see [#58909](https://github.com/anthropics/claude-code/issues/58909)). When you're at the keyboard — exactly when you're looking at the panel — it never fires at all.
+
+So the panel no longer waits for it. The `PermissionRequest` hook fires inside the permission flow itself, before the dialog is even drawn, with no idle guard and for every tool. That is now the primary signal, and it makes the **?** appear ahead of the dialog. It is a *decision* hook (it can return allow/deny), so the handler writes **nothing** to stdout and always exits 0 — the decision stays yours. A regression bench asserts that, since a stray byte there would approve or refuse a tool call on your behalf.
+
+The same lot closed the other holes, so that no form of "your turn" can slip through:
+
+- **`Notification` is filtered by a deny-list, not an allow-list.** Anything that isn't explicitly informational (`idle_prompt`, `auth_success`, `agent_completed`, `computer_use_*`, elicitation *completion*, push notifications) is treated as a wait. The previous allow-list silently ignored every type that was added or renamed upstream — `elicitation_url_dialog`, `worker_permission_prompt`, `agent_needs_input` among them.
+- **A `Notification` without `notification_type` is still read.** The field is missing outright on some versions ([#11964](https://github.com/anthropics/claude-code/issues/11964), closed as *not planned* — parsing the message *is* the sanctioned workaround), and the allow-list turned that into "nothing happened at all". The message text now decides, with `idle_prompt`'s wording explicitly excluded.
+- **MCP elicitations** (`Elicitation`) raise the **?** naming the server; `ElicitationResult` and `PermissionDenied` close the wait immediately, rather than leaving the **?** up until some later transcript write happens to prove work resumed.
 
 ### Read receipts
 
@@ -225,11 +237,17 @@ This configures:
         { "type": "command", "command": "node /path/to/.claude/scripts/track-active-session.js" }
       ] }
     ],
-    // one script for three events, routed on `hook_event_name`:
-    //   Stop -> done | Notification -> waiting | SessionEnd -> drop the session
-    "Stop":         [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
-    "Notification": [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
-    "SessionEnd":   [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ]
+    // one script for every event below, routed on `hook_event_name`:
+    //   Stop -> done | SessionEnd -> drop the session
+    //   PermissionRequest / Elicitation / Notification -> waiting
+    //   PermissionDenied / ElicitationResult -> the wait is over, back to busy
+    "Stop":              [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
+    "Notification":      [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
+    "SessionEnd":        [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
+    "PermissionRequest": [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
+    "PermissionDenied":  [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
+    "Elicitation":       [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ],
+    "ElicitationResult": [ { "matcher": "", "hooks": [ { "type": "command", "command": "node /path/to/.claude/scripts/hook-session-state.js" } ] } ]
   }
 }
 ```

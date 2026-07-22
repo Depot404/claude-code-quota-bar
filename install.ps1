@@ -82,7 +82,11 @@ $needed = @()
 if (-not (Test-HookPresent $settings 'UserPromptSubmit' 'track-active-session.js')) {
     $needed += @{ Event = 'UserPromptSubmit'; Cmd = $trackCmd }
 }
-foreach ($ev in @('Stop', 'Notification', 'SessionEnd')) {
+# PermissionRequest est le seul signal IMMEDIAT d'un dialogue de permission :
+# Notification:permission_prompt n'est emis qu'apres 6 s d'inactivite de l'user
+# (cf. hook-session-state.js). PermissionDenied / ElicitationResult referment
+# l'attente. Notre hook n'ecrit rien sur stdout : il n'accorde ni ne refuse rien.
+foreach ($ev in @('Stop', 'Notification', 'SessionEnd', 'PermissionRequest', 'PermissionDenied', 'Elicitation', 'ElicitationResult')) {
     if (-not (Test-HookPresent $settings $ev 'hook-session-state.js')) {
         $needed += @{ Event = $ev; Cmd = $sessionStateCmd }
     }

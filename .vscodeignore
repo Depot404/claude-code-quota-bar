@@ -15,6 +15,7 @@ test-cdp-fetch.mjs
 PUBLISH.md
 CLAUDE.md
 PLAN_*.md
+Publish.ps1
 .git/**
 .gitignore
 .github/**

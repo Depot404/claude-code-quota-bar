@@ -420,6 +420,31 @@ function buildSnapshot(opts, readTranscript) {
     });
   }
 
+  // Tri d'AFFICHAGE (indépendant du tri mtime ci-dessus, qui ne sert qu'à
+  // borner la lecture des transcripts — cf. SCAN_LIMIT). 3 modes exposés au
+  // panneau (claudeCodeQuotaBar.conversationSortOrder) :
+  //  - lastActivity : ordre déjà obtenu par le tri des candidats, rien à faire.
+  //  - tabOrder : ordre des onglets VS Code (tabs.labels, gauche → droite,
+  //    union de toutes les fenêtres — cf. tabs.js). Une conv sans onglet
+  //    matché (CLI, ou tabs.known false) part en Infinity : Array.prototype.sort
+  //    étant stable (garanti ES2019+), ces convs gardent entre elles leur ordre
+  //    mtime d'origine au lieu d'être mélangées.
+  //  - statusFirst : busy/waiting en tête, peu importe l'ancienneté ; le reste
+  //    garde l'ordre mtime (même stabilité de tri).
+  const sortOrder = typeof opts.sortOrder === 'function' ? opts.sortOrder() : opts.sortOrder;
+  if (sortOrder === 'tabOrder') {
+    const labels = (tabs && tabs.labels) || [];
+    const posOf = new Map();
+    for (const c of conversations) {
+      const idx = labels.findIndex((l) => labelMatches(l, c.title));
+      posOf.set(c.sessionId, idx === -1 ? Infinity : idx);
+    }
+    conversations.sort((a, b) => posOf.get(a.sessionId) - posOf.get(b.sessionId));
+  } else if (sortOrder === 'statusFirst') {
+    const rank = (c) => (c.state === 'busy' || c.state === 'waiting') ? 0 : 1;
+    conversations.sort((a, b) => rank(a) - rank(b));
+  }
+
   // Surlignage « conversation courante » = la conv dont l'ONGLET est sélectionné
   // dans cette fenêtre (tabs.activeLabel, mémorisé par tabs.js). Avant le
   // 2026-07-19 il suivait active-session.json — la conv du DERNIER PROMPT
@@ -428,8 +453,8 @@ function buildSnapshot(opts, readTranscript) {
   // sélectionné (fenêtre fraîche, panneau seul). Un activeLabel qui ne matche
   // AUCUNE conv listée (titre renommé onglet inactif, conv hors maxItems) ne se
   // rabat PAS sur le repli : aucun surlignage vaut mieux qu'un surlignage faux.
-  // findIndex = premier match dans l'ordre du tri (le plus récemment actif),
-  // même arbitrage d'ambiguïté de préfixe tronqué que focus.js.
+  // findIndex = premier match dans l'ordre d'AFFICHAGE (ci-dessus), même
+  // arbitrage d'ambiguïté de préfixe tronqué que focus.js.
   const activeLabel = (tabs && tabs.activeLabel) || null;
   if (activeLabel) {
     const i = conversations.findIndex((c) => labelMatches(activeLabel, c.title));
@@ -438,7 +463,7 @@ function buildSnapshot(opts, readTranscript) {
     for (const c of conversations) c.isActive = c.sessionId === activeSessionId;
   }
 
-  // Déjà trié (plus récemment actif en tête) et borné à maxItems ci-dessus.
+  // Déjà trié (lastActivity/tabOrder/statusFirst ci-dessus) et borné à maxItems.
   return { conversations, activeSessionId, generatedAt: now };
 }
 

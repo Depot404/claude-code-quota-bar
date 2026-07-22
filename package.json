@@ -1,8 +1,8 @@
 {
   "name": "claude-code-quota-bar",
-  "displayName": "Claude Convs — Conversations & Quota Panel",
+  "displayName": "Claude Convs ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Conversations & Quota Panel",
   "description": "See which Claude Code conversations are working, click to jump to the right VS Code window, and hear when Claude needs you. Plus 5h/7d/scoped quota bars coloured by projected burn-rate pace, not just %used. Unofficial, Windows-only.",
-  "version": "2.14.1",
+  "version": "2.16.0",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -78,6 +78,10 @@
       {
         "command": "claude-code-quota-bar.installHooks",
         "title": "Claude Convs: Install Hooks"
+      },
+      {
+        "command": "claude-code-quota-bar.showPanel",
+        "title": "Claude Convs: Show Panel"
       }
     ],
     "configuration": {
@@ -94,7 +98,7 @@
           "type": "number",
           "default": 0.85,
           "minimum": 0,
-          "description": "Burn-rate pace (percent used divided by percent of window elapsed) at or below which a quota bar is coloured green — the projected end-of-window usage is comfortably under the quota."
+          "description": "Burn-rate pace (percent used divided by percent of window elapsed) at or below which a quota bar is coloured green ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the projected end-of-window usage is comfortably under the quota."
         },
         "claudeCodeQuotaBar.burnRateYellowMax": {
           "type": "number",
@@ -105,12 +109,37 @@
         "claudeCodeQuotaBar.sounds.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default — no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here."
+          "description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here."
         },
         "claudeCodeQuotaBar.braveUserDataDir": {
           "type": "string",
           "default": "",
           "description": "Path to a dedicated Brave user-data directory (e.g. C:\\OctopusData\\BraveOctopus) with a claude.ai session logged in, used for the fast cookie-based usage fetch. Empty by default: the cookie path is disabled cleanly (no browser spawn) and the extension falls back to your Claude Code OAuth token instead. Set BRAVE_EXE if brave.exe isn't in the standard Program Files location."
+        },
+        "claudeCodeQuotaBar.conversationSortOrder": {
+          "type": "string",
+          "enum": [
+            "tabOrder",
+            "lastActivity",
+            "statusFirst"
+          ],
+          "enumDescriptions": [
+            "Same order as your VS Code tabs, leftmost first.",
+            "Most recently active conversation first.",
+            "Busy or waiting-for-you conversations first, regardless of age."
+          ],
+          "default": "tabOrder",
+          "description": "How conversations are ordered in the panel. Also changeable from the dropdown next to the Conversations header."
+        },
+        "claudeCodeQuotaBar.collapsedConversations": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the Conversations section is collapsed. Toggle by clicking its header."
+        },
+        "claudeCodeQuotaBar.collapsedQuota": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the Quota section is collapsed. Toggle by clicking its header."
         }
       }
     }

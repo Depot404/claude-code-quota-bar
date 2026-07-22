@@ -132,6 +132,12 @@ function getConfig() {
     // se désactive proprement (aucun spawn, aucune erreur bruyante) et le
     // fallback OAuth prend le relais directement.
     braveUserDataDir: (cfg.get('braveUserDataDir', '') || '').trim(),
+    // Décision user 2026-07-22 : défaut = ordre des onglets VS Code (le plus à
+    // gauche en tête), pas lastActivity — changement de comportement assumé
+    // par rapport aux versions précédentes du panneau.
+    sortOrder: cfg.get('conversationSortOrder', 'tabOrder'),
+    collapsedConversations: !!cfg.get('collapsedConversations', false),
+    collapsedQuota: !!cfg.get('collapsedQuota', false),
   };
 }
 
@@ -143,8 +149,29 @@ function activate(context) {
       vscode.env.openExternal(vscode.Uri.parse(USAGE_URL));
     }),
     vscode.commands.registerCommand('claude-code-quota-bar.refresh', () => fetchAndUpdate(true)),
-    vscode.commands.registerCommand('claude-code-quota-bar.installHooks', () => installHooks(context))
+    vscode.commands.registerCommand('claude-code-quota-bar.installHooks', () => installHooks(context)),
+    // Le panneau est un container à vue unique dans la sidebar secondaire :
+    // fermé (X sur l'onglet), VS Code n'offre aucun moyen évident de le
+    // rouvrir (pas d'icône activity bar, "View: Open View..." le noie dans une
+    // liste de dizaines d'entrées). La commande auto-générée <viewId>.focus
+    // réaffiche à la fois le container et la vue — on l'expose sous un nom
+    // explicite en Palette plutôt que de laisser l'utilisateur chercher
+    // "Focus on Conversations & quota View".
+    vscode.commands.registerCommand('claude-code-quota-bar.showPanel', () => {
+      vscode.commands.executeCommand('claudeCodeQuotaBar.panel.focus');
+    })
   );
+
+  // Bouton barre de statut : accès permanent au panneau, qu'il soit fermé,
+  // masqué derrière une autre vue, ou juste jamais ouvert (2026-07-22, plainte
+  // user sur la découvrabilité). Toujours visible, pas seulement quand le
+  // panneau est fermé — évite de dépendre d'un signal de visibilité fiable.
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBarItem.text = '$(comment-discussion) Claude Convs';
+  statusBarItem.tooltip = 'Afficher le panneau Claude Convs (conversations & quota)';
+  statusBarItem.command = 'claude-code-quota-bar.showPanel';
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
 
   // Sons de notification (plan 2026-07-16, lot 1) : branché plus bas sur le
   // même signal de transition que le fetch événementiel (maybeFetchOnTransition),
@@ -168,6 +195,8 @@ function activate(context) {
     // produire, donc le seul chemin d'ack possible en mono-onglet.
     focusConv: (msg) => { focusConversation(msg); ackConversationById(msg && msg.id); },
     toggleSounds: () => toggleSounds(context),
+    toggleCollapse: (msg) => toggleCollapse(msg && msg.section),
+    setSortOrder: (msg) => setSortOrder(msg && msg.order),
   });
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ClaudePanelProvider.viewType, panelProvider, {
@@ -200,6 +229,7 @@ function activate(context) {
     workspacePath,
     ...STATE_DEFAULTS,
     tabs: () => tabTracker.getTabs(),
+    sortOrder: () => getConfig().sortOrder,
     // L'ack APRÈS le push : la conv apparaît terminée tout de suite, l'accusé
     // suit. Ici passe le cas « l'onglet était déjà sous les yeux quand Claude a
     // fini » — aucune bascule d'onglet ne se produira, c'est donc l'arrivée du
@@ -223,8 +253,16 @@ function activate(context) {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeCodeQuotaBar')) {
         restartTimer();
-        // Synchronise l'icône haut-parleur si le setting change ailleurs qu'un
-        // clic sur elle (settings.json édité à la main, sync de profil…).
+        // Le tri est un champ du snapshot mis en cache par stateEngine
+        // (buildPanelState relit getConfig() mais pas l'ordre déjà calculé) :
+        // sans ce refresh explicite, un changement de tri via le dropdown
+        // n'apparaîtrait qu'au prochain événement fs / tick 30 s.
+        if (e.affectsConfiguration('claudeCodeQuotaBar.conversationSortOrder') && stateEngine) {
+          stateEngine.refresh();
+        }
+        // Synchronise l'icône haut-parleur / le repli des sections si le
+        // setting change ailleurs qu'un clic dans le panneau (settings.json
+        // édité à la main, sync de profil…).
         pushPanelState();
         if (e.affectsConfiguration('claudeCodeQuotaBar.sounds.enabled')) {
           maybeWarnAccessibilityConflict(context);
@@ -588,10 +626,16 @@ function quotaState() {
 }
 
 function buildPanelState() {
+  const cfg = getConfig();
   return {
     conversations: conversationsState(),
     quota: quotaState(),
-    sounds: { enabled: getConfig().soundsEnabled },
+    sounds: { enabled: cfg.soundsEnabled },
+    ui: {
+      collapsedConversations: cfg.collapsedConversations,
+      collapsedQuota: cfg.collapsedQuota,
+      sortOrder: cfg.sortOrder,
+    },
     // Lot 13 §1 : indicateur discret, jamais de popup — voir checkTabCanary().
     canary: canaryActive,
   };
@@ -652,6 +696,25 @@ async function toggleSounds(context) {
   try { await cfg.update('sounds.enabled', next, vscode.ConfigurationTarget.Global); } catch {}
   // Seulement au moment où ça s'ALLUME : pas d'intérêt à avertir en éteignant.
   if (next && context) maybeWarnNoHooksForSounds(context);
+}
+
+// Clic sur l'en-tête d'une section (lot repli/tri) : bascule son setting.
+// onDidChangeConfiguration (activate()) repousse l'état à toutes les fenêtres,
+// même pattern que toggleSounds.
+async function toggleCollapse(section) {
+  const key = section === 'conversations' ? 'collapsedConversations'
+    : section === 'quota' ? 'collapsedQuota' : null;
+  if (!key) return;
+  const cfg = vscode.workspace.getConfiguration('claudeCodeQuotaBar');
+  const current = cfg.get(key, false);
+  try { await cfg.update(key, !current, vscode.ConfigurationTarget.Global); } catch {}
+}
+
+// Choix explicite dans le dropdown du panneau (tabOrder/lastActivity/statusFirst).
+async function setSortOrder(order) {
+  if (order !== 'tabOrder' && order !== 'lastActivity' && order !== 'statusFirst') return;
+  const cfg = vscode.workspace.getConfiguration('claudeCodeQuotaBar');
+  try { await cfg.update('conversationSortOrder', order, vscode.ConfigurationTarget.Global); } catch {}
 }
 
 // hook-session-state.js est le fichier que install.ps1 déploie pour Stop/

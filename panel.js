@@ -32,6 +32,11 @@ const vscode = require('vscode');
 //       source: string|null,
 //     },
 //     sounds: { enabled: boolean },  // reflète claudeCodeQuotaBar.sounds.enabled
+//     ui: {
+//       collapsedConversations: boolean,  // claudeCodeQuotaBar.collapsedConversations
+//       collapsedQuota: boolean,          // claudeCodeQuotaBar.collapsedQuota
+//       sortOrder: 'tabOrder'|'lastActivity'|'statusFirst',  // claudeCodeQuotaBar.conversationSortOrder
+//     },
 //     canary: boolean,       // lot 13 §1 : conv(s) busy/waiting mais zéro onglet
 //                             // Claude détecté depuis > 2 min — viewType dérivé ?
 //   }
@@ -279,6 +284,29 @@ function renderHtml(webview) {
   }
   .sounds-toggle:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
   .sounds-toggle.on { color: var(--vscode-foreground); }
+
+  /* ── En-têtes de section repliables ── */
+  .sec-head {
+    display: flex; align-items: center; gap: 6px;
+    margin: 10px 0 4px; padding: 2px 2px;
+    border-radius: 3px; cursor: pointer; user-select: none;
+  }
+  .sec-head:hover { background: var(--vscode-list-hoverBackground); }
+  .sec-head h2 { margin: 0; }
+  /* Chevron : la maquette à 9px était illisible (retour user) — 13px reste
+     discret à côté d'un h2 à 11px tout en restant une vraie cible de clic. */
+  .chevron {
+    flex: 0 0 auto; width: 14px; text-align: center;
+    font-size: 13px; line-height: 1; color: var(--muted);
+  }
+  .sec-head .spacer { flex: 1 1 auto; }
+  .sort-select {
+    font-size: 10px; padding: 1px 3px; border-radius: 3px;
+    background: var(--vscode-dropdown-background, var(--vscode-input-background));
+    color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, rgba(128,128,128,.35)));
+  }
+  .sec-body.collapsed { display: none; }
 </style>
 </head>
 <body>
@@ -286,13 +314,29 @@ function renderHtml(webview) {
     <button class="sounds-toggle" id="soundsToggle" title="Toggle notification sounds"></button>
   </div>
   <section>
-    <h2>Conversations <span class="count" id="convCount"></span></h2>
-    <div class="canary" id="canary">⚠ Claude tabs not detected — viewType changed?</div>
-    <div id="convs"></div>
+    <div class="sec-head" id="convHead">
+      <span class="chevron" id="convChevron">▾</span>
+      <h2>Conversations <span class="count" id="convCount"></span></h2>
+      <span class="spacer"></span>
+      <select class="sort-select" id="sortSelect" title="Sort conversations by">
+        <option value="tabOrder">Tab order</option>
+        <option value="lastActivity">Last activity</option>
+        <option value="statusFirst">Status first</option>
+      </select>
+    </div>
+    <div class="sec-body" id="convBody">
+      <div class="canary" id="canary">⚠ Claude tabs not detected — viewType changed?</div>
+      <div id="convs"></div>
+    </div>
   </section>
   <section>
-    <h2>Quota</h2>
-    <div id="quota"></div>
+    <div class="sec-head" id="quotaHead">
+      <span class="chevron" id="quotaChevron">▾</span>
+      <h2>Quota</h2>
+    </div>
+    <div class="sec-body" id="quotaBody">
+      <div id="quota"></div>
+    </div>
   </section>
 <script nonce="${nonce}">
 (function () {
@@ -302,6 +346,41 @@ function renderHtml(webview) {
   const countEl = document.getElementById('convCount');
   const soundsToggleEl = document.getElementById('soundsToggle');
   const canaryEl = document.getElementById('canary');
+  const convHeadEl = document.getElementById('convHead');
+  const convChevronEl = document.getElementById('convChevron');
+  const convBodyEl = document.getElementById('convBody');
+  const quotaHeadEl = document.getElementById('quotaHead');
+  const quotaChevronEl = document.getElementById('quotaChevron');
+  const quotaBodyEl = document.getElementById('quotaBody');
+  const sortSelectEl = document.getElementById('sortSelect');
+
+  // Le select est DANS le sec-head cliquable : un clic pour ouvrir le menu
+  // (ou choisir une option) ne doit pas aussi replier la section. contains()
+  // inclut l'élément lui-même, donc ce garde couvre le clic d'ouverture ET les
+  // clics dans le popup natif remontant jusqu'ici.
+  convHeadEl.addEventListener('click', function (e) {
+    if (sortSelectEl.contains(e.target)) return;
+    vscode.postMessage({ type: 'toggleCollapse', section: 'conversations' });
+  });
+  quotaHeadEl.addEventListener('click', function () {
+    vscode.postMessage({ type: 'toggleCollapse', section: 'quota' });
+  });
+  sortSelectEl.addEventListener('change', function () {
+    vscode.postMessage({ type: 'setSortOrder', order: sortSelectEl.value });
+  });
+
+  // Reflète l'état réel des settings, jamais un état local — même raison que
+  // renderSoundsToggle : d'autres fenêtres/le settings.json peuvent le changer.
+  function renderUi(ui) {
+    const collapsedConv = !!(ui && ui.collapsedConversations);
+    const collapsedQuota = !!(ui && ui.collapsedQuota);
+    convBodyEl.classList.toggle('collapsed', collapsedConv);
+    convChevronEl.textContent = collapsedConv ? '▸' : '▾';
+    quotaBodyEl.classList.toggle('collapsed', collapsedQuota);
+    quotaChevronEl.textContent = collapsedQuota ? '▸' : '▾';
+    const order = (ui && ui.sortOrder) || 'tabOrder';
+    if (sortSelectEl.value !== order) sortSelectEl.value = order;
+  }
 
   // Icône haut-parleur : reflète l'état réel du setting, pas un état local —
   // l'extension repousse le nouvel état à toutes les fenêtres après un clic
@@ -541,6 +620,7 @@ function renderHtml(webview) {
     lastQuota = (msg.state && msg.state.quota) || {};
     renderQuota(lastQuota);
     renderSoundsToggle(!!(msg.state && msg.state.sounds && msg.state.sounds.enabled));
+    renderUi(msg.state && msg.state.ui);
     canaryEl.classList.toggle('show', !!(msg.state && msg.state.canary));
   });
 

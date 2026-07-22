@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.16.0] - 2026-07-22
+
+### Added
+- **The conversation list can be sorted, and both sections fold away.** A dropdown next to the *Conversations* header offers three orders: **tab order** (same left-to-right order as your VS Code tabs, the default), **last activity** (most recently active first), and **status first** (anything busy or waiting for you at the top, regardless of age). Clicking either section header — *Conversations* or *Quota* — collapses it, so a window where you only care about one of the two can show just that. All three choices persist as settings (`claudeCodeQuotaBar.conversationSortOrder`, `.collapsedConversations`, `.collapsedQuota`).
+
+### Fixed
+- **A permission dialog now raises the ? — immediately, and for every tool.** Until now the row kept spinning while the dialog sat on screen asking a question, so the one moment the panel exists for was the one it missed. The signal it relied on, `Notification:permission_prompt`, is only emitted after **6 seconds of user inactivity** (a 6 s timer plus a "last interaction ≥ 6 s" guard in the CLI, see [#58909](https://github.com/anthropics/claude-code/issues/58909)) — when you're at the keyboard it never fires at all. The panel now listens to the `PermissionRequest` hook instead, which fires inside the permission flow itself, before the dialog is drawn, with no idle guard: the **?** and its sound land ahead of the dialog. That hook can approve or refuse a tool call, so the handler writes nothing to stdout and always exits 0 — a bench asserts it, because a stray byte there would decide on your behalf.
+
+### Changed
+- **Any kind of "your turn" now looks the same in the list.** `Notification` types are filtered by a deny-list instead of an allow-list: everything that isn't explicitly informational (`idle_prompt`, `auth_success`, `agent_completed`, `computer_use_*`, elicitation completions, push notifications) raises the **?**. The old allow-list silently dropped every type added or renamed upstream — `elicitation_url_dialog`, `worker_permission_prompt` and `agent_needs_input` were all invisible. A notification that arrives **without** `notification_type` is no longer ignored either ([#11964](https://github.com/anthropics/claude-code/issues/11964), closed as *not planned* — reading the message is the sanctioned workaround). MCP elicitations raise the **?** naming the server, and `PermissionDenied` / `ElicitationResult` close the wait at once instead of leaving it up until some later transcript write proves work resumed.
+
+## [2.15.0] - 2026-07-22
+
+### Added
+- **A "Claude Convs" button in the status bar always brings the panel back.** The panel lives in a single-view container in the secondary sidebar; close it with the tab's `×` and VS Code offers no obvious way back — no activity-bar icon to click, and `View: Open View…` buries it in a list of dozens of unrelated views under a name (`Conversations & quota`) that doesn't match the container title you were looking for (`Claude Convs`). A new command, `Claude Convs: Show Panel`, wraps VS Code's auto-generated `<view>.focus` command (which reveals both the container and the view) under a name that actually matches the extension, and a permanent status bar item runs it on click — no hunting required, whatever state the panel is in.
+
 ## [2.14.1] - 2026-07-22
 
 ### Removed
