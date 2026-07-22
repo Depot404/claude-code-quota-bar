@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.14.1] - 2026-07-22
+
+### Removed
+- **Maintainer-only notes are no longer shipped inside the package.** Two internal documents (a publishing runbook and the repository's own working notes) were picked up by the packager and travelled inside the `.vsix`. They are of no use to anyone installing the extension. Nothing about how the extension runs changes in this release.
+
 ## [2.14.0] - 2026-07-22
 
 ### Added

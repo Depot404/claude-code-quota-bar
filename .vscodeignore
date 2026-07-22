@@ -1,8 +1,20 @@
 .vscode/**
 .vscode-test/**
 test/**
-PLAN_*.md
 test-cdp-fetch.mjs
+
+# Runbooks INTERNES — jamais dans le .vsix, qui part au Marketplace tel quel.
+# Ils contiennent des chemins locaux, le nom d'utilisateur Windows, l'adresse
+# du compte Microsoft éditeur et les chemins d'entrées KeePass : zéro valeur
+# pour qui installe l'extension, et de l'information personnelle pour le reste
+# du monde. `PUBLISH.md` a été empaqueté par omission de la 2.9.0 à la 2.14.0,
+# `CLAUDE.md` dans la 2.14.0 — d'où ces règles explicites plutôt qu'un motif
+# large : un nouveau fichier interne doit être ajouté ICI en conscience.
+# Ne PAS remplacer par `*.md` : readme.md et changelog.md forment la fiche
+# publique et doivent rester dans le paquet.
+PUBLISH.md
+CLAUDE.md
+PLAN_*.md
 .git/**
 .gitignore
 .github/**
