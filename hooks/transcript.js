@@ -117,12 +117,24 @@ function cleanTitle(s) {
 // Dernier message assistant porteur d'un usage → modèle réellement servi à
 // CETTE session + occupation courante du contexte. Le transcript est la seule
 // source non polluable (current-model.json est global et écrasable).
+//
+// `effort` (lot 1 du plan de création groupée) vit au niveau de l'ENTRÉE, pas
+// dans `message` — vérifié sur transcripts réels 2026-07-22 :
+//   {type:'assistant', effort:'high', message:{model:…, usage:…}, …}
+// Il est ABSENT sur certaines entrées (transcripts d'avant son introduction,
+// modèles sans notion d'effort) : `null` alors, jamais une valeur par défaut —
+// c'est ce qui permet au panneau de ne rien afficher plutôt que d'inventer, et
+// au badge d'écart de se taire faute de réel connu.
 function extractLastAssistant(filePath) {
   const entries = parseSlice(readSlice(filePath, TAIL_BYTES, 'tail'));
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
     if (e.type === 'assistant' && e.message && e.message.model) {
-      return { modelId: e.message.model, usage: e.message.usage || null };
+      return {
+        modelId: e.message.model,
+        usage: e.message.usage || null,
+        effort: typeof e.effort === 'string' && e.effort ? e.effort : null,
+      };
     }
   }
   return null;
@@ -173,6 +185,32 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
   }
   const lp = cleanTitle(lastPrompt);
   return lp ? { title: lp, source: 'last-prompt' } : { title: null, source: null };
+}
+
+// PREMIER message user d'un transcript, brut (enveloppes injectées retirées,
+// mais NI tronqué NI recondensé comme cleanTitle) — étage 2 du rattachement des
+// membres de groupe (attach.js) : le prompt qu'on a inséré à l'ouverture de
+// l'onglet doit s'y retrouver tel quel, à la frappe de l'utilisateur près.
+//
+// Volontairement distinct d'extractTitleInfo, qui cherche un TITRE (ai-title
+// d'abord, coupé à 200 caractères, replis multiples) : ici on veut le TEXTE, et
+// seulement celui du premier message — un titre, lui, peut venir de la queue du
+// fichier. Fichier absent/illisible → null, jamais d'exception (le rattachement
+// se contente alors de ne rien conclure).
+function firstUserText(filePath, maxChars = 600) {
+  let entries;
+  // readSlice fait un statSync : fichier disparu entre le snapshot et ici
+  // (conversation fermée, transcript déplacé) = cas normal, pas une erreur.
+  try { entries = parseSlice(readSlice(filePath, HEAD_BYTES, 'head')); } catch { return null; }
+  for (const e of entries) {
+    if (e.type !== 'user' || e.isMeta || e.isSidechain || !e.message) continue;
+    const txt = firstTextBlock(e.message.content);
+    if (!txt) continue;
+    const cleaned = stripEnvelopes(txt).trim();
+    if (!cleaned) continue;
+    return cleaned.slice(0, maxChars);
+  }
+  return null;
 }
 
 // Scan incrémental append-only d'un transcript à la recherche d'entrées
@@ -296,6 +334,6 @@ function wasInterrupted(filePath) {
 
 module.exports = {
   readSlice, parseSlice, usageTokens, extractLastAssistant, extractTitleInfo,
-  scanAiTitleIncremental, cleanTitle, TITLE_MAX,
+  scanAiTitleIncremental, cleanTitle, firstUserText, TITLE_MAX,
   hasPendingInteractiveTool, wasInterrupted, INTERACTIVE_TOOLS,
 };

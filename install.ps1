@@ -10,8 +10,10 @@ $ErrorActionPreference = 'Stop'
 
 $claudeDir    = Join-Path $env:USERPROFILE '.claude'
 $scriptsDir   = Join-Path $claudeDir 'scripts'
+$commandsDir  = Join-Path $claudeDir 'commands'
 $settingsPath = Join-Path $claudeDir 'settings.json'
 $srcHooks     = Join-Path $PSScriptRoot 'hooks'
+$srcCommands  = Join-Path $PSScriptRoot 'commands'
 
 # usage-statusline.js / track-active-session.js / hook-session-state.js sont des
 # hooks ; sessions-state.js, model-id.js et transcript.js sont des libs require()
@@ -33,6 +35,15 @@ foreach ($f in $hookFiles) {
     Copy-Item $src (Join-Path $scriptsDir $f) -Force
     Write-Host "Copie : $f -> $scriptsDir"
 }
+
+# --- 1bis. Commande /handoffs (lot 3 du plan creation-groupes) ---
+# Raccourci de frappe seulement : le collage brut fonctionne sans elle (decision
+# du plan), ~/.claude/commands/ peut ne pas exister encore sur ce poste.
+if (-not (Test-Path $commandsDir)) { New-Item -ItemType Directory -Path $commandsDir -Force | Out-Null }
+$srcHandoffs = Join-Path $srcCommands 'handoffs.md'
+if (-not (Test-Path $srcHandoffs)) { throw "Commande source introuvable : $srcHandoffs" }
+Copy-Item $srcHandoffs (Join-Path $commandsDir 'handoffs.md') -Force
+Write-Host "Copie : handoffs.md -> $commandsDir"
 
 # Commandes telles qu'elles doivent figurer dans settings.json (slashes avant, comme l'existant)
 $scriptsFwd     = ($scriptsDir -replace '\\', '/')
@@ -138,5 +149,6 @@ if ($hasStatusLine -and $needed.Count -eq 0) {
 Write-Host ""
 Write-Host "Installation terminee."
 Write-Host "  Hooks deployes : $scriptsDir"
+Write-Host "  Commande /handoffs deployee : $commandsDir\handoffs.md"
 Write-Host "  Etat des conversations : $claudeDir\sessions-state.json (ecrit par les hooks)"
 Write-Host "  Reload de la fenetre VS Code pour que l'extension recharge."

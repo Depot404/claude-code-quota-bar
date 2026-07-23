@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { norm, labelMatches, isClaudeTab } = require('./labels');
+const { norm, convMatchesLabel, isClaudeTab } = require('./labels');
 
 // ============================================================================
 // Clic sur une conversation du panneau → focus de son onglet, où qu'il soit.
@@ -51,11 +51,16 @@ function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
 // Cherche l'onglet dans TOUS les groupes de CETTE fenêtre (le lot 1 ne regardait
 // que le groupe actif). Garde-fou conservé : sans correspondance on ne devine
 // pas — mieux vaut ne rien faire que focus la mauvaise conversation.
-function findTab(title) {
-  if (!norm(title)) return null;
+// `tabTitle` (2026-07-22) : titre RÉEL de l'onglet quand il diverge de celui du
+// transcript (state.vscdb, cf. session-titles.js). Sans lui, un clic sur une
+// conv dont l'onglet a été renommé par l'extension officielle ne trouve rien et
+// reste un no-op — c'est la moitié « clic » du bug de présence.
+function findTab(title, tabTitle) {
+  if (!norm(title) && !norm(tabTitle)) return null;
+  const conv = { title, tabTitle };
   const matches = [];
   for (const group of vscode.window.tabGroups.all) {
-    const index = group.tabs.findIndex((t) => isClaudeTab(t) && labelMatches(t.label, title));
+    const index = group.tabs.findIndex((t) => isClaudeTab(t) && convMatchesLabel(t.label, conv));
     if (index >= 0) matches.push({ group, index, label: group.tabs[index].label });
   }
   if (!matches.length) return null;
@@ -123,6 +128,19 @@ function raiseWindow(tabLabel) {
   }
 }
 
+// Fermeture de l'onglet d'une conversation (badge ⨯ des membres de groupe,
+// lot 2). Même problème d'identité que le focus, donc même chemin exactement :
+// findTab par libellé, et relais fichier si l'onglet vit dans une autre fenêtre.
+// `tabGroups.close` est, lui, une API PUBLIQUE (contrairement à
+// openEditorAtIndex qui n'agit que sur le groupe actif) : pas de focus à voler
+// pour fermer.
+async function closeTab(match) {
+  // preserveFocus = true : l'utilisateur vient de cliquer dans la sidebar, la
+  // fermeture d'un onglet ne doit pas lui envoyer le curseur dans la zone
+  // d'édition.
+  await vscode.window.tabGroups.close(match.group.tabs[match.index], true);
+}
+
 // Réponse au relais : on ne remonte la fenêtre QUE si l'onglet est chez nous.
 function createFocusRelay() {
   let watcher = null;
@@ -136,13 +154,19 @@ function createFocusRelay() {
     if (req.ts <= lastTs) return;                      // fs.watch émet plusieurs events par écriture
     if (Date.now() - req.ts > REQUEST_TTL_MS) return;  // résidu
     lastTs = req.ts;
-    const match = findTab(req.title);
+    const match = findTab(req.title, req.tab_title);
     if (!match) return;                                // pas chez nous : une autre fenêtre répondra
     try {
-      await focusTab(match);
-      raiseWindow(match.label);
+      // `action` absent = focus : c'est la seule action qui existait avant le
+      // lot 2, et une requête écrite par une fenêtre restée sur l'ancienne
+      // version doit continuer à être comprise.
+      if (req.action === 'close') await closeTab(match);
+      else {
+        await focusTab(match);
+        raiseWindow(match.label);
+      }
     } catch (e) {
-      log('relay focus failed: %s', e && e.message);
+      log('relay %s failed: %s', req.action || 'focus', e && e.message);
     }
   }
 
@@ -160,8 +184,9 @@ function createFocusRelay() {
 // Point d'entrée du clic panneau (message `focusConv` du webview).
 async function focusConversation(msg) {
   const title = msg && msg.title;
-  if (!norm(title)) return;
-  const match = findTab(title);
+  const tabTitle = (msg && msg.tabTitle) || null;
+  if (!norm(title) && !norm(tabTitle)) return;
+  const match = findTab(title, tabTitle);
   if (match) {
     await focusTab(match);
     return;
@@ -174,10 +199,37 @@ async function focusConversation(msg) {
     vscode.window.tabGroups.all.flatMap((g) => g.tabs.filter(isClaudeTab).map((t) => t.label)));
   writeRequest({
     title,
+    tab_title: tabTitle,
     session_id: (msg && msg.id) || null,
     ts: Date.now(),
     origin_pid: process.pid,
   });
 }
 
-module.exports = { focusConversation, createFocusRelay, findTab, REQUEST_PATH, REQUEST_TTL_MS };
+// Point d'entrée du badge ⨯ (message `closeConvTab` du webview). Ne ferme QUE
+// l'onglet : la conversation, elle, est terminée et son transcript reste. Rien
+// n'est deviné — sans correspondance de libellé ici, on relaie, et si personne
+// ne répond il ne se passe rien (l'onglet reste ouvert, l'utilisateur le voit).
+async function closeConversationTab(msg) {
+  const title = msg && msg.title;
+  const tabTitle = (msg && msg.tabTitle) || null;
+  if (!norm(title) && !norm(tabTitle)) return;
+  const match = findTab(title, tabTitle);
+  if (match) {
+    try { await closeTab(match); } catch (e) { log('close failed: %s', e && e.message); }
+    return;
+  }
+  writeRequest({
+    action: 'close',
+    title,
+    tab_title: tabTitle,
+    session_id: (msg && msg.id) || null,
+    ts: Date.now(),
+    origin_pid: process.pid,
+  });
+}
+
+module.exports = {
+  focusConversation, closeConversationTab, createFocusRelay, findTab,
+  REQUEST_PATH, REQUEST_TTL_MS,
+};

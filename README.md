@@ -85,7 +85,7 @@ There is no grey dot: a conversation that is simply finished shows a dim ✓, no
 
 An interruption gets its own shape rather than a shade of the ✓, because it means the opposite: a dim ✓ says "nothing to do here", while a stopped conversation is *unfinished work you meant to come back to* — the row you go looking for twenty minutes later.
 
-A conversation is only listed while its tab is open somewhere — see [When a conversation disappears](#when-a-conversation-disappears).
+A conversation is only listed while its tab is open somewhere, or its CLI process is still alive — see [When a conversation disappears](#when-a-conversation-disappears).
 
 Three corrections are applied on read, because the hooks alone can't express them. They all come down to the same rule: **the hooks say what happened, the transcript says what is happening.**
 
@@ -131,15 +131,24 @@ The reliable source is VS Code itself (`tabs.js`):
 - **Tab closed** (`onDidChangeTabs`) → the conversation leaves the panel immediately, and its `sessions-state.json` entry is purged (otherwise it would come back on the next snapshot, and *other* windows would keep showing it).
 - **Presence filter, on every snapshot** — a conversation with no matching tab open *anywhere* is hidden. Because it runs on every snapshot rather than at startup, it cleans up the whole history for free: tabs closed while VS Code was off, conversations predating this feature, conversations predating the hooks (they never entered `sessions-state.json` at all).
 - **Union across windows** — each window publishes its Claude tab labels to `~/.claude/panel-tabs/<pid>.json`; presence is judged on the union, otherwise every window would hide the conversations open in the others. One file per pid means a single writer per file (no lock needed), and cleaning up a dead window is just an `unlink`.
+- **Two identities that don't depend on a caption** (2.17.0) — matching by label alone eventually fails, because tab titles and transcript titles drift apart (see below). A conversation whose **CLI process is alive** (`~/.claude/sessions/<pid>.json`, one file per running process) is therefore never hidden, and the **real tab titles** read from the workspace's `state.vscdb` are matched alongside the transcript title.
 
 Guard rails — the doubt always favours *showing*:
 
 | Situation | Behaviour | Why |
 |---|---|---|
 | `busy`/`waiting` with no tab | **Kept** | A legitimate CLI/terminal session has no tab |
-| Title is a fallback (no `ai-title`) | **Kept** | Only `ai-title` is the actual tab label; a fallback can't be matched, so "no match" proves nothing |
+| Live CLI process for that session | **Kept** | Process identity is stable; captions are not |
+| Title is a fallback (no `ai-title`, no tab title) | **Kept** | Only a real tab title can be matched; a fallback can't, so "no match" proves nothing |
 | Tab dragged between groups/windows | **Kept** | A close is only confirmed 150 ms later, against the union — if the label came back, it was never closed |
 | Stale `<pid>.json` from a reused pid | **Kept** | Phantom tabs keep a conversation visible — the pre-existing behaviour, never a loss of information |
+| Tab closed under your eyes | **Hidden** | An explicit close wins over everything, including a live process |
+
+### Tab titles vs transcript titles
+
+The title in the transcript (`ai-title`) is **not** the tab caption. The official extension keeps its own session titles in the workspace's `state.vscdb` (key `agentSessions.model.cache`, entries `{resource: "claude-code:/<sessionId>", label}`) and re-labels tabs from there without writing a new `ai-title`. Once they diverge, matching on `ai-title` alone finds nothing: the conversation looks tab-less and gets hidden, and clicking its row focuses nothing.
+
+That table is therefore read (**read-only**, reopened and closed on each refresh, at most once per 30 s tick) and used for matching, click-to-focus, tab-order sorting and for the row caption itself — a conversation shows the name you see on its tab. Both this table and the live-session registry are undocumented internals: if either is missing or unreadable, the panel silently falls back to its previous behaviour, and neither can hide a conversation that would otherwise show.
 
 ### When a `sessions-state.json` entry has no transcript on disk
 
@@ -171,7 +180,7 @@ Each conversation: `{ sessionId, title, state, acked, since, busySince, model, m
 
 Titles come from the transcript's `ai-title` entry — the very title Claude Code shows on the tab — falling back to the first user message *carrying actual human text*, then the last prompt. A slash-command isn't stored as `/model opus` but as its internal markup (`<command-name>/model</command-name> <command-args>…`), and its output as `<local-command-stdout>…`; those entries are stripped whole, so the fallback lands on the real prompt. The rule matches **any** leading `<tag>…</tag>` rather than a list of known names — a list would just reproduce the bug on the CLI's next invention. Chevrons *inside* a human sentence are left alone ("why does this `<div>` overflow?").
 
-`ai-title` is found **regardless of where it lands in the file** — a transcript is append-only, so `state.js` keeps a per-file `{scannedBytes, aiTitle}` cache and scans only the new bytes on each read (full scan once, on first read). Before this, `ai-title` was only searched in the first 32 KB and last 64 KB of the file; a real 739 KB transcript had it at byte 33,349 — in neither window — so the panel fell back to the first message as the title, and the lot 5 presence filter (which only trusts `ai-title` to prove a tab is really gone) could never confirm the conversation had closed.
+`ai-title` is found **regardless of where it lands in the file** — a transcript is append-only, so `state.js` keeps a per-file `{scannedBytes, aiTitle}` cache and scans only the new bytes on each read (full scan once, on first read). Before this, `ai-title` was only searched in the first 32 KB and last 64 KB of the file; a real 739 KB transcript had it at byte 33,349 — in neither window — so the panel fell back to the first message as the title, and the presence filter (which only trusts a matchable title — `ai-title`, or a real tab title — to prove a tab is really gone) could never confirm the conversation had closed.
 
 `state.js` requires no `vscode` module (workspace is injected), so it runs under plain Node for testing.
 
@@ -370,6 +379,14 @@ Regression bench, plain Node — `node test/test-sounds.js` (debounce, the Stop�
 - **A reply read without ever leaving the tab or clicking the panel row stays bright** (accepted trade-off): the strict read receipt (above) requires an *observed* act — a tab switch, or a click. Staring at the tab through the whole run, never touching anything else, never counts on its own; switching away and back, or a single click, dims it.
 - **All tab↔conversation matching breaks silently if the official extension ever renames its `viewType`.** There's no direct way to detect the rename — only the symptom (a busy/waiting conversation with no Claude tab seen for a while), surfaced by the [tab detection drift indicator](#tab-detection-drift-canary). Until that fires (or is noticed), click-to-focus and tab-close removal simply stop doing anything, without an exception anywhere.
 - **The "1M context" and "interactive tool" heuristics are both dated snapshots, not derived facts, and will eventually be wrong for a model or tool this extension hasn't seen yet.** `major ≥ 5 → 1M` (`hooks/model-id.js`) assumes every future model generation ships with a 1M window by default, same as Sonnet 5 — a future ≥5 model that ships at 200k would have its `ctx:%` **understated** here (not overstated: the empirical guard in [Model and context occupation](#model-and-context-occupation-per-conversation) already catches usage that crosses 200k regardless of this heuristic). The interactive-tool list (`AskUserQuestion`, `ExitPlanMode`) is hardcoded because nothing in a `tool_use`'s shape says it's interactive — a future tool that also hands control back to the user (another approval dialog, say) would keep showing `busy` until the 60 s `idle_prompt` fallback catches it, exactly the lag this feature exists to remove. Both are one-line additions in `hooks/model-id.js`/`hooks/transcript.js` when they go stale.
+
+- **The official Claude Code menu can briefly show the wrong model/effort for a batch-created conversation.** It reads the *persisted default* model and calibrates whether it even shows an effort picker on that default, until the conversation's first turn resyncs it — e.g. launched with `opus`, its menu shows no effort picker (as if it were still on a model that doesn't have one); launched with `haiku` right after a manual switch to `opus`, its menu still shows an effort picker. `ANTHROPIC_MODEL`/`CLAUDE_CODE_EFFORT_LEVEL` govern the CLI process, not that webview's own display. This extension can't fix it — the `model · effort` badges on each conversation row (read from its transcript) are the real state, not the official menu.
+- **A batch's master conversation is found by an exact, one-shot lookup — or not at all.** When a pasted `claude-convs` block is recognised, the panel looks for the conversation that produced it, once, at creation time: the block must appear verbatim (fences and `\r` aside) in the assistant output of exactly **one** transcript, among the conversations currently listed and within the tail of each transcript that is read. Zero matches, several matches, an edited block, or a conversation that has already aged out of the list all end the same way — no master is set, and `⌂ Set master…` on the group header is there to do it by hand. Nothing runs in the background: transcripts are never watched or scanned for this.
+- **No effort selector for `haiku`, no `ultracode` option in the batch form.** Claude Code has no notion of effort level for `haiku`, so picking it disables the effort selector and no `CLAUDE_CODE_EFFORT_LEVEL` is set for that task. `ultracode` isn't offered at all: unlike model/effort, it isn't controllable via an environment variable on the CLI (checked against 2.1.217) — it's a session-scoped setting the official webview applies through an internal, not something `editor.open` can drive from outside. A selector that didn't actually do anything would be worse than no selector.
+
+## Language
+
+The UI is in **English and French**, following VS Code's own display language (`vscode.env.language`) via the standard [`vscode-l10n`](https://github.com/microsoft/vscode-l10n) mechanism. Any other display language falls back to English. The `claude-convs` block format itself (`model:`, `effort:`, `stage:`, `group:`, model/effort names) is **not** localized — it's a fixed contract, independent of the UI language, so a block written or pasted in any language always parses the same way.
 
 ## License
 

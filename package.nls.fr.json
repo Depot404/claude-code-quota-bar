@@ -1,0 +1,22 @@
+{
+  "displayName": "Claude Convs — Panneau conversations et quota",
+  "description": "Voir quelles conversations Claude Code travaillent, cliquer pour rejoindre la bonne fenêtre VS Code, et entendre quand Claude a besoin de vous. Plus des barres de quota 5h/7j/scopées colorées par le rythme de consommation projeté, pas seulement le % utilisé. Non officiel, Windows uniquement.",
+  "viewContainer.title": "Claude Convs",
+  "view.name": "Conversations et quota",
+  "command.open.title": "Claude Code Quota : ouvrir la page d'usage",
+  "command.refresh.title": "Claude Code Quota : actualiser maintenant",
+  "command.installHooks.title": "Claude Convs : installer les hooks",
+  "command.showPanel.title": "Claude Convs : afficher le panneau",
+  "configuration.title": "Quota Bar pour Claude Code",
+  "config.refreshIntervalMinutes.description": "Fréquence de rafraîchissement des données d'usage, en minutes.",
+  "config.burnRateGreenMax.description": "Rythme de consommation (% utilisé divisé par % de fenêtre écoulée) en dessous duquel une barre de quota est colorée en vert — la consommation projetée en fin de fenêtre reste confortablement sous le quota.",
+  "config.burnRateYellowMax.description": "Rythme de consommation en dessous duquel une barre de quota est colorée en jaune plutôt qu'en rouge. Avec la valeur par défaut de 1.0, rouge signifie que la consommation projetée en fin de fenêtre dépasse 100% du quota.",
+  "config.sounds.enabled.description": "Jouer un son système quand une conversation termine sa réponse ou vous rend la main (une question, une demande de permission). Désactivé par défaut — aucun son surprise à l'installation. À basculer depuis l'icône haut-parleur en haut du panneau, ou ici.",
+  "config.braveUserDataDir.description": "Chemin vers un dossier de données utilisateur Brave dédié (ex. C:\\OctopusData\\BraveOctopus) avec une session claude.ai déjà connectée, utilisé pour la récupération rapide de l'usage par cookie. Vide par défaut : le chemin par cookie est proprement désactivé (aucun navigateur lancé) et l'extension retombe sur votre jeton OAuth Claude Code. Définissez BRAVE_EXE si brave.exe n'est pas à l'emplacement standard Program Files.",
+  "config.conversationSortOrder.description": "Comment les conversations sont ordonnées dans le panneau. Modifiable aussi depuis le menu déroulant à côté de l'en-tête Conversations.",
+  "config.collapsedConversations.description": "Si la section Conversations est repliée. Basculer en cliquant sur son en-tête.",
+  "config.collapsedQuota.description": "Si la section Quota est repliée. Basculer en cliquant sur son en-tête.",
+  "config.conversationSortOrder.enum.tabOrder": "Même ordre que vos onglets VS Code, le plus à gauche en premier.",
+  "config.conversationSortOrder.enum.lastActivity": "Conversation la plus récemment active en premier.",
+  "config.conversationSortOrder.enum.statusFirst": "Conversations occupées ou en attente de vous en premier, quel que soit leur âge."
+}

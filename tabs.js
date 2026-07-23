@@ -3,6 +3,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { isClaudeTab, claudeTabLabels } = require('./labels');
+// « ce pid est-il vivant » : une seule vérité pour tout le projet (elle décide
+// aussi bien de l'union des onglets ici que de la présence d'une session dans
+// state.js) — cf. live-sessions.js.
+const { pidAlive } = require('./live-sessions');
 
 // ============================================================================
 // Suivi des onglets de conversation (lot 5).
@@ -67,15 +71,6 @@ function localActiveLabel() {
     const tab = group && group.activeTab;
     return tab && isClaudeTab(tab) && tab.label ? tab.label : null;
   } catch { return null; }
-}
-
-// process.kill(pid, 0) ne tue rien : il teste l'existence. EPERM = le process
-// existe mais ne nous appartient pas → vivant (cas d'une autre session Windows).
-function pidAlive(pid) {
-  if (!pid) return false;
-  if (pid === process.pid) return true;
-  try { process.kill(pid, 0); return true; }
-  catch (e) { return e && e.code === 'EPERM'; }
 }
 
 function publish(labels) {

@@ -1,0 +1,22 @@
+{
+  "displayName": "Claude Convs — Conversations & Quota Panel",
+  "description": "See which Claude Code conversations are working, click to jump to the right VS Code window, and hear when Claude needs you. Plus 5h/7d/scoped quota bars coloured by projected burn-rate pace, not just %used. Unofficial, Windows-only.",
+  "viewContainer.title": "Claude Convs",
+  "view.name": "Conversations & quota",
+  "command.open.title": "Claude Code Quota: Open Usage Page",
+  "command.refresh.title": "Claude Code Quota: Refresh Now",
+  "command.installHooks.title": "Claude Convs: Install Hooks",
+  "command.showPanel.title": "Claude Convs: Show Panel",
+  "configuration.title": "Quota Bar for Claude Code",
+  "config.refreshIntervalMinutes.description": "How often to refresh the usage data, in minutes.",
+  "config.burnRateGreenMax.description": "Burn-rate pace (percent used divided by percent of window elapsed) at or below which a quota bar is coloured green — the projected end-of-window usage is comfortably under the quota.",
+  "config.burnRateYellowMax.description": "Burn-rate pace at or below which a quota bar is coloured yellow instead of red. At the default of 1.0, red means the projected end-of-window usage exceeds 100% of the quota.",
+  "config.sounds.enabled.description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default — no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here.",
+  "config.braveUserDataDir.description": "Path to a dedicated Brave user-data directory (e.g. C:\\OctopusData\\BraveOctopus) with a claude.ai session logged in, used for the fast cookie-based usage fetch. Empty by default: the cookie path is disabled cleanly (no browser spawn) and the extension falls back to your Claude Code OAuth token instead. Set BRAVE_EXE if brave.exe isn't in the standard Program Files location.",
+  "config.conversationSortOrder.description": "How conversations are ordered in the panel. Also changeable from the dropdown next to the Conversations header.",
+  "config.collapsedConversations.description": "Whether the Conversations section is collapsed. Toggle by clicking its header.",
+  "config.collapsedQuota.description": "Whether the Quota section is collapsed. Toggle by clicking its header.",
+  "config.conversationSortOrder.enum.tabOrder": "Same order as your VS Code tabs, leftmost first.",
+  "config.conversationSortOrder.enum.lastActivity": "Most recently active conversation first.",
+  "config.conversationSortOrder.enum.statusFirst": "Busy or waiting-for-you conversations first, regardless of age."
+}

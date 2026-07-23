@@ -1,8 +1,8 @@
 {
   "name": "claude-code-quota-bar",
-  "displayName": "Claude Convs ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â Conversations & Quota Panel",
-  "description": "See which Claude Code conversations are working, click to jump to the right VS Code window, and hear when Claude needs you. Plus 5h/7d/scoped quota bars coloured by projected burn-rate pace, not just %used. Unofficial, Windows-only.",
-  "version": "2.16.0",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "2.19.4",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -52,7 +52,7 @@
       "secondarySidebar": [
         {
           "id": "claudeCodeQuotaBar",
-          "title": "Claude Convs",
+          "title": "%viewContainer.title%",
           "icon": "images/panel-icon.svg"
         }
       ]
@@ -61,7 +61,7 @@
       "claudeCodeQuotaBar": [
         {
           "id": "claudeCodeQuotaBar.panel",
-          "name": "Conversations & quota",
+          "name": "%view.name%",
           "type": "webview"
         }
       ]
@@ -69,52 +69,52 @@
     "commands": [
       {
         "command": "claude-code-quota-bar.open",
-        "title": "Claude Code Quota: Open Usage Page"
+        "title": "%command.open.title%"
       },
       {
         "command": "claude-code-quota-bar.refresh",
-        "title": "Claude Code Quota: Refresh Now"
+        "title": "%command.refresh.title%"
       },
       {
         "command": "claude-code-quota-bar.installHooks",
-        "title": "Claude Convs: Install Hooks"
+        "title": "%command.installHooks.title%"
       },
       {
         "command": "claude-code-quota-bar.showPanel",
-        "title": "Claude Convs: Show Panel"
+        "title": "%command.showPanel.title%"
       }
     ],
     "configuration": {
-      "title": "Quota Bar for Claude Code",
+      "title": "%configuration.title%",
       "properties": {
         "claudeCodeQuotaBar.refreshIntervalMinutes": {
           "type": "number",
           "default": 5,
           "minimum": 1,
           "maximum": 120,
-          "description": "How often to refresh the usage data, in minutes."
+          "description": "%config.refreshIntervalMinutes.description%"
         },
         "claudeCodeQuotaBar.burnRateGreenMax": {
           "type": "number",
           "default": 0.85,
           "minimum": 0,
-          "description": "Burn-rate pace (percent used divided by percent of window elapsed) at or below which a quota bar is coloured green ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â the projected end-of-window usage is comfortably under the quota."
+          "description": "%config.burnRateGreenMax.description%"
         },
         "claudeCodeQuotaBar.burnRateYellowMax": {
           "type": "number",
           "default": 1,
           "minimum": 0,
-          "description": "Burn-rate pace at or below which a quota bar is coloured yellow instead of red. At the default of 1.0, red means the projected end-of-window usage exceeds 100% of the quota."
+          "description": "%config.burnRateYellowMax.description%"
         },
         "claudeCodeQuotaBar.sounds.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here."
+          "description": "%config.sounds.enabled.description%"
         },
         "claudeCodeQuotaBar.braveUserDataDir": {
           "type": "string",
           "default": "",
-          "description": "Path to a dedicated Brave user-data directory (e.g. C:\\OctopusData\\BraveOctopus) with a claude.ai session logged in, used for the fast cookie-based usage fetch. Empty by default: the cookie path is disabled cleanly (no browser spawn) and the extension falls back to your Claude Code OAuth token instead. Set BRAVE_EXE if brave.exe isn't in the standard Program Files location."
+          "description": "%config.braveUserDataDir.description%"
         },
         "claudeCodeQuotaBar.conversationSortOrder": {
           "type": "string",
@@ -124,22 +124,22 @@
             "statusFirst"
           ],
           "enumDescriptions": [
-            "Same order as your VS Code tabs, leftmost first.",
-            "Most recently active conversation first.",
-            "Busy or waiting-for-you conversations first, regardless of age."
+            "%config.conversationSortOrder.enum.tabOrder%",
+            "%config.conversationSortOrder.enum.lastActivity%",
+            "%config.conversationSortOrder.enum.statusFirst%"
           ],
           "default": "tabOrder",
-          "description": "How conversations are ordered in the panel. Also changeable from the dropdown next to the Conversations header."
+          "description": "%config.conversationSortOrder.description%"
         },
         "claudeCodeQuotaBar.collapsedConversations": {
           "type": "boolean",
           "default": false,
-          "description": "Whether the Conversations section is collapsed. Toggle by clicking its header."
+          "description": "%config.collapsedConversations.description%"
         },
         "claudeCodeQuotaBar.collapsedQuota": {
           "type": "boolean",
           "default": false,
-          "description": "Whether the Quota section is collapsed. Toggle by clicking its header."
+          "description": "%config.collapsedQuota.description%"
         }
       }
     }
@@ -153,5 +153,6 @@
   },
   "devDependencies": {
     "@vscode/vsce": "^3.0.0"
-  }
+  },
+  "l10n": "./l10n"
 }

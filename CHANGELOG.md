@@ -1,5 +1,57 @@
 # Changelog
 
+## [2.19.4] - 2026-07-24
+
+### Fixed
+- **Reloading the VS Code window no longer resets a group's "N/M done" count to zero.** A window reload terminates the CLI processes cleanly enough for their `SessionEnd` hook to fire, which purges each session's entry from the state file. Finished conversations still listed in the panel then fell back to the "no hook entry" state — rendered as a muted ✓ on their row, but read as *stale* by the group-member truth table, so the counter said "0/2 done" right under two check marks (and auto wave advance would have been suspended). A dead session whose hooks know nothing is now concluded *finished* whether the conversation is still listed or not — the doctrine the truth table already applied when the conversation had aged out of the list. A proven interruption (visible in the transcript) still counts as stale.
+
+## [2.19.3] - 2026-07-24
+
+### Changed
+- **The master conversation now sits visually above the group, not inside it.** The line pointing at the conversation a batch came from (⌂) was rendered inside the group body, at the same indentation as the tasks — so it read as just another queued handoff instead of the conversation that produced them. It now sits between the group header and the task list, outside the tinted vertical rule, with its ⌂ tinted in the group's colour: the indented tasks below read as its sub-tree. It folds away with the rest when the group is collapsed.
+
+## [2.19.2] - 2026-07-24
+
+### Fixed
+- **The model selector could go dark after a Create.** Reading back the default model from `~/.claude/settings.json`, the panel only stripped a trailing `[1m]` tag (`claude-fable-5[1m]` → `claude-fable-5`) and matched what was left against the button families (`haiku`/`sonnet`/`opus`/`fable`) — which never matches a full model ID, only the short form a click already writes (`sonnet`). So a global default stored as a full ID lit up no button at all, and Create stayed disabled. The lookup now also parses the `claude-<family>-<version>` schema, the same one used elsewhere to display the model actually running a conversation.
+
+### Changed
+- **The form now remembers your last explicit model/effort pick, instead of jumping back to the global default.** Clicking a model or effort button persists that choice per workspace; a blank task's pre-selection reads it first, and only falls back to the resolved global default (see above) the very first time nothing has ever been clicked. Previously a fresh task always inherited the machine-wide Claude Code default (e.g. `xhigh`), even right after picking something lighter for the task before it.
+
+## [2.19.1] - 2026-07-24
+
+### Fixed
+- **A conversation deep in a long turn no longer shows as "stale — no activity for a while".** The panel marked a `busy` conversation `stale` as soon as its transcript stayed quiet for five minutes — but a long stretch of reasoning (extended thinking), or a slow tool call (a build, a web search, a sub-agent), writes nothing to the transcript for minutes while the CLI is very much working. The staleness check now consults the live-session registry: a conversation whose CLI process is still running stays `working…`, and only one whose process is actually gone can age into `stale`. This aligns the panel's status with the group-member truth table, which already required a dead session before calling anything stale.
+
+## [2.19.0] - 2026-07-24
+
+### Changed
+- **One field, not two.** The dedicated *Paste anything* textarea is gone — the prompt field of each task now IS the paste zone. Paste (or edit and blur) a recognized ```` ```claude-convs ```` block into any task's prompt and it replaces the whole form (tasks, group, waves) exactly as the old field did, even when several tasks already exist; a block that's present but broken shows the same error banner and leaves the text as a plain prompt; anything else is simply the prompt, blank lines included — the old blank-line splitting is gone too, since a single field no longer needs to guess whether a paste is "one task" or "several".
+- **The section separator is now `[---]`, not a bare `---`.** A lone `---` line is both a markdown horizontal rule and a YAML frontmatter delimiter, so a prompt containing ordinary markdown could get silently sliced into extra tasks. `[---]` (3 or more dashes in brackets) means nothing in markdown, YAML, or code, so it can't collide by accident. Old blocks that already use a bare `---` still paste correctly as long as the line right after it is a recognized field (`model:`, `effort:`, `stage:`, `group:`, `session:`) — an isolated `---` with nothing structured behind it is now left alone as plain text. `/handoffs` now emits `[---]`.
+
+## [2.18.2] - 2026-07-23
+
+### Added
+- **Batches with several waves now actually run in waves.** Until now "Create" opened every task at once regardless of how the waves were laid out in the form. Only wave 1 opens now; the next wave unlocks once every task in the current one reaches `done` — automatically (default) or by clicking the always-available **▶ Launch wave N** button, which can also force a wave open early (a partially-done wave, or one with a stale/interrupted task) since auto is a convenience, never the only way forward. Each group has an **auto / manual** toggle in its header (hidden for single-wave groups), a queued task not started yet can be nudged to a neighbouring wave with the new move buttons, and an automatic wave opening is announced right there in the group.
+
+### Changed
+- **The onboarding tip under the paste field can be dismissed for good.** The help explaining how to make Claude end its handoffs with a `claude-convs` block — plus the one-click copy of an instruction for your CLAUDE.md — used to take three permanent lines below the field. It now carries a **×**: dismiss it once and it stays gone across reloads (stored per machine), leaving only a small **?** next to *Paste anything* to bring it back on demand. The separate "💡 /handoffs…" line has been removed: it repeated word-for-word the field's own placeholder.
+
+### Fixed
+- **The per-task `wave ◂ ▸` control no longer shows when a batch has a single prompt.** With only one task there is no wave to move it to, so the control did nothing (and `▸` would have spun up an empty second wave around a lone prompt). It now appears only from two tasks onward, matching the wave header.
+
+## [2.17.0] - 2026-07-22
+
+### Fixed
+- **An open conversation no longer disappears from the list because its tab was renamed.** Presence was decided by comparing the tab caption with the conversation title stored in the transcript (`ai-title`). Those two drift apart: the official Claude Code extension keeps its own session titles in the workspace's `state.vscdb` (`agentSessions.model.cache`) and re-labels tabs from there without ever writing a new `ai-title`. Once they diverge, no tab matched any more — so a conversation whose tab was sitting right there, with its CLI process still running, was filtered out as "no tab anywhere", and clicking its row (had it still been listed) would have focused nothing.
+
+  Two identities that don't depend on any caption now back the panel up:
+
+  - the **live-session registry** (`~/.claude/sessions/<pid>.json`, one file per running CLI process, holding its session id). A conversation whose process is alive is never hidden, and stays a candidate even when its transcript has been quiet for hours;
+  - the **real tab titles** read from `state.vscdb`. They feed matching, click-to-focus, tab-order sorting — and the display, so a row is now labelled with the name you actually see on the tab rather than a stale one.
+
+  Both are undocumented internals, so both degrade in silence: if either source is missing or unreadable, the panel behaves exactly as it did before, and neither can ever hide a conversation that used to show. Closing a tab still wins over everything else — a conversation you closed disappears at once, alive process or not.
+
 ## [2.16.0] - 2026-07-22
 
 ### Added

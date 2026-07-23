@@ -7,12 +7,44 @@ const path = require('path');
 const { spawn, execSync, execFile } = require('child_process');
 const WebSocket = require('ws');
 const { ClaudePanelProvider } = require('./panel');
-const { createStateEngine, DEFAULTS: STATE_DEFAULTS } = require('./state');
-const { focusConversation, createFocusRelay } = require('./focus');
+const { createStateEngine, DEFAULTS: STATE_DEFAULTS, projectDirFor, readSessionsState } = require('./state');
+const { focusConversation, closeConversationTab, createFocusRelay } = require('./focus');
 const { createTabTracker } = require('./tabs');
 const { createAckTracker, DWELL_MS: ACK_DWELL_MS } = require('./ack');
-const { labelMatches } = require('./labels');
+const { convMatchesLabel } = require('./labels');
+const { createSessionTitles } = require('./session-titles');
 const { createSoundPlayer } = require('./sounds');
+// Création groupée de conversations (lot 1) : le métier est en Node pur dans
+// batch.js, l'orchestration du lancement dans launcher.js — ici, que du câblage.
+const { normalizeTasks, conflictingEnvVars, createIntentStore, mismatchOf, readInheritSettings, MODELS, EFFORTS } = require('./batch');
+const { createBatchLauncher } = require('./launcher');
+// Recalcul du message de « Create » (lot 6, correctif §3) : un membre lancé
+// mais dont aucun hook n'a encore tiré n'a pas d'entrée dans le snapshot de
+// state.js (le premier hook n'écrit qu'au premier Entrée) — le seul signal
+// disponible pour dire « l'onglet est toujours là, en attente » est le
+// registre des process CLI vivants, déjà utilisé par le rattachement étage 1.
+const { liveSessionIds } = require('./live-sessions.js');
+// Groupes (lot 2) : le store est du Node pur (persistance injectée), le
+// rattachement par préfixe de prompt aussi — les deux se testent sans VS Code.
+const { createGroupStore, hueOf } = require('./groups');
+const { matchPending } = require('./attach');
+const { firstUserText } = require('./hooks/transcript.js');
+// Moteur de vagues (lot 4) : Node pur, ne connaît que `{wave, status}` — le
+// statut RÉEL de chaque membre (queued/launched/done/stale) est résolu ici,
+// à partir de la conversation qu'il pointe (ou de son absence).
+const { launchedWave, waveToAutoLaunch, canForceLaunch } = require('./waves');
+// Table de vérité UNIQUE du statut d'un membre (lot 10) : le rendu des lignes,
+// le moteur de vagues et le bandeau de batch la consomment TOUS — plus une
+// seule déduction locale à partir de « la conversation est-elle dans la liste
+// affichée ». Sources injectées ici (registre des sessions, transcripts,
+// sessions-state.json, vue), logique dans member-truth.js, Node pur.
+const { memberTruth } = require('./member-truth');
+// Conversation maîtresse d'un groupe (lot 11) : la résolution est du Node pur
+// (normalisation + « exactement un transcript contient ce bloc »), les lectures
+// de transcripts restent ici — et sont PONCTUELLES, déclenchées par un Create,
+// jamais en tâche de fond (le cadrage a rejeté toute détection permanente).
+const { resolveMaster } = require('./master');
+const { readSlice, parseSlice } = require('./hooks/transcript.js');
 // Purge d'une conv fermée (lot 5) et accusé de lecture (lot 6). On require la
 // lib des hooks au lieu de réécrire l'accès : sessions-state.json est écrit par
 // N process (les hooks) et nous, c'est un vrai read-modify-write concurrent → le
@@ -47,6 +79,62 @@ let ackTracker;
 let ackRecheckTimer = null;
 let soundPlayer;
 let lastSource = null;
+// Ce qui a été DEMANDÉ à la création, par sessionId (lot 1). En mémoire : le
+// lot 2 le persistera avec les groupes. Sert UNIQUEMENT au badge d'écart —
+// jamais à décider quoi que ce soit sur la conversation.
+let intentStore;
+let batchLauncher;
+// Racine du workspace (lot 9) : posée dans activate(), lue par
+// composeBatchNotice() pour situer le transcript d'une session — module-level
+// exprès, sinon le prédicat `hasTranscript` planterait (ReferenceError) hors
+// de la portée locale d'activate().
+let workspacePath;
+// Groupes persistés dans le workspaceState (lot 2) — un groupe appartient au
+// workspace, comme les conversations qu'il contient.
+let groupStore;
+const GROUPS_KEY = 'batchGroups';
+// Repli de la section « New conversation » (lot 12) — workspaceState comme les
+// groupes (décision du plan) : propre à l'espace de travail, jamais un setting
+// global qui suivrait l'utilisateur d'un projet à l'autre. Pas de canal de
+// notification inter-fenêtres pour workspaceState (contrairement aux settings
+// `collapsedConversations`/`collapsedQuota` via onDidChangeConfiguration) — le
+// même filet que les groupes : chaque fenêtre relit sa propre valeur à chaque
+// push, jamais de désynchronisation durable.
+let workspaceStateRef;
+let globalStateRef;
+const NEW_CONV_COLLAPSED_KEY = 'newConversationCollapsed';
+// Astuce du champ paste écartée : par MACHINE (globalState, comme les prompts
+// sons/accessibilité) — « je suis déjà au courant » ne dépend pas du workspace.
+const BATCH_TIP_DISMISSED_KEY = 'batchTipDismissed';
+// Dernier modèle/effort choisis EXPLICITEMENT dans le formulaire (plan
+// sélecteurs 2026-07-24) — workspaceState comme les groupes : le formulaire
+// doit retomber sur le dernier geste de CE workspace après un Create, jamais
+// sauter sur le défaut global (`inherit`, réglage Claude Code au sens large)
+// qui ne sert plus que de repli au tout premier usage (jamais renseigné).
+const LAST_BATCH_MODEL_KEY = 'lastBatchModel';
+const LAST_BATCH_EFFORT_KEY = 'lastBatchEffort';
+// Ménage de stockage à l'activation : un groupe plus vieux que ça ET dont
+// aucune conversation n'est encore connue du panneau ne représente plus rien.
+// Jamais en continu : c'est du nettoyage, pas une règle d'affichage.
+const GROUP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Étage 2 du rattachement : on relit le premier message user des transcripts
+// candidats, donc pas à chaque écriture d'un transcript occupé.
+const ATTACH_RETRY_MS = 2000;
+let lastAttachTry = 0;
+// Retour visible d'un « Create » : compteur pendant, message après. Jamais de
+// popup pour le cas nominal (le panneau EST la surface).
+let batchStatus = { busy: false, notice: null };
+// Dernier lot lancé avec succès, pour recalculer le message d'ouverture à
+// chaque push d'état plutôt que de le figer au moment du « Create » (lot 6,
+// correctif §3 — un member envoyé/fermé rendait l'ancien message faux).
+// `trackedSessionIds` ne porte que les membres RATTACHÉS (étage 1) : les
+// tâches jamais identifiées restent dans le texte statique `staticSuffix`,
+// inchangé, comme avant ce lot.
+let batchLastLaunch = null;
+// Annonce d'ouverture de vague (lot 4, décision 5 : « une ouverture auto est
+// annoncée dans le panneau »). En mémoire, par groupe — un texte transitoire,
+// pas une donnée à survivre au reload (contrairement aux groupes eux-mêmes).
+let waveNotices = new Map();
 
 // Settings VS Code natifs qui font aussi sonner une fin de tour / une
 // question — risque de double son avec les nôtres (lot 1 §5). Un seul
@@ -197,6 +285,33 @@ function activate(context) {
     toggleSounds: () => toggleSounds(context),
     toggleCollapse: (msg) => toggleCollapse(msg && msg.section),
     setSortOrder: (msg) => setSortOrder(msg && msg.order),
+    createBatch: (msg) => createBatch(msg),
+    // Actions de groupe (lot 2). Renommer / dissoudre / lier passent par les
+    // boîtes NATIVES de VS Code (InputBox, QuickPick, modale) plutôt que par des
+    // champs dans le webview : un push d'état (transition de conv, tick quota)
+    // re-rend le panneau, et une saisie en cours y serait perdue — le
+    // formulaire de lot est déjà tout ce qu'on peut se permettre de protéger.
+    renameGroup: (msg) => renameGroup(msg && msg.id),
+    dissolveGroup: (msg) => dissolveGroup(msg && msg.id),
+    toggleGroupCollapse: (msg) => toggleGroupCollapse(msg && msg.id),
+    removeMember: (msg) => removeMember(msg && msg.id, msg && msg.key),
+    linkMember: (msg) => linkMember(msg && msg.id, msg && msg.key),
+    addToGroup: (msg) => addToGroup(msg && msg.id),
+    closeConvTab: (msg) => closeConversationTab(msg),
+    // Moteur de vagues (lot 4).
+    toggleGroupAdvance: (msg) => toggleGroupAdvance(msg && msg.id),
+    launchWave: (msg) => launchWaveForGroup(msg && msg.id, Number(msg && msg.wave), { auto: false }),
+    moveMemberWave: (msg) => moveMemberWave(msg && msg.id, msg && msg.key, Number(msg && msg.delta)),
+    // Conversation maîtresse (lot 11) : étage 2 (édition manuelle) du même
+    // mécanisme — QuickPick natif, comme le lien d'un membre.
+    setGroupMaster: (msg) => setGroupMaster(msg && msg.id),
+    unsetGroupMaster: (msg) => unsetGroupMaster(msg && msg.id),
+    // Astuce du champ paste (2026-07-23) : le × la masque définitivement, le
+    // « ? » du label la ramène. Persisté par machine (globalState), push manuel.
+    dismissBatchTip: () => setBatchTipDismissed(true),
+    restoreBatchTip: () => setBatchTipDismissed(false),
+    // Dernier choix explicite modèle/effort (plan sélecteurs 2026-07-24).
+    setLastBatchChoice: (msg) => setLastBatchChoice(msg && msg.field, msg && msg.value),
   });
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ClaudePanelProvider.viewType, panelProvider, {
@@ -206,7 +321,7 @@ function activate(context) {
 
   // Moteur d'état des conversations (lot 2) : réactif par fs.watch, aucun poll
   // pour l'état — seul le quota réseau reste sur le timer refreshMs.
-  const workspacePath = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]
+  workspacePath = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]
     ? vscode.workspace.workspaceFolders[0].uri.fsPath
     : null;
   // Suivi des onglets (lot 5) : c'est LUI qui décide qu'une conv a disparu, plus
@@ -225,16 +340,23 @@ function activate(context) {
     dispose: () => { clearTimeout(ackRecheckTimer); ackRecheckTimer = null; ackTracker.dispose(); },
   });
 
+  // Titres d'onglet RÉELS (2026-07-22) : seul l'hôte d'extension peut situer le
+  // state.vscdb du workspace, d'où ce câblage ici plutôt qu'un défaut dans
+  // state.js. Absent (pas de workspace, layout VS Code différent) → table vide,
+  // comportement d'avant ce lot.
+  const sessionTitles = createSessionTitles(resolveStateDbPath(context));
+
   stateEngine = createStateEngine({
     workspacePath,
     ...STATE_DEFAULTS,
     tabs: () => tabTracker.getTabs(),
+    sessionTitles: () => sessionTitles.get(),
     sortOrder: () => getConfig().sortOrder,
     // L'ack APRÈS le push : la conv apparaît terminée tout de suite, l'accusé
     // suit. Ici passe le cas « l'onglet était déjà sous les yeux quand Claude a
     // fini » — aucune bascule d'onglet ne se produira, c'est donc l'arrivée du
     // `done` qui doit aller consulter le séjour en cours.
-    onChange: (snap) => { pushPanelState(); ackConversations(); maybeFetchOnTransition(snap); },
+    onChange: (snap) => { attachPendingMembers(); maybeAdvanceWaves(); pushPanelState(); ackConversations(); maybeFetchOnTransition(snap); },
   });
   context.subscriptions.push({ dispose: () => stateEngine.dispose() });
   // Amorce lastConvStates avec le snapshot initial : createStateEngine le
@@ -244,6 +366,41 @@ function activate(context) {
   // aurait `before === undefined` → transition invisible, fetch manqué.
   for (const c of stateEngine.getSnapshot().conversations) lastConvStates.set(c.sessionId, c.state);
 
+  // Création groupée (lot 1) : lanceur sérialisé, dépendances VS Code
+  // injectées (le module se teste sans VS Code). `workspacePath` filtre le diff
+  // du registre des sessions — une conversation ouverte au même instant dans
+  // une AUTRE fenêtre ne doit pas être prise pour la nôtre.
+  intentStore = createIntentStore();
+  // Groupes (lot 2) : workspaceState, pas globalState — un groupe n'a de sens
+  // que là où vivent ses conversations. La persistance rend aussi au badge
+  // d'écart ce que le lot 1 perdait au reload : les intentions de lancement,
+  // réamorcées ici depuis les membres déjà rattachés.
+  groupStore = createGroupStore({
+    load: () => context.workspaceState.get(GROUPS_KEY, []),
+    save: (groups) => { context.workspaceState.update(GROUPS_KEY, groups); },
+  });
+  workspaceStateRef = context.workspaceState;
+  globalStateRef = context.globalState;
+  {
+    const known = new Set(stateEngine.getSnapshot().conversations.map((c) => c.sessionId));
+    const dropped = groupStore.prune(GROUP_MAX_AGE_MS, known);
+    if (dropped) console.log('[QuotaBar] pruned %d stale conversation group(s) from workspace storage', dropped);
+    for (const i of groupStore.intents()) intentStore.record(i.sessionId, i);
+  }
+  batchLauncher = createBatchLauncher({
+    executeCommand: (...args) => vscode.commands.executeCommand(...args),
+    listCommands: () => vscode.commands.getCommands(true),
+    env: process.env,
+    workspacePath,
+    writeClipboard: (text) => vscode.env.clipboard.writeText(text),
+    showMessage: (text) => vscode.window.showWarningMessage(text),
+    // Colonne active = les onglets du lot s'empilent là où l'utilisateur
+    // travaille. `undefined` si l'enum n'est pas là (mock de banc, API future) :
+    // editor.open reprend alors son propre défaut — dégradation silencieuse.
+    viewColumn: vscode.ViewColumn ? vscode.ViewColumn.Active : undefined,
+    t: (...args) => vscode.l10n.t(...args),
+  });
+
   // Relais de focus inter-fenêtres (lot 4) : le panneau liste les convs du
   // workspace, dont certaines ont leur onglet dans une AUTRE fenêtre VS Code.
   // Chaque instance écoute les requêtes ; celle qui possède l'onglet répond.
@@ -251,6 +408,9 @@ function activate(context) {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
+      // Réglage officiel de l'extension Claude, pas le nôtre : il décide si nos
+      // sélecteurs modèle/effort servent à quelque chose (cf. envConflict).
+      if (e.affectsConfiguration('claudeCode.environmentVariables')) pushPanelState();
       if (e.affectsConfiguration('claudeCodeQuotaBar')) {
         restartTimer();
         // Le tri est un champ du snapshot mis en cache par stateEngine
@@ -287,6 +447,31 @@ function activate(context) {
   // onChange (qui ne tire que sur un rendu qui change).
   canaryTicker = setInterval(checkTabCanary, CANARY_TICK_MS);
   context.subscriptions.push({ dispose: () => clearInterval(canaryTicker) });
+}
+
+// Chemin du state.vscdb du workspace courant — la table sessionId → titre
+// d'onglet réel (session-titles.js) y vit, sous la clé agentSessions.model.cache.
+//
+// VS Code ne l'expose pas : on le déduit de `context.storageUri`, qui vaut
+// `…/workspaceStorage/<hash>/<publisher.extension>`. Le state.vscdb est le
+// VOISIN de ce dossier d'extension, c.-à-d. un cran au-dessus
+// (`…/workspaceStorage/<hash>/state.vscdb`) — vérifié sur cette machine, contre
+// deux crans dans le plan initial. On tolère quand même le cran suivant : c'est
+// un internal, et le seul coût d'une mauvaise devinette serait de perdre les
+// titres d'onglets sans rien dire. `storageUri` absent (aucun dossier ouvert)
+// → null → dégradation silencieuse.
+function resolveStateDbPath(context) {
+  try {
+    const base = context && context.storageUri && context.storageUri.fsPath;
+    if (!base) return null;
+    let dir = path.dirname(base);
+    for (let i = 0; i < 2; i++) {
+      const candidate = path.join(dir, 'state.vscdb');
+      if (fs.existsSync(candidate)) return candidate;
+      dir = path.dirname(dir);
+    }
+  } catch {}
+  return null;
 }
 
 function startTimer(ms) {
@@ -390,14 +575,40 @@ async function fetchAndUpdate(force = false) {
 // Jeu de démo : valide le rendu des 5 états sans attendre qu'ils se produisent.
 // Couture de test (env var) — aucun impact en usage normal.
 const DEMO_CONVERSATIONS = [
-  { id: 'd1', title: 'Implémenter le lot 1 du panneau sidebar', model: 'Opus 4.8', ctx: { pct: 34, tokens: 340000, denom: 1000000 }, state: 'busy', acked: true, active: true },
-  { id: 'd2', title: 'Refonte du digest mail', model: 'Sonnet 5', ctx: { pct: 71, tokens: 142000, denom: 200000 }, state: 'waiting', acked: true, active: false },
-  { id: 'd3', title: 'Watchdog Jeedom Z-Wave', model: 'Haiku 4.5', ctx: { pct: 12, tokens: 24000, denom: 200000 }, state: 'done', acked: false, active: false },
-  { id: 'd4', title: 'Portage web PlanningTP', model: 'Opus 4.8', ctx: { pct: 88, tokens: 880000, denom: 1000000 }, state: 'stale', acked: true, active: false },
-  { id: 'd5', title: 'Tri des scans', model: null, ctx: null, state: 'idle', acked: true, active: false },
-  { id: 'd6', title: 'Sondage BBQ Cloudflare Pages', model: 'Sonnet 5', ctx: { pct: 22, tokens: 44000, denom: 200000 }, state: 'done', acked: true, active: false },
-  { id: 'd7', title: 'Migration des scripts PowerShell', model: 'Opus 4.8', ctx: { pct: 47, tokens: 470000, denom: 1000000 }, state: 'interrupted', acked: true, active: false },
+  { id: 'd1', title: 'Implémenter le lot 1 du panneau sidebar', model: 'Opus 4.8', effort: 'high', ctx: { pct: 34, tokens: 340000, denom: 1000000 }, state: 'busy', acked: true, active: true, groupId: 'demo-g' },
+  { id: 'd2', title: 'Refonte du digest mail', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 71, tokens: 142000, denom: 200000 }, state: 'waiting', acked: true, active: false },
+  { id: 'd3', title: 'Watchdog Jeedom Z-Wave', model: 'Haiku 4.5', effort: 'low', ctx: { pct: 12, tokens: 24000, denom: 200000 }, state: 'done', acked: false, active: false, groupId: 'demo-g', tabOpen: true },
+  { id: 'd4', title: 'Portage web PlanningTP', model: 'Opus 4.8', effort: 'high', ctx: { pct: 88, tokens: 880000, denom: 1000000 }, state: 'stale', acked: true, active: false },
+  { id: 'd5', title: 'Tri des scans', model: null, effort: null, ctx: null, state: 'idle', acked: true, active: false },
+  // Écart intention/réel (lot 1) : demandé en opus·high au lancement, servi en
+  // sonnet·medium — le badge est le SEUL mécanisme qui le signale.
+  { id: 'd6', title: 'Sondage BBQ Cloudflare Pages', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 22, tokens: 44000, denom: 200000 }, state: 'done', acked: true, active: false, asked: { model: 'opus', effort: 'high' }, mismatch: { model: { asked: 'opus', real: 'sonnet' }, effort: { asked: 'high', real: 'medium' } } },
+  { id: 'd7', title: 'Migration des scripts PowerShell', model: 'Opus 4.8', effort: 'high', ctx: { pct: 47, tokens: 470000, denom: 1000000 }, state: 'interrupted', acked: true, active: false },
 ];
+
+// Groupe de démonstration (lot 2), rendu en mode CLAUDE_QUOTA_PANEL_DEMO : les
+// trois cas qu'un groupe peut afficher — un membre au travail, un membre
+// terminé dont l'onglet est encore ouvert (badge ⨯), et un membre pas encore
+// rattaché à une conversation.
+const DEMO_GROUPS = [{
+  id: 'demo-g',
+  name: 'Refonte du paiement',
+  hue: hueOf('Refonte du paiement'),
+  collapsed: false,
+  // Moteur de vagues (lot 4) : vague 1 en cours (d1 busy, d3 done), vague 2
+  // encore `queued` — le cas type de « unlocks when wave 1 is fully done ».
+  autoAdvance: true,
+  launchedWave: 1,
+  nextWave: 2,
+  waveNotice: null,
+  // Démo : les champs dérivés de la table de vérité (lot 10) sont écrits à la
+  // main ici — aucune source réelle derrière une conversation fictive.
+  members: [
+    { key: 'm1', prompt: 'Implémenter le lot 1 du panneau sidebar', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'd1', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, note: '', hint: '' },
+    { key: 'm2', prompt: 'Watchdog Jeedom Z-Wave', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd3', status: 'done', waveStatus: 'done', canLink: false, canClose: true, note: '', hint: '' },
+    { key: 'm3', prompt: 'Mettre à jour la doc une fois les deux autres terminées', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, note: '', hint: 'Queued — opens when this wave starts.' },
+  ],
+}];
 
 // Onglet(s) Claude fermé(s) → les convs correspondantes quittent le panneau.
 // Deux temps, dans cet ordre :
@@ -409,7 +620,7 @@ const DEMO_CONVERSATIONS = [
 function closeConversations(labels) {
   if (!stateEngine || !labels || !labels.length) return;
   const ids = stateEngine.getSnapshot().conversations
-    .filter((c) => labels.some((l) => labelMatches(l, c.title)))
+    .filter((c) => labels.some((l) => convMatchesLabel(l, c)))
     .map((c) => c.sessionId);
   if (!ids.length) return;
   stateEngine.markClosed(ids);
@@ -461,7 +672,7 @@ function ackConversations() {
   let soonest = Infinity;
   for (const c of stateEngine.getSnapshot().conversations) {
     if (c.state !== 'done' || c.acked) continue;
-    if (!labelMatches(label, c.title)) continue;
+    if (!convMatchesLabel(label, c)) continue;
     if (c.busySince != null && dwellSince != null && dwellSince <= c.busySince) continue;
     const watchedSince = Math.max(dwellSince || 0, c.since || 0);
     const remaining = ACK_DWELL_MS - (now - watchedSince);
@@ -548,15 +759,155 @@ function checkTabCanary() {
 function conversationsState() {
   if (process.env.CLAUDE_QUOTA_PANEL_DEMO === '1') return DEMO_CONVERSATIONS;
   if (!stateEngine) return [];
-  return stateEngine.getSnapshot().conversations.map((c) => ({
-    id: c.sessionId,
-    title: c.title,
-    model: c.model,
-    ctx: c.ctx,
-    state: c.state,
-    acked: c.acked !== false,
-    active: c.isActive,
-  }));
+  return stateEngine.getSnapshot().conversations.map((c) => {
+    // VÉRITÉ AFFICHÉE = TRANSCRIPT (décision 6 du plan). `model`/`effort` sont
+    // ce qui tourne réellement ; `asked`/`mismatch` ne sont qu'un commentaire
+    // posé dessus quand on a lancé la conv nous-mêmes ET que le réel diffère.
+    const intent = intentStore ? intentStore.get(c.sessionId) : null;
+    return {
+      id: c.sessionId,
+      title: c.title,
+      tabTitle: c.tabTitle || null,
+      model: c.model,
+      effort: c.effort || null,
+      ctx: c.ctx,
+      state: c.state,
+      acked: c.acked !== false,
+      active: c.isActive,
+      asked: intent ? { model: intent.model, effort: intent.effort } : null,
+      mismatch: mismatchOf(intent, { modelId: c.modelId, effort: c.effort }),
+      // Membre d'un groupe (lot 2) : le webview la rend DANS la section du
+      // groupe et la retire de la liste plate. `null` = conversation ordinaire.
+      groupId: groupStore ? groupStore.groupIdOf(c.sessionId) : null,
+      // Onglet encore ouvert : conditionne le badge « terminé → fermable ».
+      tabOpen: !!c.tabOpen,
+    };
+  });
+}
+
+// Groupes tels que rendus par le panneau. Le webview ne reçoit QUE des
+// métadonnées : l'état, le modèle, le contexte d'un membre viennent de la
+// conversation correspondante (conversations[], appariée par `convId`) — un
+// membre n'a pas d'état propre, il pointe une conversation qui, elle, en a un.
+// SEULE EXCEPTION : `status` (lot 4 — queued/launched/done/stale), calculé ici
+// une fois pour le rendu des en-têtes de vague ET pour waves.js, plutôt que de
+// faire au webview un second calcul potentiellement divergent.
+//
+// `convs` = sortie de conversationsState(), déjà calculée par buildPanelState
+// — un seul passage sur stateEngine, pas un second par groupe.
+function groupsState(convs, sources) {
+  if (process.env.CLAUDE_QUOTA_PANEL_DEMO === '1') return DEMO_GROUPS;
+  if (!groupStore) return [];
+  const convById = new Map((convs || []).map((c) => [c.id, c]));
+  const src = sources || memberSources((id) => convById.get(id));
+  return groupStore.all().map((g) => {
+    // UNE résolution par membre (lot 10), partagée par le moteur de vagues et
+    // par le rendu : le webview ne re-déduit plus rien de « la conversation
+    // est-elle dans la liste » — il affiche ce que la table a conclu.
+    const truths = g.members.map((m) => memberTruth(m, src));
+    const abstract = g.members.map((m, i) => ({ wave: m.wave, status: truths[i].waveStatus }));
+    return {
+      id: g.id,
+      name: g.name,
+      hue: hueOf(g.name),
+      collapsed: !!g.collapsed,
+      autoAdvance: !!g.autoAdvance,
+      // Conv maîtresse (lot 11) : un POINTEUR vers une conversation qui vit sa
+      // vie ailleurs — elle n'est pas un membre, ne compte dans aucune vague, et
+      // n'est pas retirée de la liste plate. Son statut passe par la MÊME table
+      // de vérité que les membres (lot 10) : la vue ne décide de rien, ici non
+      // plus. `title` = celui de la conv si elle est listée, sinon celui qui a
+      // été persisté au moment du lien.
+      master: masterState(g, src, convById),
+      launchedWave: launchedWave(abstract),
+      nextWave: canForceLaunch(abstract),
+      waveNotice: waveNotices.get(g.id) || null,
+      members: g.members.map((m, i) => ({
+        key: m.key,
+        prompt: m.prompt,
+        wave: m.wave,
+        asked: { model: m.model, effort: m.effort },
+        convId: m.sessionId || null,
+        // Statut canonique (affichage) et sa projection sur le vocabulaire du
+        // moteur de vagues (comptages, en-têtes) — cf. member-truth.js.
+        status: truths[i].status,
+        waveStatus: truths[i].waveStatus,
+        canLink: truths[i].canLink,
+        canClose: truths[i].canClose,
+        // NOTES/HINTS (member-truth.js) sont du Node pur, sans vscode — le
+        // texte anglais qu'elles rendent sert de CLÉ à la traduction ici, au
+        // seul point où le résultat part vers l'affichage.
+        note: truths[i].note ? vscode.l10n.t(truths[i].note) : truths[i].note,
+        hint: truths[i].hint ? vscode.l10n.t(truths[i].hint) : truths[i].hint,
+      })),
+    };
+  });
+}
+
+// Ligne de tête d'un groupe (lot 11). `null` quand aucune maîtresse n'est
+// désignée — rien d'inerte à l'écran, comme partout ailleurs dans ce chantier.
+// La conversation reste rendue normalement dans la liste plate (ou dans son
+// propre groupe) : cette ligne la DÉSIGNE, elle ne la déplace pas.
+function masterState(g, src, convById) {
+  if (!g.masterSessionId) return null;
+  const conv = convById.get(g.masterSessionId) || null;
+  const t = memberTruth({ sessionId: g.masterSessionId, launchedAt: 1 }, src);
+  return {
+    convId: g.masterSessionId,
+    // Titre vivant tant que la conv est dans la fenêtre du panneau, titre
+    // persisté ensuite : une ligne de tête qui deviendrait un uuid nu quand la
+    // conv vieillit hors de la vue ne servirait plus à rien.
+    title: (conv && conv.title) || g.masterTitle || vscode.l10n.t('Master conversation'),
+    listed: !!conv,
+    model: (conv && conv.model) || null,
+    effort: (conv && conv.effort) || null,
+    tabTitle: (conv && conv.tabTitle) || null,
+    status: t.status,
+    note: t.note ? vscode.l10n.t(t.note) : t.note,
+    hint: t.hint ? vscode.l10n.t(t.hint) : t.hint,
+  };
+}
+
+// Étage 2 du rattachement (attach.js) : pour les membres qu'aucun fichier de
+// session n'a su nommer, on cherche notre prompt en PREMIER message user d'un
+// transcript non encore rattaché. Ne tourne que s'il reste des membres en
+// attente, et pas plus d'une fois toutes les ATTACH_RETRY_MS — on lit la tête
+// des transcripts candidats, ce n'est pas gratuit.
+const firstUserCache = new Map();          // `${transcript}:${mtime}` → texte|null
+
+function attachPendingMembers() {
+  if (!groupStore || !stateEngine) return false;
+  const pending = groupStore.pending();
+  if (!pending.length) return false;
+  const now = Date.now();
+  if (now - lastAttachTry < ATTACH_RETRY_MS) return false;
+  lastAttachTry = now;
+
+  const taken = groupStore.attachedIds();
+  const candidates = [];
+  for (const c of stateEngine.getSnapshot().conversations) {
+    if (!c.transcript || taken.has(c.sessionId)) continue;
+    const key = `${c.transcript}:${c.mtime || 0}`;
+    let text;
+    if (firstUserCache.has(key)) text = firstUserCache.get(key);
+    else {
+      try { text = firstUserText(c.transcript); } catch { text = null; }
+      firstUserCache.set(key, text);
+      if (firstUserCache.size > 200) firstUserCache.clear();
+    }
+    if (text) candidates.push({ sessionId: c.sessionId, firstUser: text, mtime: c.mtime || 0 });
+  }
+
+  let changed = false;
+  for (const p of matchPending(pending, candidates)) {
+    if (!groupStore.attach(p.groupId, p.key, p.sessionId)) continue;
+    changed = true;
+    const g = groupStore.get(p.groupId);
+    const m = g && g.members.find((x) => x.key === p.key);
+    if (m) intentStore.record(p.sessionId, { model: m.model, effort: m.effort });
+    console.log('[QuotaBar] group member %s/%s linked to session %s by prompt prefix (stage 2)', p.groupId, p.key, p.sessionId);
+  }
+  return changed;
 }
 
 // % de la fenêtre déjà écoulé au moment présent. Null si le reset est trop
@@ -609,9 +960,9 @@ function quotaState() {
   if (!cached || !cached.data) return { windows: [], burnRate, ageMin: null, source: null };
   const windows = [];
   const fh = cached.data.five_hour;
-  if (fh && fh.utilization != null) windows.push(mkWindow('5h window', fh.utilization, fh.resets_at, FIVE_HOUR_MS, burnRate));
+  if (fh && fh.utilization != null) windows.push(mkWindow(vscode.l10n.t('5h window'), fh.utilization, fh.resets_at, FIVE_HOUR_MS, burnRate));
   const sd = cached.data.seven_day;
-  if (sd && sd.utilization != null) windows.push(mkWindow('7d window', sd.utilization, sd.resets_at, SEVEN_DAY_MS, burnRate));
+  if (sd && sd.utilization != null) windows.push(mkWindow(vscode.l10n.t('7d window'), sd.utilization, sd.resets_at, SEVEN_DAY_MS, burnRate));
   // Barres hebdo scopées par modèle (ex. Fable 50 % de l'hebdo jusqu'au
   // 19/07) : AUCUNE référence en dur à un modèle ni une date — toute entrée
   // limits[] avec group:"weekly" et un scope produit sa barre, et disparaît
@@ -619,25 +970,57 @@ function quotaState() {
   const limits = Array.isArray(cached.data.limits) ? cached.data.limits : [];
   for (const l of limits) {
     if (l.group !== 'weekly' || !l.scope || !l.scope.model) continue;
-    const name = l.scope.model.display_name || 'scoped';
-    windows.push(mkWindow(`${name} (7d)`, l.percent, l.resets_at, SEVEN_DAY_MS, burnRate));
+    const name = l.scope.model.display_name || vscode.l10n.t('scoped');
+    windows.push(mkWindow(vscode.l10n.t('{0} (7d)', name), l.percent, l.resets_at, SEVEN_DAY_MS, burnRate));
   }
   return { windows, burnRate, ageMin: Math.round((Date.now() - cached.timestamp) / 60000), source: lastSource };
 }
 
 function buildPanelState() {
   const cfg = getConfig();
+  const convs = conversationsState();
+  // Une seule résolution de vérité par push (lot 10) : le bandeau de batch et
+  // les groupes lisent le MÊME registre de sessions et le MÊME sessions-state,
+  // dans le même instant — deux lectures ne pourraient que se contredire.
+  const convById = new Map(convs.map((c) => [c.id, c]));
+  const sources = memberSources((id) => convById.get(id));
   return {
-    conversations: conversationsState(),
+    conversations: convs,
     quota: quotaState(),
     sounds: { enabled: cfg.soundsEnabled },
     ui: {
       collapsedConversations: cfg.collapsedConversations,
       collapsedQuota: cfg.collapsedQuota,
       sortOrder: cfg.sortOrder,
+      collapsedNewConversation: !!(workspaceStateRef && workspaceStateRef.get(NEW_CONV_COLLAPSED_KEY, false)),
     },
     // Lot 13 §1 : indicateur discret, jamais de popup — voir checkTabCanary().
     canary: canaryActive,
+    // Formulaire de création groupée (lot 1). `notice` est recalculé à CHAQUE
+    // push (lot 6, correctif §3) plutôt que figé au moment du « Create » : sans
+    // ça, le message restait affiché après que tous les onglets aient été
+    // envoyés, fermés ou rouverts.
+    batch: {
+      envConflict: envConflictVars(),
+      busy: batchStatus.busy,
+      notice: batchStatus.busy ? batchStatus.notice : composeBatchNotice(convs, sources),
+      // Lot 12 §3, pré-sélection au lot 14 : relu à CHAQUE push, jamais mis en
+      // cache — /effort dans n'importe quelle conversation fait dériver ce
+      // défaut global (NOTES). { model: null, effort: null } si le fichier est
+      // illisible/absent ou le champ manquant : le webview n'allume alors
+      // aucun bouton et désactive Create (jamais une valeur inventée).
+      inherit: readInheritSettings(),
+      // Dernier choix explicite du formulaire, par workspace (plan sélecteurs
+      // 2026-07-24) — prime sur `inherit` côté webview ; `null` tant que rien
+      // n'a jamais été cliqué (repli sur `inherit`, premier usage seulement).
+      lastModel: (workspaceStateRef && workspaceStateRef.get(LAST_BATCH_MODEL_KEY, null)) || null,
+      lastEffort: (workspaceStateRef && workspaceStateRef.get(LAST_BATCH_EFFORT_KEY, null)) || null,
+      // Astuce écartée ? (globalState, par machine) — le webview montre alors
+      // seulement le « ? » de restauration sur le label.
+      tipDismissed: !!(globalStateRef && globalStateRef.get(BATCH_TIP_DISMISSED_KEY, false)),
+    },
+    // Groupes persistés (lot 2), vagues résolues (lot 4).
+    groups: groupsState(convs, sources),
   };
 }
 
@@ -651,22 +1034,22 @@ function buildPanelState() {
 async function installHooks(context) {
   const scriptPath = path.join(context.extensionPath, 'install.ps1');
   if (!fs.existsSync(scriptPath)) {
-    vscode.window.showErrorMessage('Claude Convs: install.ps1 not found in the extension folder.');
+    vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: install.ps1 not found in the extension folder.'));
     return;
   }
 
   const choice = await vscode.window.showWarningMessage(
-    'This will deploy Claude Code hooks so the panel can show live conversation state (busy/waiting/done) instead of idle only. It writes to:\n' +
-    '• ~/.claude/scripts/ (copies the hook scripts)\n' +
-    '• ~/.claude/settings.json (adds a statusLine entry and UserPromptSubmit/Stop/Notification/SessionEnd hooks — a timestamped backup is made first, and only missing entries are added)\n\n' +
-    'Continue?',
+    vscode.l10n.t('This will deploy Claude Code hooks so the panel can show live conversation state (busy/waiting/done) instead of idle only. It writes to:\n') +
+    vscode.l10n.t('• ~/.claude/scripts/ (copies the hook scripts)\n') +
+    vscode.l10n.t('• ~/.claude/settings.json (adds a statusLine entry and UserPromptSubmit/Stop/Notification/SessionEnd hooks — a timestamped backup is made first, and only missing entries are added)\n\n') +
+    vscode.l10n.t('Continue?'),
     { modal: true },
-    'Install hooks'
+    vscode.l10n.t('Install hooks')
   );
-  if (choice !== 'Install hooks') return;
+  if (choice !== vscode.l10n.t('Install hooks')) return;
 
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Claude Convs: installing hooks…' },
+    { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Claude Convs: installing hooks…') },
     () => new Promise((resolve) => {
       execFile(
         'powershell.exe',
@@ -674,10 +1057,10 @@ async function installHooks(context) {
         { windowsHide: true, timeout: 30000 },
         (err, stdout, stderr) => {
           if (err) {
-            vscode.window.showErrorMessage(`Claude Convs: hook installation failed — ${(stderr || err.message || '').trim().slice(0, 500)}`);
+            vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: hook installation failed — {0}', (stderr || err.message || '').trim().slice(0, 500)));
           } else {
-            vscode.window.showInformationMessage('Claude Convs: hooks installed. Reload the window for the panel to pick up live conversation state.', 'Reload Window')
-              .then((pick) => { if (pick === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow'); });
+            vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: hooks installed. Reload the window for the panel to pick up live conversation state.'), vscode.l10n.t('Reload Window'))
+              .then((pick) => { if (pick === vscode.l10n.t('Reload Window')) vscode.commands.executeCommand('workbench.action.reloadWindow'); });
           }
           resolve();
         }
@@ -702,12 +1085,533 @@ async function toggleSounds(context) {
 // onDidChangeConfiguration (activate()) repousse l'état à toutes les fenêtres,
 // même pattern que toggleSounds.
 async function toggleCollapse(section) {
+  // Section « New conversation » (lot 12) : workspaceState, pas un setting —
+  // pas de onDidChangeConfiguration pour la repousser aux autres fenêtres,
+  // donc un push manuel juste après (même filet que createBatch/groupStore).
+  if (section === 'newConversation') {
+    if (!workspaceStateRef) return;
+    const current = !!workspaceStateRef.get(NEW_CONV_COLLAPSED_KEY, false);
+    try { await workspaceStateRef.update(NEW_CONV_COLLAPSED_KEY, !current); } catch {}
+    pushPanelState();
+    return;
+  }
   const key = section === 'conversations' ? 'collapsedConversations'
     : section === 'quota' ? 'collapsedQuota' : null;
   if (!key) return;
   const cfg = vscode.workspace.getConfiguration('claudeCodeQuotaBar');
   const current = cfg.get(key, false);
   try { await cfg.update(key, !current, vscode.ConfigurationTarget.Global); } catch {}
+}
+
+// Astuce du champ paste : écartée/restaurée, persisté par machine (globalState).
+// Push manuel comme la section « New conversation » — le globalState n'a pas
+// d'événement de propagation type onDidChangeConfiguration.
+async function setBatchTipDismissed(dismissed) {
+  if (!globalStateRef) return;
+  try { await globalStateRef.update(BATCH_TIP_DISMISSED_KEY, !!dismissed); } catch {}
+  pushPanelState();
+}
+
+// Dernier choix explicite modèle/effort du formulaire (plan sélecteurs
+// 2026-07-24) — écrit à CHAQUE clic sur un bouton segmenté, pas seulement au
+// Create : le défaut d'une tâche vierge doit refléter le dernier geste même
+// sans lancement. `field`/`value` reviennent d'un webview qui n'a pas require
+// (copie locale de MODELS/EFFORTS) : on revalide contre la liste canonique de
+// batch.js avant d'écrire, jamais une valeur exotique en workspaceState.
+async function setLastBatchChoice(field, value) {
+  if (!workspaceStateRef) return;
+  if (field === 'model') {
+    if (!MODELS.includes(value)) return;
+    try { await workspaceStateRef.update(LAST_BATCH_MODEL_KEY, value); } catch {}
+  } else if (field === 'effort') {
+    if (!EFFORTS.includes(value)) return;
+    try { await workspaceStateRef.update(LAST_BATCH_EFFORT_KEY, value); } catch {}
+  } else {
+    return;
+  }
+  pushPanelState();
+}
+
+// « Create » du formulaire de lot (lot 1, exécution des vagues au lot 4). Le
+// webview n'envoie que des intentions : c'est ici qu'on valide (normalizeTasks
+// — le webview n'est pas une source fiable), qu'on lance, et qu'on enregistre
+// ce qui a été demandé.
+//
+// SEULE LA VAGUE 1 PART À LA CRÉATION (décision 5 du plan) : les vagues
+// suivantes naissent `queued` dans le groupe (groups.js memberOfTask) et
+// s'ouvrent au fil des `done` (maybeAdvanceWaves, auto) ou du bouton ▶
+// (launchWaveForGroup, manuel).
+async function createBatch(msg) {
+  if (!batchLauncher || batchStatus.busy) return;
+  // Filet défensif (lot 14) : le formulaire a déjà résolu chaque tâche, mais
+  // une tâche mal formée (msg trafiqué, ancien webview en cache) retombe ici
+  // sur le défaut résolu plutôt que sur une valeur inventée.
+  const tasks = normalizeTasks(msg && msg.tasks, readInheritSettings());
+  if (!tasks.length) return;
+
+  const waveCount = new Set(tasks.map((t) => t.wave)).size;
+  const wave1 = tasks.filter((t) => t.wave === 1);
+  batchStatus = { busy: true, notice: vscode.l10n.t('Opening {0} conversation(s)…', wave1.length) };
+
+  // LE FORMULAIRE EST LE GROUPE (décision 3 du plan) — sauf pour une tâche
+  // unique : un groupe d'un seul membre n'apporte que du chrome, et le parcours
+  // utilisateur du plan le dit explicitement (« une seule tâche = pas de groupe
+  // créé, juste une conv »).
+  //
+  // Le groupe est créé AVANT le lancement, avec TOUTES les tâches (vagues à
+  // venir comprises) : les ouvertures sont sérialisées et prennent une seconde
+  // chacune, l'utilisateur doit voir tout de suite ce qu'il vient de demander.
+  // Ses membres de la vague 1 naissent sans sessionId (« pas encore lancé »)
+  // et se rattachent au fil des étages 1 puis 2 ; ceux des vagues suivantes
+  // naissent `queued` (groups.js) tant que leur vague n'est pas ouverte.
+  const group = tasks.length > 1 && groupStore
+    ? groupStore.create(msg && msg.groupName, tasks, msg && msg.advance)
+    : null;
+  // Conversation maîtresse (lot 11) : cherchée ICI, à la naissance du groupe —
+  // c'est le seul instant où elle a un sens (un groupe pour la porter, un
+  // collage tout frais pour la désigner). Le webview ne transmet le texte collé
+  // QUE lorsqu'il a reconnu un bloc claude-convs valide (plan : « au collage
+  // d'un bloc VALIDE ») ; sans lui, aucune recherche n'a lieu.
+  const master = group ? resolveMasterForGroup(group.id, msg && msg.paste, msg && msg.session) : null;
+  pushPanelState();
+
+  let result = null;
+  try {
+    result = await batchLauncher.launch(wave1);
+  } catch (e) {
+    batchLastLaunch = null;
+    batchStatus = { busy: false, notice: vscode.l10n.t('Batch failed: {0}', (e && e.message) || vscode.l10n.t('unknown error')) };
+    pushPanelState();
+    return;
+  }
+
+  for (let i = 0; i < result.launched.length; i++) {
+    const r = result.launched[i];
+    if (!r.sessionId) continue;
+    intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort });
+    // Étage 1 : launcher.js rend ses résultats dans l'ordre des tâches de la
+    // vague 1, qui sont aussi les premiers membres du groupe (normalizeTasks
+    // trie par vague — la vague 1 est toujours en tête).
+    if (group) groupStore.attachByIndex(group.id, i, r.sessionId);
+  }
+
+  const unlinked = result.launched.filter((r) => !r.sessionId).length;
+  // Partie FIXE du message (ce qui ne dépend d'aucun état vivant) : nom de
+  // groupe, annonce de vague, non-identifiés, repli — la partie « N/M ouverts,
+  // Entrée dans chaque onglet » est recalculée à chaque push par
+  // composeBatchNotice(), cf. déclaration de batchLastLaunch.
+  let staticSuffix = '';
+  if (group) staticSuffix += vscode.l10n.t(' Grouped as “{0}”.', group.name);
+  if (master) {
+    staticSuffix += master.title
+      ? vscode.l10n.t(' Master conversation: “{0}”.', master.title)
+      : vscode.l10n.t(' Master conversation linked.');
+  }
+  if (waveCount > 1) {
+    staticSuffix += vscode.l10n.t(' Wave 1 of {0} opened — the rest will follow (auto) or wait for ▶ (manual).', waveCount);
+  }
+  // Depuis le lot 2, « pas de fichier de session » n'est plus un cul-de-sac :
+  // l'étage 2 réessaie par le prompt dès que la conversation a démarré, et
+  // l'étage 3 (« Link… ») reste disponible dans le groupe.
+  if (unlinked) {
+    staticSuffix += group
+      ? vscode.l10n.t(' {0} not identified yet — they will link themselves once started, or use “Link…” in the group.', unlinked)
+      : vscode.l10n.t(' {0} could not be identified (no session file) — model/effort mismatch badge unavailable for those.', unlinked);
+  }
+  if (result.fallbackAt != null) staticSuffix += vscode.l10n.t(' Stopped at task {0} — see the message above.', result.fallbackAt + 1);
+  // Hint discret (lot 7, livrable 3) : la limite cosmétique du menu officiel
+  // (son sélecteur d'effort se cale sur le modèle par défaut PERSISTÉ tant que
+  // le premier tour n'a pas tourné, cf. README « Known limitations »). Lot 14 :
+  // un modèle sélectionné est TOUJOURS explicite désormais — ANTHROPIC_MODEL
+  // est posée à CHAQUE lancement (plus de cas « lot 100% inherit » où rien
+  // n'aurait été posé) — donc le hint s'affiche systématiquement.
+  staticSuffix += vscode.l10n.t(' (The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.)');
+
+  batchLastLaunch = {
+    total: result.total,
+    trackedSessionIds: result.launched.filter((r) => r.sessionId).map((r) => r.sessionId),
+    staticSuffix,
+  };
+  batchStatus = { busy: false, notice: composeBatchNotice(conversationsState()) };
+  pushPanelState();
+}
+
+// Recalcule la partie vivante du message de « Create » : combien de membres du
+// dernier lot restent « insérés » (onglet ouvert, rien envoyé — le process CLI
+// tourne mais aucun hook n'a encore écrit d'entrée dans le snapshot), combien
+// ont été envoyés (une entrée existe désormais), combien ont fermé leur onglet
+// SANS avoir rien envoyé (le process a disparu du registre des sessions
+// vivantes sans jamais avoir laissé de trace dans le snapshot). Rend `null`
+// quand il n'y a plus rien à signaler — le bandeau disparaît alors du panneau
+// (cf. panel.js renderBatch).
+//
+// Fonction PURE (`launch`/`convs`/`aliveIds`/`hasTranscript` injectés, aucun
+// état de module) : testable directement, sans mock VS Code — cf.
+// test/test-batch-notice.js. `fallback` = ce qui s'affiche quand il n'y a rien
+// à recalculer (batch jamais lancé, ou 100% en repli presse-papier).
+//
+// `hasTranscript(sessionId)` (lot 9) : « a envoyé » est un fait IRRÉVERSIBLE —
+// une session dont le transcript `~/.claude/projects/<ws>/<sessionId>.jsonl`
+// existe (il naît au premier envoi, jamais avant) n'est JAMAIS reclassée
+// « closed before sending », qu'elle soit encore dans `convs` (la VUE, volatile
+// — aged-out du snapshot, capped par maxItems) ou non. Sans ce prédicat
+// (paramètre omis, comme les bancs existants), le comportement d'avant ce lot
+// est inchangé — dégradation silencieuse.
+// Sources de la table de vérité (member-truth.js), assemblées UNE fois par
+// recompute et partagées par ses trois consommateurs — rendu des groupes,
+// moteur de vagues, bandeau de batch. Deux lectures disque au plus (registre
+// des sessions, sessions-state.json), toutes deux PARESSEUSES : un panneau sans
+// groupe ni lot en cours ne lit rien du tout. Et surtout : une seule et même
+// réponse à « où en est ce membre ? », quel que soit l'affichage qui la pose.
+//
+// `getConv` vient de l'appelant : la vue n'a pas la même forme selon qu'on
+// parte du snapshot de state.js (`sessionId`) ou de conversationsState()
+// (`id`) — memberTruth n'y lit de toute façon que `state` et `tabOpen`.
+function memberSources(getConv) {
+  let live = null;
+  let hooks = null;
+  let dir;
+  return {
+    getConv: typeof getConv === 'function' ? getConv : () => null,
+    isLive(id) {
+      if (!live) { try { live = liveSessionIds(); } catch { live = new Set(); } }
+      return live.has(id);
+    },
+    // « A envoyé » est un fait durable (lot 9) : le transcript naît au premier
+    // envoi et ne disparaît plus.
+    hasTranscript(id) {
+      if (dir === undefined) dir = workspacePath ? projectDirFor(workspacePath) : null;
+      if (!dir) return false;
+      try { return fs.existsSync(path.join(dir, id + '.jsonl')); } catch { return false; }
+    },
+    // État posé par les hooks — il survit à la sortie de la vue, ce qui
+    // distingue une conversation terminée dont on a fermé l'onglet (`done`)
+    // d'une conversation vraiment interrompue.
+    hookState(id) {
+      if (!hooks) { try { hooks = readSessionsState() || {}; } catch { hooks = {}; } }
+      const e = hooks[id];
+      return (e && e.state) || null;
+    },
+  };
+}
+
+function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTranscript) {
+  if (!launch) return fallback;
+  const { total, trackedSessionIds, staticSuffix } = launch;
+  // Aucun membre rattaché à suivre (tout non identifié dès le départ, ou lot
+  // 100% en repli presse-papier) : rien à recalculer, le texte d'origine reste
+  // affiché tel quel — dégradation silencieuse, pas de régression.
+  if (!trackedSessionIds.length) return fallback;
+
+  // `sessionId` (snapshot de state.js) OU `id` (conversationsState, ce que
+  // reçoit réellement buildPanelState) : indexer sur le seul `sessionId`
+  // fabriquait une Map à clé `undefined` — la vue ne comptait donc jamais, et
+  // seul le transcript du lot 9 sauvait le calcul.
+  const byId = new Map((convs || []).map((c) => [c.sessionId || c.id, c]));
+  // `aliveIds` accepte un Set (appel historique, bancs) ou un prédicat — les
+  // sources partagées de memberSources() exposent une fonction.
+  const isLive = aliveIds && typeof aliveIds.has === 'function'
+    ? (id) => aliveIds.has(id)
+    : (typeof aliveIds === 'function' ? aliveIds : () => false);
+  const sources = {
+    isLive,
+    hasTranscript: typeof hasTranscript === 'function' ? hasTranscript : () => false,
+    getConv: (id) => byId.get(id),
+  };
+
+  // Classement par la table de vérité (lot 10), plus par une chaîne de `if`
+  // locale : « en attente d'Entrée » = statut `inserted`, « fermé sans rien
+  // envoyer » = `unsent-closed`, tout le reste a envoyé. Les trois autres
+  // consommateurs répondent exactement pareil.
+  let sent = 0, pending = 0, closed = 0;
+  for (const id of trackedSessionIds) {
+    const t = memberTruth({ sessionId: id, launchedAt: 1 }, sources);
+    if (t.status === 'inserted') pending++;
+    else if (t.status === 'unsent-closed') closed++;
+    else sent++;
+  }
+
+  if (pending === 0) {
+    // Plus aucun membre « inserted » : tout est parti, ou ce qui reste a fermé
+    // sans jamais avoir été envoyé — le message change de nature (décision du
+    // plan) plutôt que de continuer à réclamer un Entrée qui ne viendra plus.
+    if (!closed) return null;
+    return closed > 1
+      ? vscode.l10n.t('{0} tabs closed before sending — reopen them and press Enter to link them to a conversation.', closed)
+      : vscode.l10n.t('{0} tab closed before sending — reopen it and press Enter to link it to a conversation.', closed);
+  }
+
+  let notice = vscode.l10n.t('{0}/{1} conversation(s) opened — press Enter in each tab.', sent, total);
+  if (closed) {
+    notice += closed > 1
+      ? vscode.l10n.t(' {0} tabs closed before sending.', closed)
+      : vscode.l10n.t(' {0} tab closed before sending.', closed);
+  }
+  return notice + staticSuffix;
+}
+
+// `sources` = celles du recompute en cours (buildPanelState) quand il y en a —
+// sinon on en fabrique : ce chemin sert aussi juste après un « Create », hors
+// de tout push.
+function composeBatchNotice(convs, sources) {
+  const s = sources || memberSources();
+  return computeBatchNoticeFromLaunch(
+    batchLastLaunch,
+    convs,
+    (id) => s.isLive(id),
+    batchStatus.notice,
+    (id) => s.hasTranscript(id)
+  );
+}
+
+// ── Moteur de vagues (lot 4), statuts résolus par la table de vérité (lot 10) ─
+//
+// Jusqu'au lot 10, un membre dont la conversation n'apparaissait plus dans la
+// LISTE du panneau était déclaré `stale` — donc au Create, où rien n'a encore
+// de transcript et où RIEN n'est listé, toute la vague 1 naissait « interrompue »
+// (bandeau rouge, auto suspendu). Le statut vient désormais de member-truth.js,
+// qui interroge d'abord la VIVACITÉ (registre des sessions) : onglet ouvert +
+// rien d'envoyé = `inserted`, pas `stale`.
+
+// Ouvre la vague `waveNumber` d'un groupe : filtre les membres pas encore
+// lancés (défense contre un double appel — auto + clic manuel simultanés),
+// les marque `launched` AVANT l'attente réseau/CLI (pour que markLaunched
+// serve de verrou synchrone), puis lance et rattache comme launchBatch.
+async function launchWaveForGroup(id, waveNumber, opts = {}) {
+  if (!groupStore || !batchLauncher || !Number.isFinite(waveNumber)) return;
+  const g = groupStore.get(id);
+  if (!g) return;
+  const members = groupStore.membersOfWave(id, waveNumber).filter((m) => m.launchedAt == null);
+  if (!members.length) return;
+
+  const at = Date.now();
+  for (const m of members) groupStore.markLaunched(id, m.key, at);
+  waveNotices.delete(id);
+  pushPanelState();
+
+  const tasks = members.map((m) => ({ prompt: m.prompt, model: m.model, effort: m.effort, wave: waveNumber }));
+  let result;
+  try {
+    result = await batchLauncher.launch(tasks);
+  } catch (e) {
+    waveNotices.set(id, vscode.l10n.t('Wave {0}: could not open — {1}.', waveNumber, (e && e.message) || vscode.l10n.t('unknown error')));
+    pushPanelState();
+    return;
+  }
+
+  for (let i = 0; i < result.launched.length; i++) {
+    const r = result.launched[i];
+    if (!r.sessionId) continue;
+    intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort });
+    groupStore.attach(id, members[i].key, r.sessionId);
+  }
+
+  waveNotices.set(id, opts.auto
+    ? vscode.l10n.t('Wave {0} opened automatically — wave {1} complete.', waveNumber, opts.fromWave)
+    : vscode.l10n.t('Wave {0} opened.', waveNumber));
+  pushPanelState();
+}
+
+// Appelé à chaque recompute de state.js (transitions busy→done incluses) :
+// pour chaque groupe en mode auto dont la vague courante vient de se
+// terminer ENTIÈREMENT, ouvre la suivante. `waveToAutoLaunch` (waves.js)
+// garantit structurellement de ne jamais sauter plus d'une vague d'avance.
+function maybeAdvanceWaves() {
+  if (!groupStore || !stateEngine) return;
+  const convs = stateEngine.getSnapshot().conversations;
+  const byId = new Map(convs.map((c) => [c.sessionId, c]));
+  const sources = memberSources((id) => byId.get(id));
+  for (const g of groupStore.all()) {
+    const members = g.members.map((m) => ({ wave: m.wave, status: memberTruth(m, sources).waveStatus }));
+    const w = waveToAutoLaunch(members, g.autoAdvance);
+    if (w == null) continue;
+    launchWaveForGroup(g.id, w, { auto: true, fromWave: launchedWave(members) });
+  }
+}
+
+function toggleGroupAdvance(id) {
+  const g = groupStore && groupStore.get(id);
+  if (!g) return;
+  if (groupStore.setAutoAdvance(id, !g.autoAdvance)) pushPanelState();
+}
+
+function moveMemberWave(id, key, delta) {
+  if (!groupStore || (delta !== 1 && delta !== -1)) return;
+  if (groupStore.moveQueuedMember(id, key, delta)) pushPanelState();
+}
+
+// ── Actions de groupe (lot 2) ───────────────────────────────────────────────
+// Aucune n'agit sur une conversation : un groupe n'est QUE des métadonnées.
+// Dissoudre, retirer un membre, délier — rien de tout cela ne ferme un onglet
+// ni n'interrompt un travail en cours (seul le badge ⨯, explicite, ferme un
+// onglet, et seulement quand la conversation est terminée).
+
+async function renameGroup(id) {
+  const g = groupStore && groupStore.get(id);
+  if (!g) return;
+  const name = await vscode.window.showInputBox({
+    prompt: vscode.l10n.t('Rename this conversation group'),
+    value: g.name,
+    validateInput: (v) => (v && v.trim() ? null : vscode.l10n.t('The name cannot be empty')),
+  });
+  if (!name) return;
+  if (groupStore.rename(id, name)) pushPanelState();
+}
+
+async function dissolveGroup(id) {
+  const g = groupStore && groupStore.get(id);
+  if (!g) return;
+  const choice = await vscode.window.showWarningMessage(
+    vscode.l10n.t('Dissolve “{0}”?\n\nThe {1} conversation(s) stay exactly as they are — open tabs are not closed and nothing is interrupted. Only the grouping disappears.', g.name, g.members.length),
+    { modal: true },
+    vscode.l10n.t('Dissolve')
+  );
+  if (choice !== vscode.l10n.t('Dissolve')) return;
+  if (groupStore.dissolve(id)) pushPanelState();
+}
+
+function toggleGroupCollapse(id) {
+  const g = groupStore && groupStore.get(id);
+  if (!g) return;
+  if (groupStore.setCollapsed(id, !g.collapsed)) pushPanelState();
+}
+
+function removeMember(id, key) {
+  if (!groupStore) return;
+  if (groupStore.removeMember(id, key)) pushPanelState();
+}
+
+// Conversations du panneau qui n'appartiennent à aucun groupe — la matière des
+// deux actions manuelles (étage 3 du rattachement, et « ajouter un membre »).
+// « Revendiquée » inclut les conversations maîtresses (lot 11) : une maîtresse
+// n'est pas disponible pour être rattachée comme membre.
+function ungroupedConversations() {
+  if (!stateEngine || !groupStore) return [];
+  const taken = groupStore.claimedIds();
+  return stateEngine.getSnapshot().conversations.filter((c) => !taken.has(c.sessionId));
+}
+
+async function pickConversation(placeHolder, convs = ungroupedConversations()) {
+  if (!convs.length) {
+    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: no ungrouped conversation to pick from.'));
+    return null;
+  }
+  const pick = await vscode.window.showQuickPick(
+    convs.map((c) => ({
+      label: c.title || vscode.l10n.t('Untitled'),
+      description: [c.model, c.effort].filter(Boolean).join(' · '),
+      detail: c.state,
+      id: c.sessionId,
+    })),
+    { placeHolder, matchOnDescription: true }
+  );
+  return pick ? pick.id : null;
+}
+
+// Étage 3 du rattachement : ni le registre des sessions (étage 1) ni le préfixe
+// de prompt (étage 2) n'ont su nommer ce membre — l'utilisateur tranche
+// lui-même. C'est le SEUL chemin qui reste : on ne devine jamais.
+async function linkMember(id, key) {
+  const g = groupStore && groupStore.get(id);
+  const m = g && g.members.find((x) => x.key === key);
+  if (!m) return;
+  const sessionId = await pickConversation(vscode.l10n.t('Link this task to an existing conversation'));
+  if (!sessionId) return;
+  if (!groupStore.attach(id, key, sessionId)) return;
+  intentStore.record(sessionId, { model: m.model, effort: m.effort });
+  // Rattachement manuel (étage 3) : la conversation choisie peut déjà être
+  // `done` — c'est peut-être exactement ce qui manquait pour compléter la
+  // vague courante (lot 4).
+  maybeAdvanceWaves();
+  pushPanelState();
+}
+
+async function addToGroup(id) {
+  if (!(groupStore && groupStore.get(id))) return;
+  const sessionId = await pickConversation(vscode.l10n.t('Add a conversation to this group'));
+  if (!sessionId) return;
+  const conv = stateEngine.getSnapshot().conversations.find((c) => c.sessionId === sessionId);
+  if (groupStore.addExisting(id, sessionId, (conv && conv.title) || '')) pushPanelState();
+}
+
+// ── Conversation maîtresse (lot 11) ─────────────────────────────────────────
+// Étage 2 : édition manuelle. Couvre tout ce que la recherche automatique ne
+// peut pas conclure — bloc écrit à la main, collage non retrouvé (l'utilisateur
+// a édité le bloc), changement d'avis. Contrairement au lien d'un membre, la
+// liste proposée n'exclut PAS les conversations déjà groupées ailleurs : la
+// conv qui propose des handoffs est très souvent elle-même le membre d'un lot
+// précédent. Seuls les membres de CE groupe sont hors-jeu.
+async function setGroupMaster(id) {
+  const g = groupStore && groupStore.get(id);
+  if (!g || !stateEngine) return;
+  const mine = new Set(g.members.map((m) => m.sessionId).filter(Boolean));
+  const convs = stateEngine.getSnapshot().conversations.filter((c) => !mine.has(c.sessionId));
+  const sessionId = await pickConversation(vscode.l10n.t('Set the conversation this batch came from'), convs);
+  if (!sessionId) return;
+  const conv = convs.find((c) => c.sessionId === sessionId);
+  if (groupStore.setMaster(id, sessionId, (conv && conv.title) || '')) pushPanelState();
+}
+
+function unsetGroupMaster(id) {
+  if (!groupStore) return;
+  if (groupStore.unsetMaster(id)) pushPanelState();
+}
+
+// Recherche PONCTUELLE de la conv d'où vient le bloc collé (lot 11, étages 0
+// et 1). Appelée UNE fois, au « Create » qui suit le collage — jamais en tâche
+// de fond, jamais rejouée : le cadrage a explicitement rejeté toute détection
+// permanente dans les transcripts.
+//
+// Bornée à la fenêtre du panneau (les conversations que state.js liste déjà) et
+// à une QUEUE de chaque transcript : le bloc de handoffs est, par construction,
+// dans les derniers tours de la conversation qui vient de le produire. Un
+// transcript de plusieurs Mo n'est donc jamais lu en entier.
+const MASTER_TAIL_BYTES = 256 * 1024;
+
+function masterCandidates() {
+  if (!stateEngine) return [];
+  const out = [];
+  for (const c of stateEngine.getSnapshot().conversations) {
+    if (!c.transcript) continue;
+    let texts = [];
+    try {
+      for (const e of parseSlice(readSlice(c.transcript, MASTER_TAIL_BYTES, 'tail'))) {
+        if (e.type !== 'assistant' || !e.message) continue;
+        const content = e.message.content;
+        if (typeof content === 'string') { texts.push(content); continue; }
+        if (!Array.isArray(content)) continue;
+        for (const b of content) if (b && b.type === 'text' && typeof b.text === 'string') texts.push(b.text);
+      }
+    } catch { continue; }
+    if (texts.length) out.push({ sessionId: c.sessionId, text: texts.join('\n') });
+  }
+  return out;
+}
+
+function resolveMasterForGroup(groupId, paste, token) {
+  if (!groupStore || !paste) return null;
+  let res;
+  try { res = resolveMaster({ pasted: paste, token, candidates: masterCandidates() }); }
+  catch { return null; }
+  if (!res.sessionId) {
+    console.log('[QuotaBar] no master conversation for group %s (%s, %d match(es))', groupId, res.reason, res.matches);
+    return null;
+  }
+  const conv = stateEngine.getSnapshot().conversations.find((c) => c.sessionId === res.sessionId);
+  if (!groupStore.setMaster(groupId, res.sessionId, (conv && conv.title) || '')) return null;
+  console.log('[QuotaBar] group %s master conversation = %s (via %s)', groupId, res.sessionId, res.via);
+  return { sessionId: res.sessionId, title: (conv && conv.title) || '', via: res.via };
+}
+
+// Le réglage OFFICIEL `claudeCode.environmentVariables` est appliqué APRÈS
+// process.env par l'extension Claude (fonction Lp(), cf. NOTES) : s'il définit
+// nos deux variables, tout choix modèle/effort d'ici serait écrasé sans un mot.
+// On désactive alors les sélecteurs et on dit pourquoi (garde-fou du plan).
+function envConflictVars() {
+  try {
+    const raw = vscode.workspace.getConfiguration('claudeCode').get('environmentVariables');
+    return conflictingEnvVars(raw);
+  } catch { return []; }
 }
 
 // Choix explicite dans le dropdown du panneau (tabOrder/lastActivity/statusFirst).
@@ -740,14 +1644,14 @@ async function maybeWarnNoHooksForSounds(context) {
   let choice;
   try {
     choice = await vscode.window.showWarningMessage(
-      'Notification sounds are on, but the Claude Code hooks aren\'t installed — without them, conversations never leave the "idle" state, so the sound will never actually play. Install the hooks now?',
-      'Install hooks', 'Enable anyway', 'Turn sounds back off'
+      vscode.l10n.t('Notification sounds are on, but the Claude Code hooks aren\'t installed — without them, conversations never leave the "idle" state, so the sound will never actually play. Install the hooks now?'),
+      vscode.l10n.t('Install hooks'), vscode.l10n.t('Enable anyway'), vscode.l10n.t('Turn sounds back off')
     );
   } catch { choice = undefined; }
 
-  if (choice === 'Install hooks') {
+  if (choice === vscode.l10n.t('Install hooks')) {
     await installHooks(context);
-  } else if (choice === 'Turn sounds back off') {
+  } else if (choice === vscode.l10n.t('Turn sounds back off')) {
     const cfg = vscode.workspace.getConfiguration('claudeCodeQuotaBar');
     try { await cfg.update('sounds.enabled', false, vscode.ConfigurationTarget.Global); } catch {}
     return; // pas de dismissal permanent : rien à mémoriser, le setting est déjà retombé à false.
@@ -774,12 +1678,12 @@ async function maybeWarnAccessibilityConflict(context) {
   let choice;
   try {
     choice = await vscode.window.showInformationMessage(
-      'Claude Convs plays its own notification sound. VS Code also has an accessibility sound enabled for chat responses / questions — turn those off to avoid hearing both?',
-      'Turn off VS Code sounds', 'Keep both'
+      vscode.l10n.t('Claude Convs plays its own notification sound. VS Code also has an accessibility sound enabled for chat responses / questions — turn those off to avoid hearing both?'),
+      vscode.l10n.t('Turn off VS Code sounds'), vscode.l10n.t('Keep both')
     );
   } catch { choice = undefined; }
 
-  if (choice === 'Turn off VS Code sounds') {
+  if (choice === vscode.l10n.t('Turn off VS Code sounds')) {
     for (const name of conflicting) {
       const v = signalsCfg.get(name) || {};
       try { await signalsCfg.update(name, { ...v, sound: 'off' }, vscode.ConfigurationTarget.Global); } catch {}
@@ -1101,4 +2005,4 @@ function writeOrgIdCache(orgId) {
 
 function hhmm(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, computeBatchNoticeFromLaunch };

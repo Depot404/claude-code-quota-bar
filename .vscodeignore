@@ -16,6 +16,11 @@ PUBLISH.md
 CLAUDE.md
 PLAN_*.md
 Publish.ps1
+# Relevés internes sur le bundle de l'extension officielle et maquette HTML de
+# travail : ni doc utilisateur, ni code exécuté — repérés par le contrôle
+# liste-blanche du 2026-07-24 (embarqués depuis leur création faute de règle).
+NOTES_api_claude_code_extension.md
+MOCKUP_*.html
 
 # Captures d ecran de la procedure d upload (publish-vsix-marketplace.mjs) :
 # elles montrent le back-office Marketplace de l editeur - nom, adresse mail,

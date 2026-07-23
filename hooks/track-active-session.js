@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// UserPromptSubmit hook. Deux effets :
+// UserPromptSubmit hook. Trois effets :
 //  1) ~/.claude/sessions-state.json : la session passe à `busy` (le panneau
 //     sidebar l'affiche en train de travailler, via fs.watch → instantané).
 //  2) ~/.claude/active-session.json : modèle de la session active (legacy,
 //     consommé par l'affichage du modèle).
+//  3) prompt `/handoffs` UNIQUEMENT : injection du session_id en
+//     additionalContext (lot 11 — jeton de conversation maîtresse, cf. plus bas).
 //
 // Source canonique : ce fichier est versionné dans le repo Octopus
 // (Tools/ClaudeCodeQuotaBar/hooks/). Déployé vers ~/.claude/scripts/ par
@@ -19,9 +21,42 @@ const { extractLastAssistant } = require('./transcript.js');
 
 const ACTIVE_SESSION_PATH = path.join(os.homedir(), '.claude', 'active-session.json');
 
+// ── Jeton de conversation maîtresse (lot 11) ────────────────────────────────
+// Le panneau doit pouvoir rattacher un lot de conversations à celle d'où
+// vient le bloc `/handoffs` collé. Un modèle ne peut pas INVENTER cet
+// identifiant (il recopierait celui d'un exemple → collisions garanties) : on
+// lui en fournit un VRAI, celui que le CLI passe à ce hook, et on lui demande
+// juste de le transporter. Il est de toute façon REVALIDÉ à l'arrivée
+// (master.js : la session doit exister et son transcript contenir le bloc), un
+// jeton faux ou périmé est donc sans conséquence.
+//
+// Seul cas où ce hook écrit sur stdout — pour tout autre prompt il reste
+// strictement silencieux (un output serait injecté dans le contexte de la
+// conversation, cf. sessions-state.js). Contrat : exit 0 + un unique objet JSON
+// (doc « Hooks reference », hookSpecificOutput/additionalContext).
+const HANDOFFS_RE = /^\s*\/handoffs\b/;
+
+function emitSessionToken(sessionId) {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext: [
+        'claude-convs-session: ' + sessionId,
+        'If you emit a ```claude-convs block, copy that identifier verbatim as the',
+        'block\'s first line, in the form `session: ' + sessionId + '`.',
+        'Never invent or alter it; if you are not emitting a block, ignore this.',
+      ].join('\n'),
+    },
+  }));
+}
+
 readHookInput((data) => {
   const sessionId = data.session_id;
   if (!sessionId) return;
+
+  if (HANDOFFS_RE.test(String(data.prompt || ''))) {
+    try { emitSessionToken(sessionId); } catch {}
+  }
 
   // `busy` d'abord, et INCONDITIONNELLEMENT : l'état de la conv ne dépend pas
   // de notre capacité à résoudre le modèle. (Piège : la résolution échoue au

@@ -25,10 +25,21 @@
 //   tabs: () => ({ known: boolean, labels: string[], activeLabel: string|null })
 //         — union de toutes les fenêtres ; activeLabel = onglet Claude
 //           sélectionné dans CETTE fenêtre (surlignage par fenêtre)
+//   liveSessions: () => Set<sessionId>   — sessions CLI vivantes
+//         (live-sessions.js ; défaut = le vrai registre ~/.claude/sessions)
+//   sessionTitles: () => Map<sessionId, label>  — titres d'onglet RÉELS
+//         (session-titles.js ; défaut = table vide, le chemin du state.vscdb
+//          n'est connu que de l'hôte d'extension, cf. extension.js)
 //
 // Une conversation du snapshot :
-//   { sessionId, title, state, acked, since, busySince, model, modelId,
-//     ctx: {tokens, denom, pct}, message, isActive, transcript, mtime }
+//   { sessionId, title, tabTitle, titleSource, state, acked, since, busySince,
+//     model, modelId, effort, ctx: {tokens, denom, pct}, message, isActive,
+//     transcript, mtime }
+//   effort    : effort RÉEL du dernier tour lu dans le transcript (`high`,
+//               `medium`…), null quand la conv n'en porte pas
+//   title     : ce que l'utilisateur doit lire — le nom de l'ONGLET quand il est
+//               connu (cf. pickTitle), sinon le titre du transcript
+//   tabTitle  : libellé brut du store d'onglets, pour le matching (jamais rendu)
 //   state ∈ busy | waiting | done | stale | idle
 //   acked : le ✓ a-t-il été lu (onglet consulté après la fin du tour) — lot 6
 
@@ -37,15 +48,19 @@ const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
 const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool, wasInterrupted } = require('./hooks/transcript.js');
-const { labelMatches } = require('./labels.js');
+const { labelMatches, convMatchesLabel } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
+const { liveSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
+const { cleanLabel } = require('./session-titles.js');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SESSIONS_STATE_PATH = path.join(CLAUDE_DIR, 'sessions-state.json');
 const ACTIVE_SESSION_PATH = path.join(CLAUDE_DIR, 'active-session.json');
 
-// Une conv `busy` dont le transcript n'a rien écrit depuis 5 min est un zombie
-// (process tué, crash, VS Code fermé sans SessionEnd) → affichée `stale`.
+// Une conv `busy` dont le transcript n'a rien écrit depuis 5 min ET dont le
+// process CLI est MORT est un zombie (process tué, crash, VS Code fermé sans
+// SessionEnd) → affichée `stale`. Un process encore VIVANT, lui, travaille même
+// en silence (longue réflexion, outil long) — cf. busyOrStale.
 // Affichage seulement : on ne tue rien (garde-fou du plan).
 const STALE_MS = 5 * 60 * 1000;
 // Marge avant de lire une écriture transcript comme une REPRISE du travail
@@ -96,8 +111,16 @@ function statMtime(p) {
   try { return fs.statSync(p).mtimeMs; } catch { return 0; }
 }
 
-// busy vs zombie : seul le transcript dit si ça travaille encore.
-function busyOrStale(mtime, now) {
+// busy vs zombie : le transcript muet depuis STALE_MS ne suffit PAS à conclure
+// au zombie. Un process CLI VIVANT qui n'écrit rien travaille quand même — une
+// longue réflexion (extended thinking), ou un outil long (build, WebSearch,
+// sous-agent) dont le tool_result n'est pas encore écrit, laisse le mtime figé
+// plusieurs minutes. Seul un process MORT fait d'un `busy` muet un `stale`.
+// C'est la même exigence que member-truth.js (stale ⇒ session morte) : les deux
+// tables de vérité du projet s'accordent enfin sur la définition de `stale`.
+// (Incident : conv en pleine réflexion affichée « en sommeil » au bout de 5 min.)
+function busyOrStale(mtime, now, isLive) {
+  if (isLive) return 'busy';
   return now - mtime > STALE_MS ? 'stale' : 'busy';
 }
 
@@ -122,15 +145,19 @@ function isResuming(since, mtime, now) {
 //    remède : l'écriture postérieure fait foi. Mais le repli est `done`, JAMAIS
 //    `stale` : quand les écritures cessent, le tour est bel et bien terminé —
 //    prétendre le contraire serait remplacer un faux ✓ par un faux zombie.
-//  - `busy` : vieillissement (process mort → zombie), cf. busyOrStale.
-function effectiveState(entry, mtime, now) {
+//  - `busy` : vieillissement vers `stale` — mais SEULEMENT quand le process CLI
+//    est mort (`isLive` faux). Un process vivant qui se tait travaille encore ;
+//    cf. busyOrStale. `isLive` est injecté par buildSnapshot depuis le registre
+//    des sessions vivantes (live-sessions.js) ; absent (appel unitaire) = faux,
+//    donc le comportement d'avant.
+function effectiveState(entry, mtime, now, isLive) {
   if (!entry || !entry.state) return 'idle';
   const since = entry.since || entry.updated_at || 0;
   switch (entry.state) {
     case 'waiting':
-      return mtime > since + RESUME_GRACE_MS ? busyOrStale(mtime, now) : 'waiting';
+      return mtime > since + RESUME_GRACE_MS ? busyOrStale(mtime, now, isLive) : 'waiting';
     case 'busy':
-      return busyOrStale(mtime, now);
+      return busyOrStale(mtime, now, isLive);
     case 'done':
       return isResuming(since, mtime, now) ? 'busy' : 'done';
     default:
@@ -166,25 +193,43 @@ function isAcked(entry) {
 // `tabs.known` à false = on ne sait rien des onglets (option absente, tracker
 // mort) → on ne masque RIEN : le doute profite à l'affichage.
 const NO_TABS = { known: false, labels: [] };
+const NO_LIVE = new Set();
 
-function hasOpenTab(title, tabs) {
-  return tabs.labels.some((l) => labelMatches(l, title));
+// Un onglet peut porter le titre du transcript OU celui du store (ils divergent,
+// cf. session-titles.js) : les deux comptent — voir convMatchesLabel.
+function hasOpenTab(c, tabs) {
+  return tabs.labels.some((l) => convMatchesLabel(l, c));
 }
 
-// c : { sessionId, title, titleSource, state, mtime }
-function isGone(c, tabs, closedAt) {
+// Sources de titre qui PEUVENT matcher un libellé d'onglet, donc dont l'absence
+// de correspondance est une information (elle prouve qu'aucun onglet ne porte
+// cette conv). Les titres de repli (1er message, dernier prompt) n'en sont pas :
+// l'extension officielle ne les met pas sur ses onglets.
+const MATCHABLE_TITLE_SOURCES = new Set(['ai-title', 'tab-store']);
+
+// c : { sessionId, title, tabTitle, titleSource, state, mtime }
+// live : Set des sessionId dont le process CLI tourne (live-sessions.js)
+function isGone(c, tabs, closedAt, live = NO_LIVE) {
   if (!tabs.known) return false;
   // Ouverte ici ou dans une autre fenêtre (union publiée par tabs.js).
-  if (hasOpenTab(c.title, tabs)) return false;
+  if (hasOpenTab(c, tabs)) return false;
 
   // Onglet fermé sous nos yeux : règle user explicite, ça prime sur l'état —
-  // une conv fermée en plein travail disparaît quand même.
+  // une conv fermée en plein travail disparaît quand même. Prime AUSSI sur la
+  // vivacité du process ci-dessous : entre la fermeture de l'onglet et la mort
+  // du CLI il s'écoule un instant, pendant lequel la conv doit déjà avoir
+  // disparu de l'écran (exigence « < 1 s » du lot 5).
   const closed = closedAt.get(c.sessionId);
   if (closed != null) {
     if ((c.mtime || 0) <= closed + CLOSE_GRACE_MS) return true;
     // Écriture postérieure à la grâce : la session est repartie ailleurs.
     closedAt.delete(c.sessionId);
   }
+
+  // Process CLI vivant : identité STABLE, indépendante de tout libellé. C'est
+  // la parade au bug d'origine (2026-07-22) — onglet renommé par l'extension
+  // officielle, plus aucun titre ne matche, conv ouverte et au travail masquée.
+  if (live.has(c.sessionId)) return false;
 
   // Sans onglet mais vivante = session CLI/terminal légitime → on garde.
   // `stale` n'en est pas : c'est « plus rien d'écrit depuis 5 min », donc on ne
@@ -194,9 +239,25 @@ function isGone(c, tabs, closedAt) {
 
   // Titre de repli : il ne peut PAS matcher un libellé d'onglet de façon fiable,
   // donc son absence de correspondance ne prouve rien.
-  if (c.titleSource !== 'ai-title') return false;
+  if (!MATCHABLE_TITLE_SOURCES.has(c.titleSource)) return false;
 
   return true;
+}
+
+// Quel titre AFFICHER — règle : on montre le nom sous lequel l'utilisateur voit
+// l'onglet. Le store d'onglets l'emporte donc dès qu'il dit quelque chose
+// d'utile, c'est-à-dire quand il matche un onglet ouvert, ou quand le titre du
+// transcript n'en matche aucun (cas de l'incident : le transcript garde un
+// vieil `ai-title` que plus rien ne porte à l'écran).
+// Le titre du transcript reste maître dans le cas contraire — une entrée de
+// store périmée ne doit pas renommer une conv dont l'onglet, lui, matche.
+function pickTitle(transcriptTitle, transcriptSource, tabTitle, tabs) {
+  if (!tabTitle) return { title: transcriptTitle, titleSource: transcriptSource };
+  const matches = (t) => tabs.labels.some((l) => labelMatches(l, t));
+  if (matches(tabTitle) || !matches(transcriptTitle)) {
+    return { title: cleanLabel(tabTitle) || transcriptTitle, titleSource: 'tab-store' };
+  }
+  return { title: transcriptTitle, titleSource: transcriptSource };
 }
 
 // Lecture d'un transcript avec cache : pendant qu'une conv travaille, fs.watch
@@ -232,7 +293,7 @@ function createTranscriptReader() {
     const hit = cache.get(filePath);
     if (hit && hit.key === key) return hit.value;
 
-    let value = { title: null, titleSource: null, modelId: null, model: null, ctx: null, mtime: stat.mtimeMs, pendingInteractive: false, interrupted: false };
+    let value = { title: null, titleSource: null, modelId: null, model: null, effort: null, ctx: null, mtime: stat.mtimeMs, pendingInteractive: false, interrupted: false };
     try {
       value.pendingInteractive = hasPendingInteractiveTool(filePath);
       value.interrupted = wasInterrupted(filePath);
@@ -240,17 +301,21 @@ function createTranscriptReader() {
       if (last) {
         value.modelId = last.modelId;
         value.model = modelIdToDisplay(last.modelId);
+        // Effort RÉEL du dernier tour (lot 1 création groupée) : même source et
+        // même cache que le modèle — c'est ce que le panneau affiche, et la
+        // seule chose à laquelle une intention de lancement se compare.
+        value.effort = last.effort || null;
         const tokens = usageTokens(last.usage);
         if (tokens > 0) {
           const denom = detectContextWindow(last.modelId, tokens);
           value.ctx = { tokens, denom, pct: Math.min(100, (tokens / denom) * 100) };
         }
-        lastAssistant.set(filePath, { modelId: value.modelId, model: value.model, ctx: value.ctx });
+        lastAssistant.set(filePath, { modelId: value.modelId, model: value.model, effort: value.effort, ctx: value.ctx });
       } else {
         // Dernier assistant hors des 64 Ko (gros tool_result en queue) : garder
         // l'affichage précédent plutôt que l'effacer.
         const prev = lastAssistant.get(filePath);
-        if (prev) { value.modelId = prev.modelId; value.model = prev.model; value.ctx = prev.ctx; }
+        if (prev) { value.modelId = prev.modelId; value.model = prev.model; value.effort = prev.effort; value.ctx = prev.ctx; }
       }
       let titleState = titleScans.get(filePath);
       if (!titleState) {
@@ -303,12 +368,19 @@ function buildSnapshot(opts, readTranscript) {
   const entries = readSessionsState();
   const byId = new Map();
 
+  // Identités STABLES, indépendantes des libellés (lot 2026-07-22).
+  const live = (typeof opts.liveSessions === 'function' && opts.liveSessions()) || NO_LIVE;
+  const titles = (typeof opts.sessionTitles === 'function' && opts.sessionTitles()) || new Map();
+
   if (projectDir) {
     for (const { sessionId, file } of listTranscripts(projectDir)) {
       const mtime = statMtime(file);
       const entry = entries[sessionId];
       const fresh = entry && now - (entry.updated_at || 0) < STATE_ENTRY_MAX_AGE_MS;
-      if (!fresh && now - mtime > recentMs) continue;
+      // Session vivante : candidate même si son transcript n'a rien écrit
+      // depuis recentMs (4 h) — une conv ouverte et laissée en plan la journée
+      // reste ouverte, et son onglet aussi.
+      if (!fresh && now - mtime > recentMs && !live.has(sessionId)) continue;
       byId.set(sessionId, { sessionId, transcript: file, mtime, entry: fresh ? entry : null });
     }
   }
@@ -363,7 +435,9 @@ function buildSnapshot(opts, readTranscript) {
   for (const c of candidates.slice(0, SCAN_LIMIT)) {
     if (conversations.length >= maxItems) break;
     const t = c.transcript ? readTranscript(c.transcript) : null;
-    let state = effectiveState(c.entry, c.mtime, now);
+    // `live.has` : process CLI vivant ⇒ un `busy` muet reste `busy` (travail en
+    // cours), jamais `stale` par simple vieillissement du mtime.
+    let state = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId));
     // Interruption manuelle (bouton Stop / Échap) : aucun hook ne tire (by
     // design, anthropics/claude-code#45289), donc l'entrée reste `busy` — le
     // transcript est seul à savoir (wasInterrupted). Prioritaire sur le détour
@@ -393,15 +467,28 @@ function buildSnapshot(opts, readTranscript) {
     // (permission) ou `done` (déjà fini) ne doit pas être perturbé.
     if (c.entry && c.entry.state === 'busy' && t && t.interrupted) state = 'interrupted';
     else if (c.entry && c.entry.state === 'busy' && t && t.pendingInteractive) state = 'waiting';
-    const title = (t && t.title) || 'Conversation';
+    // `tabTitle` = libellé BRUT du store (matching), `title` = ce qui s'affiche.
+    const tabTitle = titles.get(c.sessionId) || null;
+    const picked = pickTitle((t && t.title) || 'Conversation', t && t.titleSource, tabTitle, tabs);
+    const title = picked.title;
     const gone = isGone(
-      { sessionId: c.sessionId, title, titleSource: t && t.titleSource, state, mtime: c.mtime },
-      tabs, closedAt
+      { sessionId: c.sessionId, title, tabTitle, titleSource: picked.titleSource, state, mtime: c.mtime },
+      tabs, closedAt, live
     );
     if (gone) continue;
     conversations.push({
       sessionId: c.sessionId,
       title,
+      // Un onglet porte-t-il encore cette conv (union de toutes les fenêtres) ?
+      // Sert au badge « terminé, l'onglet peut être fermé » des membres de
+      // groupe (lot 2). `tabs.known` faux = on ne sait rien des onglets → false,
+      // et le badge ne s'affiche pas : ne rien proposer vaut mieux que proposer
+      // de fermer un onglet dont on ignore l'existence.
+      tabOpen: tabs.known ? hasOpenTab({ title, tabTitle }, tabs) : false,
+      // Le consommateur (focus.js, extension.js) rematche des libellés
+      // d'onglets contre ces DEUX titres — cf. convMatchesLabel.
+      tabTitle,
+      titleSource: picked.titleSource,
       state,
       acked: isAcked(c.entry),
       since: (c.entry && (c.entry.since || c.entry.updated_at)) || c.mtime || null,
@@ -412,6 +499,9 @@ function buildSnapshot(opts, readTranscript) {
       busySince: (c.entry && c.entry.busy_since) || null,
       model: (t && t.model) || null,
       modelId: (t && t.modelId) || null,
+      // Effort réel du dernier tour, tel qu'écrit dans le transcript — absent
+      // sur les conversations qui n'en portent pas (cf. extractLastAssistant).
+      effort: (t && t.effort) || null,
       ctx: (t && t.ctx) || null,
       message: state === 'waiting' && c.entry ? (c.entry.message || null) : null,
       isActive: false,
@@ -436,7 +526,7 @@ function buildSnapshot(opts, readTranscript) {
     const labels = (tabs && tabs.labels) || [];
     const posOf = new Map();
     for (const c of conversations) {
-      const idx = labels.findIndex((l) => labelMatches(l, c.title));
+      const idx = labels.findIndex((l) => convMatchesLabel(l, c));
       posOf.set(c.sessionId, idx === -1 ? Infinity : idx);
     }
     conversations.sort((a, b) => posOf.get(a.sessionId) - posOf.get(b.sessionId));
@@ -457,7 +547,7 @@ function buildSnapshot(opts, readTranscript) {
   // arbitrage d'ambiguïté de préfixe tronqué que focus.js.
   const activeLabel = (tabs && tabs.activeLabel) || null;
   if (activeLabel) {
-    const i = conversations.findIndex((c) => labelMatches(activeLabel, c.title));
+    const i = conversations.findIndex((c) => convMatchesLabel(activeLabel, c));
     if (i >= 0) conversations[i].isActive = true;
   } else {
     for (const c of conversations) c.isActive = c.sessionId === activeSessionId;
@@ -475,7 +565,7 @@ function buildSnapshot(opts, readTranscript) {
 // incrémental de panel.js encaisse déjà ce cas, autant ne pas produire le bruit.
 function renderKey(convs) {
   return JSON.stringify(convs.map((c) => [
-    c.sessionId, c.title, c.state, c.acked, c.model,
+    c.sessionId, c.title, c.state, c.acked, c.model, c.effort,
     c.ctx ? Math.round(c.ctx.pct) : null, c.isActive, c.message,
   ]));
 }
@@ -484,7 +574,10 @@ function createStateEngine(options = {}) {
   // Onglets fermés observés par tabs.js : sessionId → instant de fermeture.
   // Le moteur en est propriétaire ; isGone() y purge les sessions reparties.
   const closedAt = new Map();
-  const opts = { ...DEFAULTS, ...options, closedAt };
+  // `liveSessions` a un défaut RÉEL : le registre est du Node pur, lisible d'ici
+  // (contrairement au state.vscdb, dont seul l'hôte d'extension connaît le
+  // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
+  const opts = { liveSessions: liveSessionIds, ...DEFAULTS, ...options, closedAt };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
   const readTranscript = createTranscriptReader();
   const watchers = [];
@@ -523,6 +616,12 @@ function createStateEngine(options = {}) {
   watch(CLAUDE_DIR, (f) => f === 'sessions-state.json' || f === 'active-session.json');
   const projectDir = projectDirFor(opts.workspacePath);
   if (projectDir && fs.existsSync(projectDir)) watch(projectDir, (f) => f.endsWith('.jsonl'));
+  // Registre des sessions vivantes : un fichier apparaît/disparaît à chaque
+  // ouverture/fermeture de conversation. Sans ce watcher, la reprise
+  // d'affichage d'une conv relancée (ou son retrait à la mort du CLI)
+  // attendrait le tick 30 s. Dossier absent (CLI plus ancien) → pas de
+  // watcher, pas d'erreur : `watch` avale déjà l'échec.
+  watch(SESSIONS_DIR, (f) => f.endsWith('.json'));
 
   // Tick d'horloge — PAS un poll de données : busy→stale et done→idle sont des
   // transitions PUREMENT temporelles, qui ne produisent aucun événement fichier
@@ -569,6 +668,7 @@ module.exports = {
   effectiveState,
   isAcked,
   isGone,
+  pickTitle,
   readSessionsState,
   readActiveSessionId,
   createTranscriptReader,
