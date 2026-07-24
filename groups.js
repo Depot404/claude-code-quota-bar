@@ -356,6 +356,42 @@ function createGroupStore(deps = {}) {
       return true;
     },
 
+    // Ajout d'une tâche EN FILE dans un groupe déjà créé (plan ajout-tache
+    // 2026-07-24) — le « + » par vague du panneau, ou sa ligne fantôme
+    // « nouvelle vague ». Fabrique IDENTIQUE à celle du Create (memberOfTask)
+    // pour la cohérence des champs ; AUCUN lancement (launchedAt forcé à
+    // null, y compris pour une vague 1 encore vide : memberOfTask ne le sait
+    // pas faire tout seul, lui qui sert aussi create()). `wave` explicite
+    // (vague déjà en file) ou `null` = nouvelle vague, calculée ICI (max des
+    // vagues existantes + 1 — le store est seul à jour, pas le webview).
+    // Refuse une vague déjà lancée ou en cours (même seuil que
+    // moveQueuedMember : `target <= lw`) — y ajouter reviendrait à la lancer
+    // aussitôt, la surprise que le design interdit.
+    addTask(id, task, wave) {
+      const g = find(id);
+      if (!g) return false;
+      const prompt = typeof (task && task.prompt) === 'string' ? task.prompt.trim() : '';
+      if (!prompt) return false;
+      const lw = g.members.reduce((max, m) => (m.launchedAt != null && m.wave > max ? m.wave : max), 0);
+      let targetWave;
+      if (wave == null) {
+        targetWave = g.members.reduce((max, m) => Math.max(max, m.wave), 0) + 1;
+      } else {
+        const n = Number(wave);
+        if (!Number.isInteger(n) || n < 1 || n <= lw) return false;
+        targetWave = n;
+      }
+      const used = new Set(g.members.map((m) => m.key));
+      let i = g.members.length + 1;
+      while (used.has(`m${i}`)) i++;
+      const key = `m${i}`;
+      const member = memberOfTask({ prompt, model: task && task.model, effort: task && task.effort, wave: targetWave }, key, now());
+      member.launchedAt = null;
+      g.members.push(member);
+      persist();
+      return true;
+    },
+
     attach,
 
     // Rattachement par INDEX de la liste de tâches passée à create() — c'est

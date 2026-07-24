@@ -1,5 +1,89 @@
 # Changelog
 
+## [2.21.6] - 2026-07-24
+
+### Changed
+- **The master conversation's row now gets a framed border in the group's own hue**, matching the color of the member thread below it and blending into it seamlessly at the bottom-left corner (no rounding there, so the line appears to grow directly out of the frame). A faint tint of the same hue fills the background.
+
+## [2.21.5] - 2026-07-24
+
+### Changed
+- **The green "close & remove ⨯" chip is gone — the red circled ✕ on a member's own line is now the only way to exit it, in every case.** Clicking it always closes the tab (if one is open) and removes the member from the group, whether it's finished, already closed, or never launched — there's nothing left to choose between. The one guard: a conversation still actively working (busy/waiting) asks for a native confirmation first; a finished or queued one acts immediately.
+- **Fixed the red ✕ overlapping the member's title text.** It used to sit on top of the line via absolute positioning; it's now a normal flex item next to it, so the truncated title stops before it instead of running underneath.
+
+## [2.21.4] - 2026-07-24
+
+### Fixed
+- **An auto-advancing group would not open the next queued wave when the current wave finished while the extension was shut down (e.g. around a window reload).** The wave engine only re-evaluated groups on a state *change* pushed by the engine's `onChange` — and a wave that completes while the CLIs are dead and the hook entries are being purged leaves no change to carry the transition. At the next boot the very first snapshot already shows the wave `done` and the next one `queued`, a stable state that never fires `onChange` again, so the queued wave sat there forever. The extension now re-evaluates every auto group once against that first post-boot snapshot; a wave that came due while it was off starts on its own, and a wave still `busy` at boot is left untouched (it advances the moment its own finish arrives, as before).
+
+## [2.21.3] - 2026-07-24
+
+### Fixed
+- **A finished member's "close & remove" chip could vanish just from switching focus between tabs, with no tab ever closed.** When several conversations in the same group share a long common prefix (e.g. three "Implement lot N…" tasks), VS Code's width-based tab truncation can make their on-screen labels ambiguous, and an isolated recompute — including one triggered by nothing more than a focus change — could momentarily fail to match one of them to its own (still open) tab. The match is now allowed a single consecutive miss before the badge gives up on it; only a real, sustained absence flips it off. Also: `tabOpen` was missing from the change-detection key the engine uses to decide whether to push a fresh state to the panel, so even a self-correcting recompute could leave a stale badge on screen until some unrelated event forced a repaint — it's now part of that key.
+
+## [2.21.2] - 2026-07-24
+
+### Changed
+- **"Remove" is now a small red circled ✕ on the member's own line instead of a full-width button underneath it** — one line reclaimed per member. The footer below now only ever holds the merged "close & remove ⨯" chip, "Link…" and the ◂/▸ wave movers; empty, it takes up no height at all.
+- **The "▶ Launch wave N" button is gone — the separator of the next wave to open becomes the button itself.** It shows "▶ wave N", rounded and centered: transparent (but still clickable, forcing it with the existing confirmation) while auto mode hasn't reached it yet, filled blue once the engine is actually waiting on you (manual mode with the previous wave done, or a stuck wave needing the fallback). Already-open or finished waves stay the plain separator they always were.
+- **Every line of text in the panel now truncates instead of overflowing** — conversation titles, queued task prompts, the wave separators, banners, the group's own short name. A long unbroken string (worst case: no spaces at all) used to push the whole sidebar into horizontal scroll; every text container is now `overflow: hidden` with an ellipsis, including the flex children that previously refused to shrink below their content width.
+- **A queued task shows its intended model/effort** — dimmed and italic, clearly distinct from a real conversation's badge, with a tooltip explaining it's an intention that the actual conversation will confirm once launched.
+- **A finished conversation whose tab has been closed now shows its title struck through**, everywhere that conversation is rendered (a group member, a master conversation's degraded fallback line, or a plain list row). It follows the tab's real state — reopening it clears the strikethrough on its own, nothing is remembered.
+
+## [2.21.1] - 2026-07-24
+
+### Fixed
+- **Closing a tab by hand could silently drop an unrelated, still-open conversation from a group.** VS Code truncates a tab's label to fit its width, not to a fixed character count, so two conversations with similar titles (e.g. two "Implement lot N…" tasks) can end up with a truncated label that's a prefix of both real titles. Closing one of them used to purge every conversation whose title matched that label — including the other one, tab still open. Closing a tab whose truncated label matches more than one known conversation now closes none of them rather than guessing; it only ever purges a conversation when the match is unambiguous.
+- **Queuing a task into an already-finished auto-advancing group never launched.** `addTaskToGroup` added the member but, unlike the manual-link path, never re-checked whether a wave should now open — the new task sat `queued` forever until some unrelated event (a transcript write, a tick) happened to trigger a recompute.
+- **The "add to this wave"/"new wave" ghost rows showed up in English inside a French install.** Their strings were missing from the localization bundle.
+
+### Changed
+- **The small "+" on a queued wave's separator is replaced by a full-width dashed row**, placed right after that wave's last member — same look and behavior as the "+ new wave" row at the bottom of the group (drop the prompt on click, highlight the prompt field on hover).
+
+## [2.21.0] - 2026-07-24
+
+### Added
+- **You can now queue a task into an existing group.** Each queued wave separator gets a discreet "+" (never on the currently launching wave or an already-launched one — adding there would fire it off immediately). A dashed "+ new wave" line always sits at the bottom of every group, finished ones included, and creates the next wave on click. Both reuse the existing "New conversation" form: fill in the prompt, pick a model/effort with the usual selectors, then click the "+" where you want it dropped. Hovering a "+" highlights the prompt field so it's clear what text will land where. Clicking with an empty prompt does nothing but focus the field. The task is added as `queued` — nothing launches, it opens in turn like any other wave.
+
+## [2.20.4] - 2026-07-24
+
+### Changed
+- **The paste-recognition banner can now be dismissed.** When pasting a `claude-convs` block into the prompt field, the banner that reports it ("recognized — N task(s) prefilled" or "not recognized: … — kept as a plain prompt") now has a × to close it early. It's purely local to the form (never persisted) — it still replaces itself on the next paste and disappears on Create/Cancel as before.
+- **A finished member with an open tab now shows one chip instead of two.** "tab open — close ⨯" and "Remove" used to sit side by side with no case where you'd click one without the other. They're merged into a single "close & remove ⨯" chip: closing the tab and removing the member from the group happen together, and the removal isn't conditioned on the tab actually closing (a stubborn tab stays open and visible — nothing is lost). A finished member whose tab is already closed, or one never launched, still shows "Remove" alone.
+
+### Fixed
+- **A stale conversation could flash on screen for a moment right after a window reload, then vanish.** Working theory (not fully pinned down): the panel's first render can fire before the async sources it depends on (the open-tabs union, the live-session registry, the tab-title cache) have converged, letting an old transcript briefly match a restored tab before getting filtered out normally. Rather than patch that one heuristic, the very first push to the panel now waits for the computed conversation set to stabilize across two checks (or a ~1.2s cap, so it never blocks for good) before showing anything — every push after that stays immediate, unchanged.
+
+## [2.20.3] - 2026-07-24
+
+### Changed
+- **The wave status line is gone.** Even trimmed down to a single sentence ("wave 1: 0/1 done — wave 2 opens automatically once this one is complete"), the line only repeated what the wave separators, the per-member ✓/spinner icons and the ▶ button (dimmed = auto, solid = manual) already say. Both the auto and manual variants are removed; only the "will not finish on its own" blocked banner remains.
+- **The master conversation now appears exactly once, in its own group, at the standard conversation-row format.** Previously it showed up twice — once as the group header's title, once as its normal row in the flat list. It now has its own full-width line right under the group header (same rendering as any conversation row: real state icon, title, model · effort, context), with no special styling and no ⌂ mark. The group header goes back to always showing the group's short name. When the master conversation falls out of the panel's window (no tracked transcript+tab), a degraded line takes its place — its last known title, greyed out, no state or context — rather than disappearing.
+
+### Fixed
+- **A long master conversation title used to squeeze the auto/manual toggle down to unreadable slivers.** Now moot since the header no longer shows the master's title, but the underlying cause (the toggle and the icon buttons could shrink like any other flex item) is fixed too: the header's fixed controls (auto/manual toggle, ⌂ ✎ ⨯) never shrink — only the group's own (short) name ellipsizes.
+
+### Fixed
+- **"Create" now also counts as a remembered choice.** Since 2.19.2, clicking a model/effort button in the batch form remembered it as the new default — but launching a batch from a pasted `claude-convs` block never went through that click path, so the form still snapped back to the global default (e.g. `fable`·`xhigh`) right after the batch opened. A successful Create — pasted block included — now persists the model/effort of the **last task in the batch** (across all waves, not just the launched wave 1) as the new remembered default, exactly like a manual click. The haiku invariant is preserved: if the last task is haiku, the model is remembered but the effort is left untouched.
+
+## [2.20.1] - 2026-07-24
+
+### Fixed
+- **Three status glitches after a window reload, one root cause: a conversation's identity moving out from under the panel.** Reloading the VS Code window kills the running CLIs; the official Claude extension restores its tabs, and sometimes relaunches a restored conversation under a **new** session id — a fresh transcript that replays the same first prompt (so it carries the same title) while the old transcript lingers, dead, as a *husk*. Everything keyed on the original id then broke:
+  - **A finished conversation with its tab still open kept (or lost) its green "close ⨯" chip based on whether its CLI was alive, not on whether the tab was actually open.** A reload kills every CLI, so every finished group member became "done · closed" — no close chip — even with the tab right there. The chip now follows the real tab state (`tabOpen`), not process liveness; the "counts as done" fix from 2.19.4 is preserved.
+  - **The same conversation appeared twice in the list**, both ✓ done with different context percentages — the husk transcript and its resumed successor rendered as two separate lines. The husk is now folded out of the view, keeping the live/fresher line only. Two genuinely concurrent tabs with the same title are never merged.
+  - **A group member (or master pointer) linked to the pre-reload id** resolved its status, its close chip, and its close *target* against the dead husk. Members now follow the resumed conversation, so the chip appears when the tab is open and closing it hits the tab you actually see. Nothing stored is ever rewritten — the redirect is resolved at render time only (a guessed link is never persisted).
+
+  These were pre-existing bugs in the reload/restored-tabs scenario, not regressions introduced by 2.20.0.
+
+## [2.20.0] - 2026-07-24
+
+### Changed
+- **Wave batch panel, decluttered.** Three changes to cut down on repeated/redundant chrome in a group with multiple waves:
+  - **Wave messages, status-only.** The "Wave N opened [automatically]" success notice is gone — the panel already shows the same information as the ongoing "wave N: X/Y done" line and the group's live conversations, so the extra banner only repeated it. Failure notices and the "will not finish on its own" blocked banner are unchanged.
+  - **The group header now shows the master conversation's own title** instead of the group's internal short name, once one is linked — no more separate dedicated row underneath it. Click the title to jump straight to that conversation; the ⌂ button in the header remains the single entry point to set, change, or unlink the master (now a "Unlink" entry at the top of the same picker). The group's internal short name still exists (it drives the colour tint and the rename action) but is no longer shown once a master is set.
+  - **The ▶ "Launch wave" button dims in auto mode** instead of always looking equally actionable — it stays fully clickable (with a confirmation prompt, since it forces auto mode's hand), but visually recedes so it doesn't compete with the fact that the next wave is already going to open on its own. A blocked wave, or manual mode, keeps the button at full strength — that's the one case where clicking it is the only way forward.
+
 ## [2.19.4] - 2026-07-24
 
 ### Fixed

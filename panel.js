@@ -216,11 +216,14 @@ function renderHtml(webview) {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .conv.active .title { font-weight: 600; }
+  /* Terminée avec l'onglet fermé (lot 4 §5) : le barré DÉCOULE de tabOpen,
+     jamais d'une mémoire locale — rouvrir l'onglet l'efface tout seul. */
+  .conv .title.closed { text-decoration: line-through; }
   .conv .meta {
     display: flex; gap: 6px; align-items: baseline;
     font-size: 11px; color: var(--muted);
   }
-  .conv .meta .model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conv .meta .model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .conv .meta .ctx { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
 
   /* Pastilles d'état : la forme porte l'info autant que la couleur
@@ -389,6 +392,14 @@ function renderHtml(webview) {
   }
   .btn.pri:hover { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
   .btn[disabled] { opacity: .45; cursor: default; }
+  /* ▶ atténué en mode auto (lot allègement 2026-07-24) : reste cliquable
+     (force + confirmation côté extension), jamais désactivé — disabled
+     serait le seul chemin à nouveau court-circuité en mode manuel/bloqué. */
+  .btn.pri.dim {
+    background: var(--vscode-button-secondaryBackground, transparent);
+    color: var(--muted); border-color: var(--vscode-panel-border, rgba(128,128,128,.35));
+  }
+  .btn.pri.dim:hover { background: var(--vscode-list-hoverBackground); }
   .hint { margin-top: 6px; font-size: 11px; color: var(--muted); }
   .tip-restore {
     margin-left: 6px; cursor: pointer; opacity: .5; font-size: 10px;
@@ -406,6 +417,7 @@ function renderHtml(webview) {
   .banner {
     margin: 6px 0; padding: 4px 6px; border-radius: 4px; font-size: 11px;
     background: color-mix(in srgb, var(--waiting) 12%, transparent); color: var(--waiting);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .banner.info { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); color: var(--muted); }
   .banner.err { background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 14%, transparent); color: var(--vscode-errorForeground, #f14c4c); }
@@ -418,6 +430,12 @@ function renderHtml(webview) {
     border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,.35)));
   }
   textarea.inp:focus, input.inp:focus { outline: 1px solid var(--vscode-focusBorder); }
+  /* Ajout en file (plan ajout-tache 2026-07-24) : lien visuel au survol d'un
+     « + » (vague ou ligne fantôme) — montre QUEL texte sera injecté. */
+  textarea.inp.hl-target {
+    outline: 1px solid var(--vscode-focusBorder);
+    background: color-mix(in srgb, var(--vscode-focusBorder) 12%, var(--vscode-input-background));
+  }
   input.inp {
     width: 100%; box-sizing: border-box; font: inherit; font-size: 11px;
     padding: 3px 6px; border-radius: 3px;
@@ -429,6 +447,34 @@ function renderHtml(webview) {
     margin: 10px 0 4px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
   }
   .wave-hdr::before, .wave-hdr::after { content: ''; flex: 1; height: 1px; background: var(--vscode-panel-border, rgba(128,128,128,.35)); }
+  .wave-hdr-label {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* Séparateur devenu bouton de lancement (lot 4 §2) : la prochaine vague à
+     ouvrir remplace le bouton ▶ du bas — plus de ligne dédiée, la même
+     sémantique (dim = auto, franc/bleu = attend l'humain) que l'ancien
+     bouton, portée sur le séparateur lui-même. Vagues déjà lancées/en file
+     au-delà de la prochaine restent le style inerte ci-dessus. */
+  .wave-hdr.launch {
+    cursor: pointer; justify-content: center;
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
+    border-radius: 12px; padding: 3px 10px;
+  }
+  .wave-hdr.launch::before, .wave-hdr.launch::after { content: none; }
+  .wave-hdr.launch:hover { background: var(--vscode-list-hoverBackground); }
+  .wave-hdr.launch.pri {
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    border-color: var(--vscode-button-background);
+  }
+  .wave-hdr.launch.pri:hover { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
+  /* Ligne fantôme « + nouvelle vague » : toujours présente en fin de groupe. */
+  .wave-ghost {
+    display: flex; align-items: center; justify-content: center;
+    margin: 10px 0 4px; padding: 3px 4px; border-radius: 3px; cursor: pointer;
+    font-size: 10px; letter-spacing: .06em; color: var(--muted);
+    border-top: 1px dashed var(--vscode-panel-border, rgba(128,128,128,.35));
+  }
+  .wave-ghost:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
   .task {
     margin-bottom: 6px; padding: 6px; border-radius: 4px;
     border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
@@ -479,50 +525,67 @@ function renderHtml(webview) {
   }
   .grp-head:hover { background: var(--vscode-list-hoverBackground); }
   .grp-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+  /* Titre = TOUJOURS le nom court du groupe (lot allègement v2 2026-07-24,
+     volet C — renverse le choix « titre = conv maîtresse » de la 2.20.0) :
+     la maîtresse a désormais sa propre ligne pleine largeur, plus rien à
+     afficher ici. */
   .grp-name {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-size: 12px; font-weight: 600;
   }
   .grp-count { flex: none; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .grp-head .spacer { flex: 1 1 auto; }
+  /* Fix régression 2.20.0 : sans flex:none, un titre de groupe long comprimait
+     le segment auto/manuel jusqu'à le rendre illisible. Seul .grp-name (titre,
+     ellipsis) et .spacer doivent pouvoir rétrécir — tout le reste de l'en-tête
+     est fixe. */
+  .grp-adv { flex: none; font-size: 9px; margin-right: 2px; }
+  .grp-adv[hidden] { display: none; }
   .gbtn {
     flex: none; border: 0; background: none; cursor: pointer; padding: 1px 4px;
     border-radius: 3px; font-size: 11px; line-height: 1.2; color: var(--muted);
   }
   .gbtn:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
   /* Filet vertical teinté du groupe : ce qui rattache visuellement les lignes à
-     leur en-tête sans les enfermer dans une boîte. */
-  .grp-body { border-left: 2px solid var(--muted); margin-left: 7px; padding-left: 5px; }
+     leur en-tête sans les enfermer dans une boîte. padding-top (lot 5 §2ter) :
+     bloque le margin-collapse du 1er séparateur de vague, sinon le trait part
+     avec un trou visible sous le cadre de la master. */
+  .grp-body { border-left: 2px solid var(--muted); margin-left: 7px; padding-left: 5px; padding-top: 1px; }
   .grp-body.collapsed { display: none; }
+  /* Conv maîtresse (lot allègement v2 2026-07-24, volet C) : rendue au format
+     STANDARD d'une ligne de conv (même fabrique que la liste, rowFor) —
+     pleine largeur, hors du filet vertical des membres, jamais dupliquée
+     (le groupe l'ACCUEILLE, la liste la cède). Vide (aucune maîtresse) → pas
+     de hauteur. Repliée avec le reste du groupe via .collapsed.
+     Cadre variante B (lot 5 §2ter, maquette validée MOCKUP_master_cadre) :
+     teinte du groupe (bordure + fond légèrement teinté), coin bas-gauche à 0
+     pour que le filet du corps (même teinte) parte du cadre sans couture.
+     Couleur/fond posés en JS (renderGroups, dépend de g.hue) — ici seulement
+     la forme. Dépassement à gauche du filet si le corps est indenté :
+     accepté par l'user, aucun alignement forcé. */
+  .grp-master-slot {
+    border: 2px solid var(--muted); border-radius: 6px; border-bottom-left-radius: 0;
+    padding: 4px 6px; margin: 2px 0 0 0;
+  }
+  .grp-master-slot:empty { display: none; border: 0; padding: 0; margin: 0; }
+  .grp-master-slot.collapsed { display: none; }
+  /* Fallback hors-vue (ni transcript ni onglet dans la fenêtre du panneau) :
+     titre persisté grisé, sans état ni ctx — dégradation silencieuse. */
+  .conv.off .title { color: var(--muted); text-decoration: line-through; }
+  .conv.off:hover { background: none; }
   /* Moteur de vagues (lot 4) : en-tête de vague identique à celui du formulaire,
      toggle auto/manuel dans l'en-tête de groupe, contrôle de vague suivante en
      bas de la vague courante. */
-  .grp-adv { font-size: 9px; margin-right: 2px; }
-  .grp-adv[hidden] { display: none; }
   .wave-ctrl { margin: 2px 0 10px; }
-  .wave-sub { font-size: 10px; color: var(--muted); }
+  .wave-ctrl:empty { display: none; margin: 0; }
   .wave-ctrl .btn { margin-top: 3px; }
-  /* Conversation maîtresse (lot 11) : une ligne de POINTAGE, pas une ligne de
-     conversation — volontairement plus discrète que les membres (elle ne
-     travaille pas pour ce groupe, elle l'a produit). Elle vit ENTRE l'en-tête
-     et le corps, HORS du filet vertical : au même retrait que les membres elle
-     se lisait comme un énième handoff, alors que les tâches indentées dessous
-     sont SA descendance. La classe .off = la conv n'est plus dans la fenêtre
-     du panneau : titre persisté, grisé, mais toujours cliquable (l'onglet peut
-     très bien être encore ouvert). */
-  .grp-master {
-    display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: center;
-    padding: 2px 6px 3px 4px; border-radius: 4px; cursor: pointer;
-  }
-  .grp-master.collapsed { display: none; }
-  .grp-master:hover { background: var(--vscode-list-hoverBackground); }
-  .grp-master .gm-ico { justify-self: center; font-size: 11px; color: var(--muted); }
-  .grp-master .gm-title {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px;
-  }
-  .grp-master .gm-meta { font-size: 10px; color: var(--muted); }
-  .grp-master.off .gm-title { color: var(--muted); }
-  .member { position: relative; }
+  /* Ligne + croix rouge dans le MÊME flux flex (lot 5 §2bis) : .m-slot
+     rétrécit (min-width: 0, comme tout maillon de la chaîne de troncature
+     du lot 4 §3), la croix reste fixe — l'ellipsis du titre s'arrête avant
+     elle, plus de recouvrement possible par construction (contraste avec
+     l'ancien .m-out en position: absolute). */
+  .m-head { display: flex; align-items: flex-start; gap: 4px; min-width: 0; }
+  .m-slot { flex: 1; min-width: 0; }
   /* Ligne d'un membre PAS ENCORE lié à une conversation : le prompt, et
      l'aveu qu'on ne sait pas encore de quelle conv il s'agit. Jamais un état
      emprunté à une autre — un membre non lié n'a pas d'état. */
@@ -534,22 +597,46 @@ function renderHtml(webview) {
     margin-top: 4px; width: 9px; height: 9px; justify-self: center; box-sizing: border-box;
     border: 1.5px dashed var(--muted); border-radius: 2px;
   }
+  .m-body { min-width: 0; }
   .m-prompt {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     color: var(--muted); font-size: 12px;
   }
+  /* Modèle · effort PRÉVUS sur une tâche pas encore lancée (lot 4 §4) : simple
+     intention, jamais confondue avec la pastille d'écart (mismatchOf) d'une
+     conv réelle — grisé + italique, distinct du texte plein du prompt. */
+  .m-intent {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10px; font-style: italic; color: var(--muted); opacity: .75;
+  }
   /* Actions d'un membre : sous sa ligne, alignées sur le titre (16 px d'icône +
-     8 px de gouttière). « Remove » est TOUJOURS visible (lot 8, red team) :
-     un membre en état terminal (lié, conv close/hors vue) n'a plus QUE cette
-     action, la masquer au survol-seulement la rendrait invisible sur ces
-     lignes précisément. ◂/▸ (déplacer une tâche en file vers une vague
-     voisine) restent au survol : action d'édition ponctuelle du formulaire de
-     vagues, hors périmètre de ce lot. */
+     8 px de gouttière). Le retrait (croix rouge cerclée, lot 4 §1, devenue
+     l'unique sortie au lot 5) est passé inline sur la ligne elle-même — le
+     pied ne garde plus que « Link… » et ◂/▸ ; vide, il ne réserve plus de
+     hauteur. ◂/▸ (déplacer une tâche en file vers une vague voisine) restent
+     au survol : action d'édition ponctuelle du formulaire de vagues, hors
+     périmètre de ce lot. */
   .m-foot { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 0 0 3px 24px; }
   .m-foot:empty { display: none; }
   .m-note { font-size: 10px; color: var(--muted); }
   .m-hover { opacity: 0; transition: opacity .1s; }
   .member:hover .m-hover, .m-hover:focus-visible { opacity: 1; }
+  /* Croix rouge cerclée = seule action de sortie d'un membre (lot 5), inline
+     à droite de sa ligne — élément du flux flex de .m-head (flex: none),
+     JAMAIS en position: absolute (lot 5 §2bis, fix de la superposition avec
+     le texte) : le titre tronqué (ellipsis, .m-slot) s'arrête avant elle par
+     construction. Distincte du badge ⨯ de fermeture d'onglet de la liste
+     générale (celui-ci ferme un onglet seul ; celle-ci ferme ET retire). */
+  .m-out {
+    flex: none; margin-top: 4px;
+    width: 15px; height: 15px; box-sizing: border-box; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 50%; border: 1px solid var(--vscode-errorForeground, #f14c4c);
+    background: var(--vscode-sideBar-background, var(--vscode-editor-background, transparent));
+    color: var(--vscode-errorForeground, #f14c4c);
+    font-size: 9px; line-height: 1; cursor: pointer;
+  }
+  .m-out:hover { background: var(--vscode-errorForeground, #f14c4c); color: var(--vscode-editor-background, #fff); }
   .chip {
     font-size: 10px; padding: 0 5px; border-radius: 8px; border: 0; cursor: default;
     background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
@@ -557,7 +644,6 @@ function renderHtml(webview) {
   }
   .chip.act { cursor: pointer; }
   .chip.act:hover { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .chip.done { background: color-mix(in srgb, var(--done) 22%, transparent); color: var(--done); }
 </style>
 </head>
 <body>
@@ -778,6 +864,10 @@ function renderHtml(webview) {
     // Le ✓ est du texte, les autres états sont des formes CSS.
     setText(row.ico, (c.state === 'done' || c.state === 'idle') ? '✓' : '');
     setText(row.title, c.title || t('Untitled'));
+    // Terminée · onglet fermé (lot 4 §5) : barré en plus du reste — découle de
+    // tabOpen (member-truth), jamais d'une mémoire locale. Rouvrir l'onglet
+    // repasse tabOpen à true et efface le barré tout seul au prochain rendu.
+    row.title.classList.toggle('closed', c.state === 'done' && !c.tabOpen);
     // Modèle ET effort RÉELS, lus du transcript (décision 6 du plan). L'effort
     // manque sur les conversations qui n'en portent pas : on n'écrit alors rien
     // de plus, jamais une valeur supposée.
@@ -876,7 +966,7 @@ function renderHtml(webview) {
     // en changer (l'action « Unset » vit sur la ligne elle-même).
     const mas = el('button', 'gbtn', '⌂');
     mas.type = 'button';
-    mas.title = t('Set the conversation this batch came from');
+    mas.title = t('Set / change / unlink the conversation this batch came from');
     const ren = el('button', 'gbtn', '✎');
     ren.type = 'button';
     ren.title = t('Rename this group');
@@ -893,18 +983,27 @@ function renderHtml(webview) {
     head.appendChild(add);
     head.appendChild(ren);
     head.appendChild(dis);
+    // La conv maîtresse (volet C) vit ENTRE l'en-tête et le corps, HORS du
+    // filet vertical du corps — pleine largeur, comme une ligne de la liste.
+    const masterSlot = el('div', 'grp-master-slot');
     const body = el('div', 'grp-body');
     root.appendChild(head);
+    root.appendChild(masterSlot);
     root.appendChild(body);
 
     // waveHeaders : un nœud par numéro de vague, réutilisé d'un rendu à
     // l'autre (même raison que members/rows — ne pas relancer d'animation).
     // waveCtrl : la zone « ▶ lancer la vague suivante » / bannière, une par
     // groupe, repositionnée juste après la vague courante à chaque rendu.
+    // Ligne fantôme « + nouvelle vague » (plan ajout-tache 2026-07-24) :
+    // TOUJOURS présente en fin de groupe, groupe fini compris (décision 2
+    // du design) — un clic crée la vague max+1, jamais une vague existante.
+    const ghostRow = el('div', 'wave-ghost', t('┄ + new wave ┄'));
+    ghostRow.title = t('Add a task in a new wave after the last one');
     const node = {
       root, head, chev, dot, name, count, body, members: new Map(), id: g.id,
-      advA, advM, waveHeaders: new Map(), waveCtrl: el('div', 'wave-ctrl'),
-      master: null,
+      advA, advM, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
+      masterSlot, masterOff: null, ghostRow,
     };
     head.addEventListener('click', function (e) {
       if (e.target !== head && head.contains(e.target) && (e.target.classList.contains('gbtn') || e.target.closest('.grp-adv'))) return;
@@ -916,38 +1015,29 @@ function renderHtml(webview) {
     dis.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'dissolveGroup', id: node.id }); });
     advA.addEventListener('click', function (e) { e.stopPropagation(); if (!advA.classList.contains('on')) vscode.postMessage({ type: 'toggleGroupAdvance', id: node.id }); });
     advM.addEventListener('click', function (e) { e.stopPropagation(); if (!advM.classList.contains('on')) vscode.postMessage({ type: 'toggleGroupAdvance', id: node.id }); });
+    ghostRow.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(node.id, null); });
+    ghostRow.addEventListener('mouseenter', function () { highlightPromptField(true); });
+    ghostRow.addEventListener('mouseleave', function () { highlightPromptField(false); });
     return node;
   }
 
-  // Ligne de TÊTE d'un groupe : la conversation d'où vient le lot (lot 11).
-  // Ce n'est PAS un membre — elle ne compte dans aucune vague, dans aucun
-  // « N/M done », et la conversation elle-même continue d'apparaître à sa place
-  // normale dans le panneau : cette ligne la DÉSIGNE, elle ne la déplace pas
-  // (c'est aussi ce qui évite qu'un même nœud de conversation soit revendiqué
-  // par deux endroits du DOM à la fois).
-  function createMasterNode(gid) {
-    const root = el('div', 'grp-master');
-    const ico = el('span', 'gm-ico', '⌂');
-    const body = el('div', 'gm-body');
-    const title = el('div', 'gm-title');
-    const meta = el('div', 'gm-meta');
-    const off = el('button', 'chip act', t('Unset'));
-    off.type = 'button';
-    off.title = t('Forget which conversation this batch came from (the conversation itself is kept)');
+  // Ligne de la conv maîtresse quand elle est HORS de la fenêtre du panneau
+  // (pas de transcript+onglet suivis, ou au-delà de maxItems) — fabrique à
+  // part de rowFor() car il n'y a alors aucun objet conv réel à rendre : juste
+  // le titre persisté au moment du lien, grisé, sans état ni ctx. Dégradation
+  // silencieuse (volet C) : un nœud par groupe, réutilisé d'un rendu à l'autre.
+  function createMasterOffRow() {
+    const root = el('div', 'conv off');
+    const ico = el('span', 'ico');
+    const body = el('div', 'body');
+    const title = el('div', 'title');
     body.appendChild(title);
-    body.appendChild(meta);
     root.appendChild(ico);
     root.appendChild(body);
-    root.appendChild(off);
-    const node = { root, ico, title, meta, data: null };
-    root.addEventListener('click', function (e) {
-      if (e.target === off) return;
+    const node = { root, title, data: null };
+    root.addEventListener('click', function () {
       if (!node.data || !node.data.convId) return;
       vscode.postMessage({ type: 'focusConv', id: node.data.convId, title: node.data.title, tabTitle: node.data.tabTitle || null });
-    });
-    off.addEventListener('click', function (e) {
-      e.stopPropagation();
-      vscode.postMessage({ type: 'unsetGroupMaster', id: gid });
     });
     return node;
   }
@@ -956,18 +1046,26 @@ function renderHtml(webview) {
   // en attente) plus le pied d'actions propre au groupe.
   function createMemberNode(gid, key) {
     const root = el('div', 'member');
+    // La ligne (conv réelle ou prompt en attente) et la croix rouge partagent
+    // un flux flex (lot 5 §2bis) : l'ellipsis du titre s'arrête AVANT la
+    // croix, jamais de superposition possible par construction — contraste
+    // avec l'ancien .m-out en position: absolute qui recouvrait le texte.
+    const head = el('div', 'm-head');
     const slot = el('div', 'm-slot');
     const foot = el('div', 'm-foot');
     const note = el('span', 'm-note');
-    const closeChip = el('button', 'chip act done', t('tab open — close ⨯'));
-    closeChip.type = 'button';
-    closeChip.title = t('This conversation is finished — close its tab');
     const linkChip = el('button', 'chip act', t('Link…'));
     linkChip.type = 'button';
     linkChip.title = t('Link this task to an existing conversation');
-    const outChip = el('button', 'chip act', t('Remove'));
+    // Croix rouge cerclée = SEULE action de sortie d'un membre (lot 5, décision
+    // user ~15h, remplace la version contextuelle envisagée d'abord et le chip
+    // vert « fermer & retirer ») : ferme l'onglet PUIS retire, dans tous les
+    // cas — onglet déjà fermé ou tâche jamais lancée → rien à fermer, le
+    // retrait seul. Le garde-fou (confirmation si la conv travaille encore)
+    // vit côté extension.js, seul endroit qui connaît l'état réel.
+    const outChip = el('button', 'm-out', '✕');
     outChip.type = 'button';
-    outChip.title = t('Remove from the group (the conversation itself is kept)');
+    outChip.title = t('Close the tab and remove it from the group');
     // Édition en cours de route (lot 4, décision 5) : déplacer une tâche PAS
     // ENCORE LANCÉE vers la vague voisine — une fois lancée, elle ne bouge
     // plus (groups.js moveQueuedMember refuse déjà le cas, ceci n'est que
@@ -979,23 +1077,25 @@ function renderHtml(webview) {
     moveFwd.type = 'button';
     moveFwd.title = t('Move to the next wave');
     foot.appendChild(note);
-    foot.appendChild(closeChip);
     foot.appendChild(linkChip);
     foot.appendChild(moveBack);
     foot.appendChild(moveFwd);
-    foot.appendChild(outChip);
-    root.appendChild(slot);
+    head.appendChild(slot);
+    head.appendChild(outChip);
+    root.appendChild(head);
     root.appendChild(foot);
 
-    const node = { root, slot, foot, note, closeChip, linkChip, outChip, moveBack, moveFwd, conv: null };
+    const node = { root, slot, foot, note, linkChip, outChip, moveBack, moveFwd, conv: null };
     moveBack.addEventListener('click', function () { vscode.postMessage({ type: 'moveMemberWave', id: gid, key: key, delta: -1 }); });
     moveFwd.addEventListener('click', function () { vscode.postMessage({ type: 'moveMemberWave', id: gid, key: key, delta: 1 }); });
-    closeChip.addEventListener('click', function () {
-      if (!node.conv) return;
-      vscode.postMessage({ type: 'closeConvTab', id: node.conv.id, title: node.conv.title, tabTitle: node.conv.tabTitle || null });
-    });
     linkChip.addEventListener('click', function () { vscode.postMessage({ type: 'linkMember', id: gid, key: key }); });
-    outChip.addEventListener('click', function () { vscode.postMessage({ type: 'removeMember', id: gid, key: key }); });
+    outChip.addEventListener('click', function () {
+      vscode.postMessage({
+        type: 'closeAndRemoveMember', id: gid, key: key,
+        title: node.conv ? node.conv.title : null,
+        tabTitle: (node.conv && node.conv.tabTitle) || null,
+      });
+    });
     return node;
   }
 
@@ -1008,40 +1108,35 @@ function renderHtml(webview) {
   function pendingLine(m) {
     const wrap = el('div', 'm-pending');
     wrap.appendChild(el('span', 'ico-pending'));
-    const body = el('div');
+    const body = el('div', 'm-body');
     body.appendChild(el('div', 'm-prompt', m.prompt || t('(no prompt)')));
+    // Modèle · effort PRÉVUS (lot 4 §4) : ce qui a été demandé au lancement de
+    // CETTE tâche (m.asked, même forme que le badge d'écart des convs réelles)
+    // — jamais confondu avec mismatchOf, qui compare intent/réel APRÈS coup.
+    const intent = askedLabel(m);
+    if (intent) {
+      const im = el('span', 'm-intent', intent);
+      im.title = t('Launch intention — will be confirmed by the real conversation.');
+      body.appendChild(im);
+    }
     wrap.appendChild(body);
     wrap.title = m.hint || '';
     return wrap;
   }
 
-  // Contenu de la zone « ▶ lancer la vague suivante » (lot 4). g.nextWave
-  // (waves.js canForceLaunch, calculé côté extension) est le SEUL signal
-  // « il reste quelque chose à ouvrir » — quand il vaut null, le groupe a
-  // épuisé toutes ses vagues et la zone se vide.
-  function renderWaveCtrl(node, g) {
+  // Contenu de la zone sous la vague en cours (lot 4 §2 : plus de bouton ▶ ici,
+  // le séparateur de la prochaine vague le remplace — ne restent que les
+  // bannières, seule chose qu'aucun autre élément du panneau ne dit déjà).
+  // blocked est calculé une fois par renderGroups et partagé avec le
+  // séparateur cliquable, pour ne jamais dériver deux fois le même fait.
+  function renderWaveCtrl(node, g, blocked) {
     node.waveCtrl.replaceChildren();
     if (g.waveNotice) node.waveCtrl.appendChild(el('div', 'banner info', g.waveNotice));
     if (g.nextWave == null) return;
-    const current = g.launchedWave;
-    const curMembers = g.members.filter(function (m) { return m.wave === current; });
-    const doneCount = curMembers.filter(function (m) { return m.waveStatus === 'done'; }).length;
-    const blocked = curMembers.some(function (m) { return m.waveStatus === 'stale'; });
     if (blocked) {
       node.waveCtrl.appendChild(el('div', 'banner err',
-        t('A task in wave {0} will not finish on its own (interrupted, or its tab was closed before anything was sent) — auto advance is suspended. Use ▶ to force wave {1}.', current, g.nextWave)));
-    } else if (doneCount < curMembers.length) {
-      node.waveCtrl.appendChild(el('div', 'wave-sub',
-        (g.autoAdvance
-          ? t('wave {0}: {1}/{2} done — wave {3} opens automatically once this one is complete.', current, doneCount, curMembers.length, g.nextWave)
-          : t('wave {0}: {1}/{2} done — wave {3} waits for ▶.', current, doneCount, curMembers.length, g.nextWave))));
+        t('A task in wave {0} will not finish on its own (interrupted, or its tab was closed before anything was sent) — auto advance is suspended. Use ▶ to force wave {1}.', g.launchedWave, g.nextWave)));
     }
-    // Le bouton ▶ reste TOUJOURS disponible (décision 5 du plan) : y compris
-    // vague en cours (forcer une vague partielle) ou bloquée — jamais le seul
-    // chemin en mode auto, jamais absent en mode manuel.
-    node.waveCtrl.appendChild(button('pri', t('▶ Launch wave {0}', g.nextWave), function () {
-      vscode.postMessage({ type: 'launchWave', id: node.id, wave: g.nextWave });
-    }));
   }
 
   function renderGroups(groups, convById, seen) {
@@ -1056,15 +1151,51 @@ function renderHtml(webview) {
       // pas le statut d'affichage : « terminée, onglet fermé » compte comme
       // terminée — c'est précisément ce que le lot 10 rétablit.
       const done = g.members.filter(function (m) { return m.waveStatus === 'done'; }).length;
+      // Titre d'en-tête = TOUJOURS le nom court du groupe (volet C, lot
+      // allègement v2 2026-07-24 — renverse le choix 2.20.0) : la conv
+      // maîtresse a désormais sa propre ligne, plus rien à afficher ici.
       setText(node.name, g.name);
       node.name.title = g.name;
       // Teinte stable dérivée du nom (groups.js) : la seule couleur libre du
       // panneau, tout le reste suit le thème.
       node.dot.style.background = 'hsl(' + g.hue + ', 60%, 58%)';
       node.body.style.borderLeftColor = 'hsl(' + g.hue + ', 45%, 55%)';
+      // Cadre de la master (lot 5 §2ter, variante B) : MÊME couleur que le
+      // filet du corps (jonction sans couture, décision explicite du plan) —
+      // posé même quand g.master est absent (le slot est alors :empty,
+      // invisible), pas de branchement de plus.
+      node.masterSlot.style.borderColor = node.body.style.borderLeftColor;
+      node.masterSlot.style.background = 'hsla(' + g.hue + ', 45%, 55%, .08)';
       setText(node.count, done + '/' + g.members.length + ' done');
       setText(node.chev, g.collapsed ? '▸' : '▾');
       node.body.classList.toggle('collapsed', !!g.collapsed);
+      node.masterSlot.classList.toggle('collapsed', !!g.collapsed);
+
+      // Conv maîtresse (volet C) : NŒUD DOM UNIQUE — la même fabrique que la
+      // liste plate (rowFor), déplacée ici plutôt que dupliquée. Le filtrage
+      // de la liste plate (handler de message, plus bas) garantit qu'un id de
+      // conv ne se revendique jamais à deux endroits du DOM à la fois. Hors
+      // de la fenêtre du panneau (g.master.listed faux) → fallback dégradé,
+      // jamais de nœud manquant.
+      if (g.master) {
+        const ms = g.master;
+        const mc = ms.listed ? convById[ms.convId] : null;
+        if (mc) {
+          seen.add(mc.id);
+          place(node.masterSlot, 0, rowFor(mc).root);
+        } else {
+          if (!node.masterOff) node.masterOff = createMasterOffRow();
+          node.masterOff.data = ms;
+          setText(node.masterOff.title, ms.title || t('Master conversation'));
+          node.masterOff.root.title = (ms.title || '') + (ms.hint ? ' — ' + ms.hint : '');
+          node.masterOff.root.style.cursor = ms.convId ? 'pointer' : 'default';
+          place(node.masterSlot, 0, node.masterOff.root);
+        }
+        while (node.masterSlot.children.length > 1) node.masterSlot.lastChild.remove();
+      } else {
+        node.masterSlot.replaceChildren();
+        node.masterOff = null;
+      }
 
       // Toggle auto/manuel (lot 4) : masqué avec une vague unique — rien à
       // ordonnancer, le montrer serait un contrôle sans effet.
@@ -1074,42 +1205,63 @@ function renderHtml(webview) {
       node.advA.classList.toggle('on', !!g.autoAdvance);
       node.advM.classList.toggle('on', !g.autoAdvance);
 
+      // Calculé UNE fois, partagé entre la bannière de blocage (renderWaveCtrl)
+      // et le séparateur-bouton de la prochaine vague (lot 4 §2) — même
+      // sémantique que l'ancien bouton ▶ (dim = auto + pas bloqué), jamais
+      // re-dérivée deux fois.
+      const curMembers = g.members.filter(function (m) { return m.wave === g.launchedWave; });
+      const blocked = curMembers.some(function (m) { return m.waveStatus === 'stale'; });
+      const dim = g.autoAdvance && !blocked;
+
       const keys = new Set();
       let idx = 0;
       let ctrlPlaced = false;
 
-      // Conv maîtresse (lot 11), entre l'en-tête et le corps — PAS dans le
-      // corps : hors du filet vertical, au niveau du titre du groupe, pour que
-      // les tâches indentées dessous se lisent comme sa sous-arborescence et
-      // jamais comme si elle était un membre de plus. Le statut vient de la
-      // table de vérité (m.status/note/hint, member-truth.js) — jamais de la
-      // seule présence dans convById : hors de la vue, la ligne garde le titre
-      // persisté au moment du lien et le dit (grisée), plutôt que de disparaître
-      // ou de devenir un identifiant nu.
-      if (g.master) {
-        if (!node.master) node.master = createMasterNode(g.id);
-        const ms = g.master;
-        node.master.data = ms;
-        setText(node.master.title, ms.title || t('Master conversation'));
-        const bits = [];
-        if (ms.model) bits.push(ms.model + (ms.effort ? ' · ' + ms.effort : ''));
-        if (ms.note) bits.push(ms.note);
-        setText(node.master.meta, bits.join(' — '));
-        node.master.meta.style.display = bits.length ? '' : 'none';
-        setClass(node.master.root, 'grp-master' + (ms.listed ? '' : ' off') + (g.collapsed ? ' collapsed' : ''));
-        node.master.ico.style.color = 'hsl(' + g.hue + ', 60%, 58%)';
-        node.master.root.title = (ms.title || '') + (ms.hint ? ' — ' + ms.hint : '');
-        node.root.insertBefore(node.master.root, node.body);
-      } else if (node.master) {
-        node.master.root.remove();
-        node.master = null;
-      }
       waveNums.forEach(function (w) {
         if (multiWave) {
-          const hdr = node.waveHeaders.get(w) || (function () { const h = el('div', 'wave-hdr'); node.waveHeaders.set(w, h); return h; })();
-          setText(hdr, w > g.launchedWave ? t('wave {0} — queued', w) : t('wave {0}', w));
+          const hdr = node.waveHeaders.get(w) || (function () {
+            const h = el('div', 'wave-hdr');
+            const label = el('span', 'wave-hdr-label');
+            h.appendChild(label);
+            h._label = label;
+            node.waveHeaders.set(w, h);
+            return h;
+          })();
+          // Séparateur devenu bouton de lancement (lot 4 §2) : seule la
+          // PROCHAINE vague à ouvrir (g.nextWave) porte le style cliquable —
+          // vagues déjà lancées ou plus loin en file restent inertes, style
+          // actuel. Fond bleu (primary) = le moteur attend l'humain (manuel,
+          // ou bloqué — chemin de secours) ; transparent = pas le moment
+          // (auto, non bloqué) mais cliquable = forcer, avec la même
+          // confirmation modale que l'ancien bouton.
+          const isLaunch = w === g.nextWave;
+          setText(hdr._label, isLaunch ? t('▶ wave {0}', w) : (w > g.launchedWave ? t('wave {0} — queued', w) : t('wave {0}', w)));
+          hdr.classList.toggle('launch', isLaunch);
+          hdr.classList.toggle('pri', isLaunch && !dim);
+          hdr.classList.toggle('dim', isLaunch && dim);
+          hdr.title = (isLaunch && dim) ? t('Auto mode will open this wave by itself — click to force it now.') : '';
+          hdr.onclick = isLaunch ? (function (wv, force) {
+            return function (e) {
+              e.stopPropagation();
+              vscode.postMessage({ type: 'launchWave', id: node.id, wave: wv, force: force || undefined });
+            };
+          })(w, dim) : null;
           place(node.body, idx++, hdr);
         }
+        // « + ajouter à cette vague » JAMAIS sur une vague déjà lancée ni la
+        // vague en cours (design du plan ajout-tache) : seule une vague
+        // strictement en file (w > launchedWave) le porte — y ajouter
+        // reviendrait à la lancer aussitôt en mode auto, la surprise interdite.
+        const queued = w > g.launchedWave;
+        const addRow = node.waveAddRows.get(w) || (function () {
+          const r = el('div', 'wave-ghost wave-add-row', t('┄ + add to this wave ┄'));
+          r.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(g.id, w); });
+          r.addEventListener('mouseenter', function () { highlightPromptField(true); });
+          r.addEventListener('mouseleave', function () { highlightPromptField(false); });
+          node.waveAddRows.set(w, r);
+          return r;
+        })();
+        if (queued) addRow.title = t('Fill the prompt field above, then click here to queue it in this wave');
         g.members.filter(function (m) { return m.wave === w; }).forEach(function (m) {
           keys.add(m.key);
           let mn = node.members.get(m.key);
@@ -1130,8 +1282,11 @@ function renderHtml(webview) {
           // vérité unique. Le webview ne voit qu'une VUE (convById) ; c'est
           // elle qui a produit quatre bugs de suite (Link… fantôme,
           // « closed before sending », « done · closed » et stale au Create).
-          // La conv trouvée ne conditionne plus que l'existence d'une cible à fermer.
-          mn.closeChip.style.display = m.canClose && c ? '' : 'none';
+          // La croix rouge est désormais UNIFORME (lot 5) : plus de bascule
+          // sur m.canClose, elle reste la seule action de sortie dans tous
+          // les cas — canClose ne sert plus qu'à rien ici (member-truth.js
+          // continue de l'exposer pour d'autres usages, non consommé côté
+          // affichage du bouton).
           mn.linkChip.style.display = m.canLink ? '' : 'none';
           const noteText = m.note || '';
           setText(mn.note, noteText);
@@ -1144,19 +1299,32 @@ function renderHtml(webview) {
           mn.moveFwd.style.display = canMove && w < waveNums[waveNums.length - 1] ? '' : 'none';
           place(node.body, idx++, mn.root);
         });
-        if (w === g.launchedWave) { renderWaveCtrl(node, g); place(node.body, idx++, node.waveCtrl); ctrlPlaced = true; }
+        // Pleine largeur, centrée, APRÈS le dernier membre de la vague EN FILE
+        // (jamais sur vague lancée/terminée — remplace l'ancien petit « + »
+        // du séparateur, invisible/mal placé).
+        if (queued) place(node.body, idx++, addRow);
+        if (w === g.launchedWave) { renderWaveCtrl(node, g, blocked); place(node.body, idx++, node.waveCtrl); ctrlPlaced = true; }
       });
       // launchedWave hors des vagues connues (défensif — ne devrait pas
       // arriver, waves.js le calcule à partir de ces mêmes membres) : la zone
       // de contrôle n'a nulle part où s'accrocher au-dessus, elle vient en
       // fin de corps plutôt que de disparaître silencieusement.
-      if (!ctrlPlaced) { renderWaveCtrl(node, g); place(node.body, idx++, node.waveCtrl); }
+      if (!ctrlPlaced) { renderWaveCtrl(node, g, blocked); place(node.body, idx++, node.waveCtrl); }
+      // Ligne fantôme « + nouvelle vague » : TOUJOURS en fin de corps, y
+      // compris groupe fini (décision 2 du design — en auto, la nouvelle
+      // vague part au prochain battement du moteur, c'est assumé).
+      place(node.body, idx++, node.ghostRow);
       // En-têtes de vague devenus inutiles (vague retirée par édition) — purge
       // avant de purger les membres, même logique.
       node.waveHeaders.forEach(function (hdr, w) {
         if (waveNums.indexOf(w) !== -1 && multiWave) return;
         hdr.remove();
         node.waveHeaders.delete(w);
+      });
+      node.waveAddRows.forEach(function (row, w) {
+        if (waveNums.indexOf(w) !== -1) return;
+        row.remove();
+        node.waveAddRows.delete(w);
       });
       node.members.forEach(function (mn, key) {
         if (keys.has(key)) return;
@@ -1249,6 +1417,37 @@ function renderHtml(webview) {
   }
   function blankTask(wave) {
     return { prompt: '', model: null, effort: null, wave: wave || 1 };
+  }
+
+  // Ajout en file à un groupe existant (plan ajout-tache 2026-07-24) : le
+  // « + » de chaque vague en file, ou la ligne fantôme « nouvelle vague »,
+  // dépose le prompt COURANT du formulaire (tâche 1 — c'est « le » champ
+  // prompt que le design retient, cf. plan) à l'endroit cliqué. Résolution
+  // modèle/effort par le MÊME chemin que Create (resolvedModel/
+  // resolvedEffort) — zéro logique dupliquée, même invariant haiku sans
+  // effort. « wave: null » = nouvelle vague, calculée côté extension
+  // (groups.js addTask). Prompt vide → aucun message, focus du champ
+  // (invitation à taper) plutôt qu'un clic silencieux qui ne ferait rien.
+  function promptTextarea() {
+    return batchFormEl.querySelector('.task-top textarea.inp');
+  }
+  function highlightPromptField(on) {
+    const ta = promptTextarea();
+    if (ta) ta.classList.toggle('hl-target', !!on);
+  }
+  function addTaskAtWave(gid, wave) {
+    const first = form.tasks[0];
+    const prompt = (first && first.prompt) || '';
+    if (!prompt.trim()) {
+      const ta = promptTextarea();
+      if (ta) ta.focus();
+      return;
+    }
+    const model = resolvedModel();
+    const effort = resolvedEffort(model);
+    vscode.postMessage({ type: 'addTaskToGroup', id: gid, wave: wave, task: { prompt: prompt, model: model, effort: effort } });
+    first.prompt = '';
+    renderForm();
   }
 
   // Parseur strict du bloc claude-convs (lot 3) — copie du noyau de
@@ -1431,6 +1630,25 @@ function renderHtml(webview) {
     return b;
   }
 
+  // Bannière avec un × de fermeture — l'appelant décide de ce que « fermer »
+  // veut dire (state éphémère, jamais un message vers l'extension).
+  function dismissibleBanner(cls, text, onDismiss) {
+    const wrap = el('div', cls);
+    wrap.style.display = 'flex';
+    wrap.style.alignItems = 'flex-start';
+    wrap.style.gap = '6px';
+    const body = el('span');
+    body.style.flex = '1';
+    body.textContent = text;
+    wrap.appendChild(body);
+    const dismiss = el('button', 'xdel', '×');
+    dismiss.type = 'button';
+    dismiss.title = t('Dismiss');
+    dismiss.addEventListener('click', onDismiss);
+    wrap.appendChild(dismiss);
+    return wrap;
+  }
+
   // Zone unique (2026-07-23) : le champ prompt de chaque tâche EST la zone de
   // collage — il n'y a plus de champ « paste » séparé. Sur paste/change
   // (jamais input, qui volerait le curseur à chaque frappe) : un bloc
@@ -1574,8 +1792,14 @@ function renderHtml(webview) {
       batchFormEl.appendChild(gname);
     }
 
-    if (form.errorBanner) batchFormEl.appendChild(el('div', 'banner', form.errorBanner));
-    if (form.banner) batchFormEl.appendChild(el('div', 'banner info', form.banner));
+    // Dismiss du feedback de collage (lot micro-allègements 2026-07-24) : état
+    // ÉPHÉMÈRE local à cette tâche de formulaire, jamais persisté (pas de
+    // pendant de dismissBatchTip) — un × qui referme la bannière courante ; elle
+    // se remplace normalement au collage suivant et disparaît déjà au
+    // Create/Cancel (form remis à zéro), ce × n'ajoute qu'un cas de fermeture
+    // manuelle anticipée.
+    if (form.errorBanner) batchFormEl.appendChild(dismissibleBanner('banner', form.errorBanner, function () { form.errorBanner = null; renderForm(); }));
+    if (form.banner) batchFormEl.appendChild(dismissibleBanner('banner info', form.banner, function () { form.banner = null; renderForm(); }));
 
     // Astuce /handoffs (v2.18.13) : visible tant que l'user ne l'a pas
     // écartée. Le × la masque DÉFINITIVEMENT (globalState, par machine, survit
@@ -1826,12 +2050,17 @@ function renderHtml(webview) {
     const convs = (msg.state && msg.state.conversations) || [];
     const groups = (msg.state && msg.state.groups) || [];
     // Une conversation groupée est rendue DANS son groupe, et nulle part
-    // ailleurs : la liste plate ne garde que le reste.
+    // ailleurs : la liste plate ne garde que le reste. Idem pour la conv
+    // maîtresse d'un groupe affiché (volet C) — elle n'est pas un membre
+    // (groupId reste null côté extension) mais a désormais sa propre ligne
+    // dans l'en-tête du groupe : le filtrage se fait ici, pas côté extension.
     const convById = {};
     convs.forEach(function (c) { convById[c.id] = c; });
+    const masterIds = new Set();
+    groups.forEach(function (g) { if (g.master && g.master.listed && g.master.convId) masterIds.add(g.master.convId); });
     const seen = new Set();
     renderGroups(groups, convById, seen);
-    renderConvs(convs.filter(function (c) { return !c.groupId; }), convs.length, seen);
+    renderConvs(convs.filter(function (c) { return !c.groupId && !masterIds.has(c.id); }), convs.length, seen);
     pruneRows(seen);
     lastQuota = (msg.state && msg.state.quota) || {};
     renderQuota(lastQuota);

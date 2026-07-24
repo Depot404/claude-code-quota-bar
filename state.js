@@ -52,6 +52,7 @@ const { labelMatches, convMatchesLabel } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 const { liveSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
 const { cleanLabel } = require('./session-titles.js');
+const { computeSupersededBy } = require('./supersede.js');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SESSIONS_STATE_PATH = path.join(CLAUDE_DIR, 'sessions-state.json');
@@ -199,6 +200,30 @@ const NO_LIVE = new Set();
 // cf. session-titles.js) : les deux comptent — voir convMatchesLabel.
 function hasOpenTab(c, tabs) {
   return tabs.labels.some((l) => convMatchesLabel(l, c));
+}
+
+// Tolérance au bruit d'UN SEUL recompute (lot 2, bascule au focus, 2026-07-24).
+// Symptôme : plusieurs conversations d'un même groupe partagent le préfixe
+// « Implémenter lot N… » ; une fois tronqués par VS Code à la largeur (pas à un
+// nombre de caractères, cf. labels.js), leurs libellés d'onglet peuvent devenir
+// ambigus le temps d'un recompute déclenché par un simple changement de focus
+// (aucun onglet fermé) — le matching titre↔onglet d'une conv rate alors CE SEUL
+// passage sans que son onglet ait bougé, et le chip vert « fermer & retirer »
+// disparaît pour de bon (rien ne le réarme). On ne fait confiance à une absence
+// qu'après plusieurs recomputes CONSÉCUTIFS sans match — un manque isolé est
+// ignoré. Le doute profite à l'affichage : un chip vert en trop est bénin, une
+// fermeture réelle est de toute façon détectée ailleurs (`closedAt`/isGone, qui
+// retire la conversation ENTIÈREMENT et n'a pas besoin de ce compteur).
+const TAB_OPEN_MISS_TOLERANCE = 2; // 1 manque toléré, 2 consécutifs = perdu
+
+// misses : Map<sessionId, count> tenue par l'appelant (créée fraîche à chaque
+// buildSnapshot() isolé — les bancs restent déterministes — ou tenue par
+// l'engine à travers ses recomputes, seul cas où la tolérance s'exerce vraiment).
+function resolveTabOpen(sessionId, rawOpen, misses) {
+  if (rawOpen) { misses.delete(sessionId); return true; }
+  const n = (misses.get(sessionId) || 0) + 1;
+  misses.set(sessionId, n);
+  return n < TAB_OPEN_MISS_TOLERANCE;
 }
 
 // Sources de titre qui PEUVENT matcher un libellé d'onglet, donc dont l'absence
@@ -430,6 +455,9 @@ function buildSnapshot(opts, readTranscript) {
 
   const tabs = (typeof opts.tabs === 'function' && opts.tabs()) || NO_TABS;
   const closedAt = opts.closedAt instanceof Map ? opts.closedAt : new Map();
+  // Cf. resolveTabOpen : Map fraîche par défaut (bancs déterministes), tenue
+  // par l'engine à travers ses recomputes dans le cas réel.
+  const tabOpenMisses = opts.tabOpenMisses instanceof Map ? opts.tabOpenMisses : new Map();
 
   const conversations = [];
   for (const c of candidates.slice(0, SCAN_LIMIT)) {
@@ -483,8 +511,12 @@ function buildSnapshot(opts, readTranscript) {
       // Sert au badge « terminé, l'onglet peut être fermé » des membres de
       // groupe (lot 2). `tabs.known` faux = on ne sait rien des onglets → false,
       // et le badge ne s'affiche pas : ne rien proposer vaut mieux que proposer
-      // de fermer un onglet dont on ignore l'existence.
-      tabOpen: tabs.known ? hasOpenTab({ title, tabTitle }, tabs) : false,
+      // de fermer un onglet dont on ignore l'existence. Sinon, le match brut
+      // passe par resolveTabOpen (lot « bascule au focus ») pour absorber un
+      // manque isolé plutôt que de le croire tout de suite.
+      tabOpen: tabs.known
+        ? resolveTabOpen(c.sessionId, hasOpenTab({ title, tabTitle }, tabs), tabOpenMisses)
+        : false,
       // Le consommateur (focus.js, extension.js) rematche des libellés
       // d'onglets contre ces DEUX titres — cf. convMatchesLabel.
       tabTitle,
@@ -508,6 +540,29 @@ function buildSnapshot(opts, readTranscript) {
       transcript: c.transcript,
       mtime: c.mtime,
     });
+  }
+
+  // Supplantation de session à travers un reload (supersede.js) : quand
+  // l'extension officielle relance une conversation restaurée sous un NOUVEAU
+  // sessionId (nouveau transcript, même titre), l'ancien transcript subsiste
+  // en HUSK mort. Deux lignes pour une seule conversation (bug 3, 2026-07-24) :
+  // on sort le husk de la VUE et on PUBLIE la redirection husk→successeur, pour
+  // que les membres de groupe rattachés à l'ancien id suivent le successeur
+  // vivant (bugs 1 & 2, résolus côté extension.js — la vue ne réécrit rien de
+  // durable). Calculé sur la liste effectivement construite : deux homonymes
+  // hors de la vue n'ont de toute façon pas de doublon à l'écran.
+  const supersededBy = computeSupersededBy(conversations.map((c) => ({
+    sessionId: c.sessionId,
+    title: c.title,
+    titleSource: c.titleSource,
+    mtime: c.mtime,
+    live: live.has(c.sessionId),
+    tabOpen: c.tabOpen,
+  })));
+  if (Object.keys(supersededBy).length) {
+    for (let i = conversations.length - 1; i >= 0; i--) {
+      if (supersededBy[conversations[i].sessionId]) conversations.splice(i, 1);
+    }
   }
 
   // Tri d'AFFICHAGE (indépendant du tri mtime ci-dessus, qui ne sert qu'à
@@ -553,8 +608,18 @@ function buildSnapshot(opts, readTranscript) {
     for (const c of conversations) c.isActive = c.sessionId === activeSessionId;
   }
 
+  // Purge des compteurs de sessions qui ne sont même plus candidates (fermées
+  // depuis longtemps, hors recentMs) : resolveTabOpen ne doit pas accumuler
+  // pour l'éternité une conv qui ne repassera plus jamais par buildSnapshot.
+  for (const id of [...tabOpenMisses.keys()]) {
+    if (!byId.has(id)) tabOpenMisses.delete(id);
+  }
+
   // Déjà trié (lastActivity/tabOrder/statusFirst ci-dessus) et borné à maxItems.
-  return { conversations, activeSessionId, generatedAt: now };
+  // `supersededBy` (husk→successeur) : la redirection d'identité que les
+  // consommateurs de sessionId (membres de groupe, master, moteur de vagues)
+  // appliquent au rendu — cf. supersede.js. Vide dans le cas nominal.
+  return { conversations, activeSessionId, generatedAt: now, supersededBy };
 }
 
 // Ce que le webview AFFICHE, et rien d'autre. Le snapshot porte aussi des champs
@@ -567,6 +632,11 @@ function renderKey(convs) {
   return JSON.stringify(convs.map((c) => [
     c.sessionId, c.title, c.state, c.acked, c.model, c.effort,
     c.ctx ? Math.round(c.ctx.pct) : null, c.isActive, c.message,
+    // `tabOpen` (lot « bascule au focus ») : sans lui, un recompute qui corrige
+    // tout seul une valeur fausse (cf. resolveTabOpen) ne repousse rien au
+    // panneau tant qu'aucun AUTRE champ n'a changé — le chip resterait faux
+    // jusqu'à un événement sans rapport.
+    c.tabOpen,
   ]));
 }
 
@@ -574,10 +644,14 @@ function createStateEngine(options = {}) {
   // Onglets fermés observés par tabs.js : sessionId → instant de fermeture.
   // Le moteur en est propriétaire ; isGone() y purge les sessions reparties.
   const closedAt = new Map();
+  // Compteur de manques consécutifs pour resolveTabOpen (lot « bascule au
+  // focus ») : DOIT survivre d'un recompute à l'autre pour que la tolérance
+  // serve à quelque chose — une Map fraîche à chaque appel annulerait le lot.
+  const tabOpenMisses = new Map();
   // `liveSessions` a un défaut RÉEL : le registre est du Node pur, lisible d'ici
   // (contrairement au state.vscdb, dont seul l'hôte d'extension connaît le
   // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
-  const opts = { liveSessions: liveSessionIds, ...DEFAULTS, ...options, closedAt };
+  const opts = { liveSessions: liveSessionIds, ...DEFAULTS, ...options, closedAt, tabOpenMisses };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
   const readTranscript = createTranscriptReader();
   const watchers = [];
@@ -643,6 +717,7 @@ function createStateEngine(options = {}) {
       for (const id of sessionIds || []) {
         if (!id) continue;
         closedAt.set(id, now);
+        tabOpenMisses.delete(id);
         touched = true;
       }
       if (!touched) return;
@@ -668,6 +743,8 @@ module.exports = {
   effectiveState,
   isAcked,
   isGone,
+  resolveTabOpen,
+  renderKey,
   pickTitle,
   readSessionsState,
   readActiveSessionId,

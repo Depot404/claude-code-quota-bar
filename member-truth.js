@@ -160,7 +160,22 @@ function memberTruth(member, sources) {
     // que SessionEnd tire et PURGE les entrées ; les convs terminées, encore
     // listées (leur ligne affiche ✓), revenaient `stale` — compteur « 0/N
     // done » contredisant les ✓, auto-avancement suspendu (2026-07-24).
-    status = state === 'done' || state == null || state === 'idle' ? 'done-closed' : 'stale';
+    const doneish = state === 'done' || state == null || state === 'idle';
+    if (!doneish) {
+      status = 'stale';
+    } else {
+      // Terminée. `done` (onglet encore ouvert, on propose de le fermer) vs
+      // `done-closed` (onglet parti, rien à fermer) — la VIVACITÉ du PROCESS ne
+      // tranche PAS : une conversation finie dont le CLI a rendu la main (ou
+      // qu'un RELOAD vient de tuer) garde très souvent son onglet ouvert.
+      // Confondre « CLI mort » et « onglet fermé » supprimait le chip vert de
+      // fermeture sur toute conv terminée après un reload (bug 2, 2026-07-24) :
+      // c'est `conv.tabOpen` (la VUE — la seule chose que la vue a le droit de
+      // décider ici) qui fait foi. Les deux projettent sur `done` pour le
+      // moteur de vagues : le compteur reste d'accord avec les ✓, correctif du
+      // reload conservé.
+      status = (conv && conv.tabOpen) ? 'done' : 'done-closed';
+    }
   }
 
   return build(status, { convId, conv, live, sent });
