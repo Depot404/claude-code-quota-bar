@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.27.14] - 2026-08-07
+
+### Fixed
+- **The "▶ wave n" launch pill no longer bites into the group's coloured rail.** The pill used to span the full row width and paint *over* the rail (a deliberate 2.27.8 choice — the pill masked the line behind it), which read as the button clipping the rail. Its box now starts after the rail's axis, like every other wave header — the rail runs continuously past it. The z-index guard stays as a belt: if the two boxes ever cross again, the pill paints on top rather than showing a line through the button. Screenshots regenerated.
+
 ## [2.27.13] - 2026-08-06
 
 ### Changed

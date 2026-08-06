@@ -494,14 +494,14 @@ function renderHtml(webview) {
      sémantique (dim = auto, franc/bleu = attend l'humain) que l'ancien
      bouton, portée sur le séparateur lui-même. Vagues déjà lancées/en file
      au-delà de la prochaine restent le style inerte ci-dessus. */
-  /* z-index 1 (étape 19) : sans lui, le rail (absolute, z-index 0) se peignait
-     PAR-DESSUS cette pill pleine largeur — un trait bleu en travers du CTA,
-     lu comme un défaut de rendu. L'ordre de l'arbre ne suffit PAS à trancher
-     ici : place() réordonne les enfants du corps par index et peut renvoyer le
-     rail après la pill (c'est écrit au commentaire du rail : son absolute rend
-     ce désordre sans effet — il l'était, jusqu'à ce qu'un frère opaque le
-     croise). Même convention que les anneaux, seul autre nœud qui doit passer
-     devant le rail : z-index 1. */
+  /* Depuis le constat user 2026-08-07 (« la pill mord sur le rail »), la boîte
+     de la pill commence APRÈS l'axe du rail (margin-left, même repère 20px que
+     les autres en-têtes de vague, cf. le groupe de sélecteurs plus bas) : le
+     rail passe à sa gauche, intersection vide PAR GÉOMÉTRIE — prouvé au banc
+     (§17f). Le z-index 1 de l'étape 19 est CONSERVÉ en ceinture : si une
+     évolution future refait se croiser les deux boîtes (place() peut réordonner
+     le rail après la pill, l'ordre du DOM ne tranche rien), c'est la pill qui
+     repasse devant, jamais un trait en travers du CTA. */
   .wave-hdr.launch {
     position: relative; z-index: 1;
     cursor: pointer; justify-content: center;
@@ -833,13 +833,15 @@ function renderHtml(webview) {
   .grp-body .conv .ico-interrupted::before, .grp-body .conv .ico-stale::before {
     content: '⚠'; display: block;
   }
-  /* Séparateurs de vague, ligne fantôme et bannières (waveCtrl) : commencent
-     APRÈS l'axe du rail (14px + marge) pour ne pas le croiser — la variante
-     .launch (pill pleine largeur, bouton d'action) reste volontairement
-     au-dessus, comme un CTA. Étape 16 : waveCtrl (« ▶ VAGUE n » et ses
-     bannières) débordait sur le rail faute d'être dans ce même groupe de
-     sélecteurs — ajouté ici, pas de valeur recopiée ailleurs. */
+  /* Séparateurs de vague, ligne fantôme, bannières (waveCtrl) ET pill de
+     lancement : tout commence APRÈS l'axe du rail (14px + marge) pour ne pas
+     le croiser. Étape 16 : waveCtrl ajouté à ce groupe de sélecteurs (pas de
+     valeur recopiée ailleurs). 2026-08-07 : la pill .launch rejoint la règle —
+     elle restait pleine largeur au-dessus du rail (étape 19), lu par l'user
+     comme une morsure sur le trait ; margin-left (pas padding : c'est sa
+     BOÎTE bordée qui doit s'écarter, pas son contenu). */
   .grp-body .wave-hdr:not(.launch), .grp-body .wave-ctrl { padding-left: 20px; }
+  .grp-body .wave-hdr.launch { margin-left: 20px; }
   .grp-body .wave-ghost { margin-left: 20px; }
   /* Moteur de vagues (lot 4) : en-tête de vague identique à celui du formulaire,
      toggle auto/manuel dans l'en-tête de groupe, contrôle de vague suivante en

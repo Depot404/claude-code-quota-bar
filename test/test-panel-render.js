@@ -2154,37 +2154,25 @@ async function run() {
     check('rail P1 : aucune intersection avec l\'intérieur du cadre (il démarre au bord bas de la capsule)',
       railVsFrame.overlap <= 0.5, JSON.stringify(railVsFrame));
 
-    // (f) La pill « ▶ lancer la vague » passe DEVANT le rail — preuve A/B :
-    // le pixel sur l'axe, à hauteur de la pill, ne change pas quand on retire
-    // le rail. (place() peut réordonner le rail après elle : l'ordre du DOM ne
-    // suffit pas à trancher, seul le z-index le fait.)
-    const pillProbe = await cdp.evaluate(`(() => {
+    // (f) La pill « ▶ lancer la vague » ne CROISE plus le rail (constat user
+    // 2026-08-07 : « la pill mord sur le trait ») : sa boîte commence après
+    // l'axe, comme les autres en-têtes de vague — intersection vide PAR
+    // GÉOMÉTRIE, même règle que la bannière waveCtrl du §7bis. Le z-index 1
+    // de l'étape 19 reste en ceinture : si les boîtes se recroisent un jour,
+    // la pill doit repasser devant — vérifié aussi, sans dépendre du rendu.
+    const pillVsRail = await cdp.evaluate(`(() => {
       const pill = document.querySelector('#groups .wave-hdr.launch');
       if (!pill) return null;
       const b = pill.getBoundingClientRect();
       const rail = document.querySelector('#groups .grp-rail').getBoundingClientRect();
-      return { x: rail.left + rail.width / 2, y: b.top + b.height / 2 };
+      return { railRight: rail.left + rail.width, pillLeft: b.left,
+               z: getComputedStyle(pill).zIndex, pos: getComputedStyle(pill).position };
     })()`);
-    if (pillProbe) {
-      const pixel = async () => (await cdp.send('Page.captureScreenshot', {
-        format: 'png', captureBeyondViewport: false,
-        clip: { x: pillProbe.x - 1, y: pillProbe.y - 1, width: 2, height: 2, scale: 1 },
-      })).data;
-      // Fond posé explicitement : la pill n'est opaque que dans sa variante
-      // .pri (vague à lancer à la main). La propriété testée est « quand elle
-      // est peinte, le rail ne la traverse pas » — on la met donc dans cet état
-      // plutôt que de dépendre du scénario de vagues du fixture.
-      await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').style.background = '#123456'`);
-      await sleep(100);
-      const withRail = await pixel();
-      await cdp.evaluate(`document.querySelector('#groups .grp-rail').style.display = 'none'`);
-      await sleep(100);
-      const without = await pixel();
-      await cdp.evaluate(`document.querySelector('#groups .grp-rail').style.display = ''`);
-      await sleep(100);
-      check('la pill « ▶ vague » masque le rail (le trait ne la traverse plus) : même pixel avec et sans rail',
-        withRail === without);
-      await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').style.background = ''`);
+    if (pillVsRail) {
+      check('pill « ▶ vague » : sa boîte commence après l\'axe du rail (aucune morsure possible)',
+        pillVsRail.pillLeft >= pillVsRail.railRight, JSON.stringify(pillVsRail));
+      check('… et garde son z-index 1 de ceinture (recroisement futur → pill devant, jamais un trait au travers)',
+        pillVsRail.pos === 'relative' && pillVsRail.z === '1', JSON.stringify(pillVsRail));
     }
 
     // (g) Glyphe ⚠ centré dans son anneau — mesuré sur les PIXELS (un ::before
