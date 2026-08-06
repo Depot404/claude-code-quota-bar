@@ -645,16 +645,19 @@ async function fetchAndUpdate(force = false) {
 
 // Jeu de démo : valide le rendu des 5 états sans attendre qu'ils se produisent.
 // Couture de test (env var) — aucun impact en usage normal.
+// Titres 100 % FICTIFS et en anglais (règle « données publiques = maquette ») :
+// ce jeu est lisible dans le source publié et sert les captures de la fiche
+// store (test/make-store-shots.js) — jamais un titre réel ici.
 const DEMO_CONVERSATIONS = [
-  { id: 'd1', title: 'Implémenter le lot 1 du panneau sidebar', model: 'Opus 4.8', effort: 'high', ctx: { pct: 34, tokens: 340000, denom: 1000000 }, state: 'busy', acked: true, active: true, groupId: 'demo-g' },
-  { id: 'd2', title: 'Refonte du digest mail', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 71, tokens: 142000, denom: 200000 }, state: 'waiting', acked: true, active: false },
-  { id: 'd3', title: 'Watchdog Jeedom Z-Wave', model: 'Haiku 4.5', effort: 'low', ctx: { pct: 12, tokens: 24000, denom: 200000 }, state: 'done', acked: false, active: false, groupId: 'demo-g', tabOpen: true },
-  { id: 'd4', title: 'Portage web PlanningTP', model: 'Opus 4.8', effort: 'high', ctx: { pct: 88, tokens: 880000, denom: 1000000 }, state: 'stale', acked: true, active: false },
-  { id: 'd5', title: 'Tri des scans', model: null, effort: null, ctx: null, state: 'idle', acked: true, active: false },
+  { id: 'd1', title: 'Extract the billing client into packages/billing', model: 'Opus 4.8', effort: 'high', ctx: { pct: 34, tokens: 340000, denom: 1000000 }, state: 'busy', acked: true, active: true, groupId: 'demo-g' },
+  { id: 'd2', title: 'Add pagination to the orders API', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 71, tokens: 142000, denom: 200000 }, state: 'waiting', acked: true, active: false },
+  { id: 'd3', title: 'Add a PDF export button to the invoice page', model: 'Haiku 4.5', effort: 'low', ctx: { pct: 12, tokens: 24000, denom: 200000 }, state: 'done', acked: false, active: false, groupId: 'demo-g', tabOpen: true },
+  { id: 'd4', title: 'Investigate memory leak in worker pool', model: 'Opus 4.8', effort: 'high', ctx: { pct: 88, tokens: 880000, denom: 1000000 }, state: 'stale', acked: true, active: false },
+  { id: 'd5', title: 'Write onboarding docs for the CLI', model: null, effort: null, ctx: null, state: 'idle', acked: true, active: false },
   // Écart intention/réel (lot 1) : demandé en opus·high au lancement, servi en
   // sonnet·medium — le badge est le SEUL mécanisme qui le signale.
-  { id: 'd6', title: 'Sondage BBQ Cloudflare Pages', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 22, tokens: 44000, denom: 200000 }, state: 'done', acked: true, active: false, asked: { model: 'opus', effort: 'high' }, mismatch: { model: { asked: 'opus', real: 'sonnet' }, effort: { asked: 'high', real: 'medium' } } },
-  { id: 'd7', title: 'Migration des scripts PowerShell', model: 'Opus 4.8', effort: 'high', ctx: { pct: 47, tokens: 470000, denom: 1000000 }, state: 'interrupted', acked: true, active: false },
+  { id: 'd6', title: 'Fix flaky checkout integration test', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 22, tokens: 44000, denom: 200000 }, state: 'done', acked: true, active: false, asked: { model: 'opus', effort: 'high' }, mismatch: { model: { asked: 'opus', real: 'sonnet' }, effort: { asked: 'high', real: 'medium' } } },
+  { id: 'd7', title: 'Migrate legacy cron jobs to queues', model: 'Opus 4.8', effort: 'high', ctx: { pct: 47, tokens: 470000, denom: 1000000 }, state: 'interrupted', acked: true, active: false },
 ];
 
 // Groupe de démonstration (lot 2), rendu en mode CLAUDE_QUOTA_PANEL_DEMO : les
@@ -663,8 +666,8 @@ const DEMO_CONVERSATIONS = [
 // rattaché à une conversation.
 const DEMO_GROUPS = [{
   id: 'demo-g',
-  name: 'Refonte du paiement',
-  hue: hueOf('Refonte du paiement'),
+  name: 'Payment refactor',
+  hue: hueOf('Payment refactor'),
   collapsed: false,
   // Moteur de vagues (lot 4) : vague 1 en cours (d1 busy, d3 done), vague 2
   // encore `queued` — le cas type de « unlocks when wave 1 is fully done ».
@@ -675,9 +678,9 @@ const DEMO_GROUPS = [{
   // Démo : les champs dérivés de la table de vérité (lot 10) sont écrits à la
   // main ici — aucune source réelle derrière une conversation fictive.
   members: [
-    { key: 'm1', prompt: 'Implémenter le lot 1 du panneau sidebar', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'd1', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
-    { key: 'm2', prompt: 'Watchdog Jeedom Z-Wave', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd3', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
-    { key: 'm3', prompt: 'Mettre à jour la doc une fois les deux autres terminées', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' },
+    { key: 'm1', prompt: 'Extract the billing client into packages/billing', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'd1', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
+    { key: 'm2', prompt: 'Add a PDF export button to the invoice page', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd3', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
+    { key: 'm3', prompt: 'Update the docs once the other two land', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' },
   ],
 }];
 

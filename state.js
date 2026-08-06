@@ -204,7 +204,7 @@ function hasOpenTab(c, tabs) {
 
 // Tolérance au bruit d'UN SEUL recompute (lot 2, bascule au focus, 2026-07-24).
 // Symptôme : plusieurs conversations d'un même groupe partagent le préfixe
-// « Implémenter lot N… » ; une fois tronqués par VS Code à la largeur (pas à un
+// « Implement part N… » ; une fois tronqués par VS Code à la largeur (pas à un
 // nombre de caractères, cf. labels.js), leurs libellés d'onglet peuvent devenir
 // ambigus le temps d'un recompute déclenché par un simple changement de focus
 // (aucun onglet fermé) — le matching titre↔onglet d'une conv rate alors CE SEUL

@@ -1,12 +1,13 @@
 # Claude Convs — Conversations & Quota Panel
 
-![Claude Convs panel — every conversation state (working, waiting for you, done unread, done read, stale) above quota bars coloured by burn-rate pace](images/screenshot.png)
+![Claude Convs panel — a batch group with waves above the flat conversation list (every state: working, waiting for you, done unread, done read, interrupted), the New conversation form, and quota bars coloured by burn-rate pace](images/screenshot.png)
 
-**See which of your Claude Code conversations are actually working, click one to jump straight to its tab — in any VS Code window, even a hidden one — and hear the difference between "done" and "Claude needs you".**
+**See which of your Claude Code conversations are actually working, click one to jump straight to its tab — in any VS Code window, even a hidden one — launch a whole batch of conversations in ordered waves from one paste, and hear the difference between "done" and "Claude needs you".**
 
 Most Claude Code usage trackers on the Marketplace stop at a status-bar percentage. This one is a full panel, docked in the **Secondary Side Bar** (right side):
 
 - **Every conversation in the current workspace, with live state** — working / waiting for you / done / stale — not just the tab dot VS Code's own extension shows (a blue dot for a pending permission, an orange one for a finished hidden tab — nothing at all for a conversation asking you a question). A finished conversation keeps a **bright ✓ until you've read it** ([read receipts](#read-receipts))
+- **Launch several conversations at once** — type prompts by hand or **paste one `claude-convs` block**: each task gets its own **model and effort**, tasks are ordered in **waves** (wave 2 opens when wave 1 is done), and the batch lives on as a **group** in the panel, master conversation on top ([Launching conversations](#launching-conversations--one-or-a-whole-batch))
 - **Click a row → the right tab comes to the front**, in any editor group, **in any VS Code window** — VS Code exposes no API to do this, so the panel works around it (see [Clicking a conversation](#clicking-a-conversation))
 - **Two distinct sounds** — one when a conversation finishes, a different one when Claude is waiting on you (a question, a permission prompt) — so you don't have to keep the panel visible to notice ([Sounds](#sounds); off by default)
 - **A quota bar per active window** — 5h, 7d, and any model-scoped weekly limit the API is currently reporting (e.g. a promotional Fable allowance) — coloured by **projected pace** (are you on track to run out before the reset, not just "how full does it look right now"), with a **▲ marker** showing where you "should" be at this instant if you paced usage evenly across the window
@@ -25,6 +26,27 @@ VS Code's own Claude Code extension doesn't show which of your open conversation
 ## Opening the panel
 
 The Secondary Side Bar is a VS Code 1.106+ feature. If the **Claude Convs** icon isn't visible in the right sidebar, open it via **View → Appearance → Secondary Side Bar**, then find "Claude Convs" in the activity bar that appears on the right — or run the command **Claude Code Quota: Open Usage Page** once to trigger activation, then look for the icon. It stays docked once opened.
+
+## Launching conversations — one, or a whole batch
+
+![The New conversation form after pasting a claude-convs block: a group name, three prompts prefilled across two waves, each with its own model and effort selectors, and a "Create 3" button](images/screenshot-new-conversation.png)
+
+The **New conversation** form at the bottom of the conversation list opens real Claude Code conversations — the official extension's own tabs — but parameterized:
+
+- **One prompt = one conversation**, with an explicit **model** (haiku / sonnet / opus / fable) and **effort** (low → max), applied through per-conversation environment variables (`ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`) so the choice governs that CLI without touching your defaults.
+- **Several prompts = a batch.** Click **+ Add task**, or simply **paste a `claude-convs` block into any prompt field** — the form recognizes it and prefills everything: one task per section, model, effort, waves, group name. The ? tip in the section header offers a one-line instruction to copy into your `CLAUDE.md` so Claude ends its planning handoffs with exactly that block: plan in one conversation, paste once, launch everything.
+- **Waves order the batch.** Tasks in wave 1 open immediately; the next wave opens when every conversation of the previous one has finished — automatically (`auto`) or on your click (`manual`). Move a task between waves with ◂ ▸, or add a **wave divider** to split what runs in parallel from what must wait.
+
+A launched batch lives on as a **group** in the panel:
+
+![A group in the panel: the master conversation as a capsule on top, wave 1 members (one working, one done), wave 2 queued behind a launch pill](images/screenshot-group.png)
+
+- The **capsule on top is the master conversation** — the one whose pasted block created the batch. It's found automatically at creation time when the block matches exactly one open conversation, or set by hand (⌂). A master is a *pointer*, not a member: it never counts in the "x/y done" tally or in any wave.
+- **Each member row is a live conversation row** — same states, same `model · effort` badge, same context bar as the flat list, because it *is* the same row rendering. A task whose conversation hasn't opened yet shows a waiting ring on the group's rail.
+- **Group actions only ever touch metadata.** Removing a member (✕) or dissolving the group never closes or interrupts a conversation — the only thing that closes a tab is the explicit close badge a finished conversation shows. Members whose tab you've closed leave the view; the whole group leaves once everything is done and closed — the panel shows what's left to do.
+- **auto / manual** on the group header switches wave advance at any time; **▶ wave n** launches the next wave by hand.
+
+Batch-created conversations honour the requested model/effort at the CLI level; the official Claude menu inside the tab can briefly display its own persisted default instead, until the first turn resyncs it — the badge on the conversation row (read from the transcript) is the real state. See [Known limitations](#known-limitations) for this and for how the master lookup can come up empty.
 
 ## How it works
 
@@ -288,6 +310,8 @@ Edit the hooks in `hooks/` (not the deployed copies in `~/.claude/scripts/`), th
 | `claudeCodeQuotaBar.braveUserDataDir` | `""` | Path to a Brave user-data directory with a `claude.ai` session logged in, for the faster cookie-based quota fetch. Empty (default) disables that path cleanly — no browser spawn, no error — and the OAuth fallback is used instead. Set `BRAVE_EXE` too if `brave.exe` isn't in the standard install location. |
 
 ## Burn-rate colouring
+
+![Three quota bars — 5h green, 7d yellow, a model-scoped weekly limit red — each with a ▲ marker showing where usage "should" be right now](images/screenshot-quota.png)
 
 Each quota bar (5h, 7d) is coloured by **pace** — how fast you're spending the window relative to how much of it has elapsed:
 

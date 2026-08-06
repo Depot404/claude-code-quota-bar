@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.27.13] - 2026-08-06
+
+### Changed
+- **The Marketplace listing finally shows what the extension does now.** New README section "Launching conversations — one, or a whole batch" (the New conversation form, pasted `claude-convs` blocks, per-task model/effort, waves, groups and the master capsule), and four regenerated screenshots: the full panel with a batch group, the form with a pasted block prefilled across two waves, a group with a running and a queued wave, and the pace-coloured quota bars. All screenshots are generated from fictional English data by the new `test/make-store-shots.js` (the real `panel.js` rendered in an offscreen Chromium with VS Code theme variables injected) — never captures of a real workspace. They are no longer packaged into the `.vsix` (`images/screenshot*.png` ignored): the listing resolves them through the GitHub repository.
+- **The demo data set (`CLAUDE_QUOTA_PANEL_DEMO=1`) is now fictional and in English**, aligned with the screenshots. A handful of real conversation titles that had drifted into test fixtures over time (`test-focus.js`, `test-ack.js`, `test-presence.js`, `test-title.js`, one comment in `labels.js`) were replaced with the same fictional set — no functional change, all benches green.
+
 ## [2.27.12] - 2026-08-06
 
 ### Changed

@@ -119,21 +119,21 @@ async function dwellTests() {
 
   check('aucun onglet Claude actif → rien à acquitter', tracker.dwellLabel() === null);
 
-  ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');
+  ACTIVE_TAB = claudeTab('Fix the flaky checkou…'); emit('tabs');
   check('juste arrivé sur l\'onglet → pas encore lu (le dwell court)', tracker.dwellLabel() === null);
   await sleep(200);
-  check('après le dwell → lu', tracker.dwellLabel() === 'Lot 6 deux teintes du c…', tracker.dwellLabel());
-  check('… et onDwell a prévenu une fois', dwelt.length === 1 && dwelt[0] === 'Lot 6 deux teintes du c…',
+  check('après le dwell → lu', tracker.dwellLabel() === 'Fix the flaky checkou…', tracker.dwellLabel());
+  check('… et onDwell a prévenu une fois', dwelt.length === 1 && dwelt[0] === 'Fix the flaky checkou…',
     JSON.stringify(dwelt));
 
   // Ctrl+Tab qui traverse : deux bascules rapides, aucune ne doit compter.
-  ACTIVE_TAB = claudeTab('Refonte du digest ma…'); emit('tabs');
+  ACTIVE_TAB = claudeTab('Add pagination to th…'); emit('tabs');
   await sleep(40);
-  ACTIVE_TAB = claudeTab('Watchdog Jeedom Z-W…'); emit('tabs');
+  ACTIVE_TAB = claudeTab('Investigate memory l…'); emit('tabs');
   await sleep(40);
   check('Ctrl+Tab au travers → aucun des onglets traversés n\'est acquitté',
     dwelt.length === 1, JSON.stringify(dwelt));
-  ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');
+  ACTIVE_TAB = claudeTab('Fix the flaky checkou…'); emit('tabs');
   await sleep(200);
 
   // Fenêtre en arrière-plan : l'onglet est affiché, pas consulté.
@@ -143,7 +143,7 @@ async function dwellTests() {
   FOCUSED = true; emit('window');
   check('retour du focus → il faut re-tenir le dwell', tracker.dwellLabel() === null);
   await sleep(200);
-  check('… puis c\'est lu', tracker.dwellLabel() === 'Lot 6 deux teintes du c…');
+  check('… puis c\'est lu', tracker.dwellLabel() === 'Fix the flaky checkou…');
 
   // Un onglet non-Claude actif n'acquitte rien.
   ACTIVE_TAB = fileTab('README.md'); emit('tabs');
@@ -151,27 +151,27 @@ async function dwellTests() {
   check('onglet de fichier actif → rien à acquitter', tracker.dwellLabel() === null);
 
   // Événement sans changement : ne doit PAS réarmer le compteur.
-  ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');
+  ACTIVE_TAB = claudeTab('Fix the flaky checkou…'); emit('tabs');
   await sleep(200);
   emit('tabs'); emit('window'); emit('groups');
   check('un événement qui ne change rien ne remet pas le dwell à zéro',
-    tracker.dwellLabel() === 'Lot 6 deux teintes du c…');
+    tracker.dwellLabel() === 'Fix the flaky checkou…');
 
   // Re-titrage de l'onglet ACTIF par l'extension officielle (`rename_tab` en fin
   // de tour) : même onglet, libellé neuf. Le séjour doit survivre tel quel — un
   // séjour qui renaît ici est un accusé de lecture fabriqué par l'outil.
   const stayBefore = tracker.dwellSince();
-  ACTIVE_TAB.label = 'Lot 6 deux teintes du ch…';
+  ACTIVE_TAB.label = 'Fix the flaky checkout…';
   emit('tabs');
   check('rename de l\'onglet actif → le séjour n\'est PAS redémarré',
     tracker.dwellSince() === stayBefore, `${tracker.dwellSince()} vs ${stayBefore}`);
   check('… et le libellé suivi est bien le nouveau',
-    tracker.stayLabel() === 'Lot 6 deux teintes du ch…', tracker.stayLabel());
+    tracker.stayLabel() === 'Fix the flaky checkout…', tracker.stayLabel());
   check('… le dwell reste acquis, sans attendre à nouveau',
-    tracker.dwellLabel() === 'Lot 6 deux teintes du ch…', tracker.dwellLabel());
+    tracker.dwellLabel() === 'Fix the flaky checkout…', tracker.dwellLabel());
 
   // Un VRAI changement d'onglet, lui, redémarre bien le séjour.
-  ACTIVE_TAB = claudeTab('Refonte du digest ma…'); emit('tabs');
+  ACTIVE_TAB = claudeTab('Add pagination to th…'); emit('tabs');
   check('changement d\'onglet réel → nouveau séjour', tracker.dwellSince() > stayBefore
     && tracker.dwellLabel() === null, `${tracker.dwellSince()} vs ${stayBefore}`);
 
@@ -197,7 +197,7 @@ async function e2eTests() {
   fs.writeFileSync(file,
     line({ type: 'user', message: { content: 'go' } })
     + line({ type: 'assistant', message: { model: 'claude-opus-4-8', usage: { input_tokens: 1000 } } })
-    + line({ type: 'ai-title', aiTitle: 'Lot 6 deux teintes du check' }));
+    + line({ type: 'ai-title', aiTitle: 'Fix the flaky checkout test' }));
 
   // Stop : la conv est terminée, jamais relue.
   updateSession('sess', { state: 'done', transcript: file });
@@ -208,7 +208,7 @@ async function e2eTests() {
   // décision : il observe pour le journal, il n'a plus de sortie vers l'ack.
   const tracker = createAckTracker({ dwellMs: ACK_DWELL });
   const engine = state.createStateEngine({
-    workspacePath: WS, tabs: () => ({ known: true, labels: ['Lot 6 deux teintes du c…'] }),
+    workspacePath: WS, tabs: () => ({ known: true, labels: ['Fix the flaky checkou…'] }),
     tickMs: 3600000, debounceMs: 10,
   });
   // Réplique du SEUL écrivain d'ack_ts restant (extension.js
@@ -226,7 +226,7 @@ async function e2eTests() {
   // L'utilisateur ouvre l'onglet et y reste LONGTEMPS. Avant la décision, ceci
   // acquittait — c'est le geste qui éteignait des ✓ jamais lus (une fenêtre qui
   // revient au premier plan suffisait).
-  ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');
+  ACTIVE_TAB = claudeTab('Fix the flaky checkou…'); emit('tabs');
   await sleep(ACK_DWELL * 4);
   engine.refresh();
   check('séjour très au-delà du seuil → le ✓ reste VIF (plus aucun ack automatique)',

@@ -29,8 +29,8 @@ check('enveloppe en tête + vrai prompt derrière → seul le prompt reste',
   cleanTitle('<ide_selection>x = 1</ide_selection> Pourquoi ce test échoue ?') === 'Pourquoi ce test échoue ?',
   JSON.stringify(cleanTitle('<ide_selection>x = 1</ide_selection> Pourquoi ce test échoue ?')));
 check('balise INCONNUE en tête (règle générique, pas de liste) → retirée',
-  cleanTitle('<future-cli-tag>zzz</future-cli-tag>Refonte du digest') === 'Refonte du digest',
-  JSON.stringify(cleanTitle('<future-cli-tag>zzz</future-cli-tag>Refonte du digest')));
+  cleanTitle('<future-cli-tag>zzz</future-cli-tag>Rework the digest') === 'Rework the digest',
+  JSON.stringify(cleanTitle('<future-cli-tag>zzz</future-cli-tag>Rework the digest')));
 check('balise ouvrante jamais refermée → dépouillée (aucun < > à l\'écran)',
   cleanTitle('<command-name>/model') === '/model',
   JSON.stringify(cleanTitle('<command-name>/model')));
@@ -82,10 +82,10 @@ check('… provenance first-user (donc jamais masquée par le filtre du lot 5)',
 const titled = write('titled.jsonl', [
   user('<command-name>/model</command-name>'),
   user('peu importe'),
-  { type: 'ai-title', aiTitle: 'Lot 6 — deux teintes du check' },
+  { type: 'ai-title', aiTitle: 'Two shades of the check mark' },
 ]);
 info = extractTitleInfo(titled);
-check('ai-title garde la priorité', info.title === 'Lot 6 — deux teintes du check' && info.source === 'ai-title',
+check('ai-title garde la priorité', info.title === 'Two shades of the check mark' && info.source === 'ai-title',
   JSON.stringify(info));
 
 // Conv qui n'est QUE des slash-commands : aucun titre humain à trouver.

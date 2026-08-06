@@ -18,8 +18,8 @@ function norm(s) {
 
 // L'extension Claude TRONQUE le libellé de l'onglet (~24 caractères suivis d'un
 // « … »), alors que le panneau affiche le titre complet (`ai-title`). Vérifié le
-// 2026-07-15 : onglet « Refactor auth middlewar… » pour la conv « Implémenter
-// lot 4 burn-rate et clic-focus multi-fenêtres ». La comparaison stricte du lot 1
+// 2026-07-15 : onglet « Refactor auth middlewar… » pour la conv « Refactor auth
+// middleware for session rotation ». La comparaison stricte du lot 1
 // ne pouvait donc JAMAIS matcher une conv au titre long — le clic était un no-op.
 // On compare par préfixe dès que le libellé est tronqué, à l'identique sinon.
 function labelMatches(label, title) {

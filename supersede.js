@@ -8,9 +8,10 @@
 // même premier prompt, porte donc le même ai-title, et prend la place de
 // l'onglet. L'ancien transcript subsiste : un HUSK, figé à l'instant du reload,
 // MORT (plus aucun process CLI), mais toujours listé par state.js — qui fait
-// UNE conversation par transcript. Constaté en vrai le 2026-07-24 :
-//   7c5741cb « Implémenter lot 1 allègement panneau vagues » (02:01, husk)
-//   c6df1573 « Implémenter lot 1 allègement panneau vagues » (03:30, resumé)
+// UNE conversation par transcript. Constaté en vrai le 2026-07-24 (ids et
+// titre remaniés) :
+//   aaaa1111 « Implement part 1 panel cleanup » (02:01, husk)
+//   bbbb2222 « Implement part 1 panel cleanup » (03:30, resumé)
 //
 // De cette cause unique, trois symptômes :
 //   - la même conversation apparaît DEUX FOIS dans la liste (bug 3) ;

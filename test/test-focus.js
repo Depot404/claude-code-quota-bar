@@ -33,32 +33,32 @@ function check(name, cond, detail) {
 async function run() {
   console.log('\n1. Correspondance des libellés (onglet tronqué à 24 car. + « … »)');
   GROUPS = [group(1, [claude('Refactor auth middlewar…')], true)];
-  let m = focus.findTab('Refactor auth middlewarate et clic-focus multi-fenêtres');
+  let m = focus.findTab('Refactor auth middleware for session rotation');
   check('libellé tronqué ↔ titre complet (cas réel 2026-07-15)', !!m, 'aucun match');
 
-  GROUPS = [group(1, [claude('Tri des scans')], true)];
-  check('libellé court = titre exact', !!focus.findTab('Tri des scans'));
+  GROUPS = [group(1, [claude('Sort inbox scans')], true)];
+  check('libellé court = titre exact', !!focus.findTab('Sort inbox scans'));
 
-  GROUPS = [group(1, [claude('Refonte du digest mail')], true)];
-  check('titre différent → aucun match', focus.findTab('Watchdog Jeedom Z-Wave') === null);
+  GROUPS = [group(1, [claude('Rework the mail digest')], true)];
+  check('titre différent → aucun match', focus.findTab('Investigate memory leak in worker pool') === null);
 
   GROUPS = [group(1, [claude('Refactor auth middlewar…')], true)];
   check('préfixe tronqué qui ne préfixe PAS le titre → aucun match',
-    focus.findTab('Implémenter lot 3 burn-rate') === null);
+    focus.findTab('Refactor api middleware for session rotation') === null);
 
   GROUPS = [group(1, [other('Refactor auth middlewar…')], true)];
-  check('onglet non-Claude ignoré', focus.findTab('Refactor auth middlewarate') === null);
+  check('onglet non-Claude ignoré', focus.findTab('Refactor auth middleware') === null);
 
   console.log('\n2. Recherche dans TOUS les groupes (régression lot 1 : groupe actif seulement)');
   GROUPS = [
     group(1, [claude('Autre conv'), claude('Encore une')], true),
-    group(2, [other('README.md'), claude('Portage web Planning…')], false),
+    group(2, [other('README.md'), claude('Add invoice PDF expor…')], false),
   ];
-  m = focus.findTab('Portage web PlanningTP');
+  m = focus.findTab('Add invoice PDF export button');
   check('onglet trouvé dans un groupe NON actif', !!m && m.index === 1, m ? `index=${m.index}` : 'aucun match');
 
   COMMANDS = [];
-  await focus.focusConversation({ title: 'Portage web PlanningTP', id: 'x' });
+  await focus.focusConversation({ title: 'Add invoice PDF export button', id: 'x' });
   check('focus du 2e groupe puis openEditorAtIndex(1)',
     COMMANDS.join(' + ') === 'workbench.action.focusSecondEditorGroup + workbench.action.openEditorAtIndex(1)',
     COMMANDS.join(' + '));

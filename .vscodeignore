@@ -25,6 +25,12 @@ MOCKUP_*.html
 # revue interne, ~1 Mo — jamais dans le paquet publié.
 PLANCHE_*.html
 
+# Captures de la fiche store (test/make-store-shots.js, donnees fictives) : le
+# Marketplace resout les images du README via le repo GitHub (package.json
+# repository -> raw.githubusercontent), le paquet n a pas besoin de les
+# embarquer. icon.png / panel-icon.svg, eux, sont utilises par le paquet.
+images/screenshot*.png
+
 # Captures d ecran de la procedure d upload (publish-vsix-marketplace.mjs) :
 # elles montrent le back-office Marketplace de l editeur - nom, adresse mail,
 # chiffres d installation. Deposees dans ce dossier par un run du 2026-07-22,

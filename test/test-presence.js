@@ -23,7 +23,7 @@ const noTabs = { known: true, labels: [] };
 const unknown = { known: false, labels: [] };
 const conv = (o) => ({
   sessionId: 's1',
-  title: 'Implémenter lot 5 onglet fermé',
+  title: 'Implement part 5 closed tab',
   titleSource: 'ai-title',
   state: 'idle',
   mtime: Date.now(),
@@ -35,7 +35,7 @@ console.log('\n1. Règle de présence (isGone)');
 check('aucune info sur les onglets (known:false) → jamais masquée',
   gone(conv(), unknown) === false);
 check('onglet ouvert, libellé tronqué ↔ titre complet → affichée',
-  gone(conv(), tabs('Implémenter lot 5 onglet…')) === false);
+  gone(conv(), tabs('Implement part 5 closed…')) === false);
 check('idle sans onglet → MASQUÉE',
   gone(conv({ state: 'idle' }), noTabs) === true);
 check('done sans onglet → MASQUÉE',
@@ -53,11 +53,11 @@ check('titre de repli (last-prompt) sans onglet → affichée',
 check('titre absent (aucune source) sans onglet → affichée',
   gone(conv({ title: 'Conversation', titleSource: null }), noTabs) === false);
 check('onglet d\'une AUTRE conv ouvert → masquée quand même',
-  gone(conv(), tabs('Refonte du digest mail')) === true);
+  gone(conv(), tabs('Rework the mail digest')) === true);
 
 console.log('\n2. Union multi-fenêtres : l\'onglet est chez la voisine');
 check('libellé publié par une autre instance → affichée',
-  gone(conv(), tabs('README.md', 'Implémenter lot 5 onglet…')) === false);
+  gone(conv(), tabs('README.md', 'Implement part 5 closed…')) === false);
 
 console.log('\n3. Onglet fermé sous nos yeux (règle user : même busy)');
 let closed = new Map([['s1', Date.now()]]);
@@ -78,7 +78,7 @@ check('écriture résiduelle juste après la fermeture (grâce) → reste masqu�
   gone(conv({ state: 'busy', mtime: Date.now() + 500 }), noTabs, closed) === true);
 closed = new Map([['s1', Date.now() - 60000]]);
 check('rouverte (onglet de retour) → affichée malgré la marque',
-  gone(conv({ state: 'idle', mtime: 0 }), tabs('Implémenter lot 5 onglet…'), closed) === false);
+  gone(conv({ state: 'idle', mtime: 0 }), tabs('Implement part 5 closed…'), closed) === false);
 
 // ── Identités stables : session vivante + titre d'onglet réel ──────────────
 console.log('\n3bis. Session CLI vivante (~/.claude/sessions) → jamais masquée');
@@ -150,7 +150,7 @@ writeTranscript('a', [userMsg('peu importe'), assistant, { type: 'ai-title', aiT
 writeTranscript('b', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Conv ouverte à garder' }]);
 writeTranscript('c', [userMsg('Titre de repli sans ai-title'), assistant]);
 writeTranscript('d', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Conv CLI au travail' }]);
-writeTranscript('e', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Refactor auth middlewarate et clic-focus multi-fenêtres' }]);
+writeTranscript('e', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Implement part 4 burn-rate and multi-window focus' }]);
 
 fs.writeFileSync(path.join(SANDBOX, '.claude', 'sessions-state.json'), JSON.stringify({
   version: 1,
@@ -329,11 +329,11 @@ console.log('\n7. resolveTabOpen : tolère un manque isolé, pas deux consécuti
 
 console.log('\n8. buildSnapshot : un recompute isolé sans match ne fait pas tomber le chip');
 {
-  // 'e' : préfixe partagé avec d'autres membres d'un même groupe (« Implémenter
-  // lot N… ») — le cas décrit par le lot. Reste affichée (busy) qu'un onglet
+  // 'e' : préfixe partagé avec d'autres membres d'un même groupe (« Implement
+  // part N… ») — le cas décrit par le lot. Reste affichée (busy) qu'un onglet
   // matche ou non ; seul tabOpen doit rester stable d'un recompute à l'autre.
   const misses = new Map();
-  const eTab = () => tabs('Implémenter lot 4 b…');   // libellé tronqué VS Code
+  const eTab = () => tabs('Implement part 4 b…');   // libellé tronqué VS Code
   const findE = (snap) => snap.conversations.find((c) => c.sessionId === 'e');
 
   let snap = snapshot(eTab, { tabOpenMisses: misses });

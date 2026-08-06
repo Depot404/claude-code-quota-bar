@@ -47,7 +47,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function run() {
   console.log('\n1. Publication des onglets locaux');
-  GROUPS = [group([other('README.md'), claude('Implémenter lot 5 ong…')])];
+  GROUPS = [group([other('README.md'), claude('Implement part 5 clos…')])];
   let closedSeen = [];
   let closedTs = 0;
   let changes = 0;
@@ -59,22 +59,22 @@ async function run() {
   check('fichier <pid>.json écrit', fs.existsSync(tabsMod.OWN_FILE));
   let published = JSON.parse(fs.readFileSync(tabsMod.OWN_FILE, 'utf8'));
   check('seuls les onglets Claude sont publiés',
-    JSON.stringify(published.labels) === JSON.stringify(['Implémenter lot 5 ong…']),
+    JSON.stringify(published.labels) === JSON.stringify(['Implement part 5 clos…']),
     JSON.stringify(published.labels));
   check('getTabs : known + libellé local',
-    tracker.getTabs().known === true && tracker.getTabs().labels.includes('Implémenter lot 5 ong…'));
+    tracker.getTabs().known === true && tracker.getTabs().labels.includes('Implement part 5 clos…'));
 
   console.log('\n2. Fermeture d\'onglet');
   GROUPS = [group([other('README.md')])];                       // l'onglet a disparu
   const t0 = Date.now();
-  onDidChangeTabs({ closed: [claude('Implémenter lot 5 ong…')], opened: [], changed: [] });
+  onDidChangeTabs({ closed: [claude('Implement part 5 clos…')], opened: [], changed: [] });
   published = JSON.parse(fs.readFileSync(tabsMod.OWN_FILE, 'utf8'));
   check('republication immédiate pour les autres fenêtres (synchrone)',
     published.labels.length === 0, JSON.stringify(published.labels));
   check('onChange notifié', changes >= 1);
   await sleep(300);
   check('onTabsClosed reçoit le libellé fermé',
-    closedSeen.length === 1 && closedSeen[0] === 'Implémenter lot 5 ong…', JSON.stringify(closedSeen));
+    closedSeen.length === 1 && closedSeen[0] === 'Implement part 5 clos…', JSON.stringify(closedSeen));
   // Mesure de l'événement lui-même, pas du sleep du test.
   const delay = closedTs - t0;
   check(`fermeture signalée en ${delay} ms (exigence : < 1 s)`, delay > 0 && delay < 1000, `${delay} ms`);
