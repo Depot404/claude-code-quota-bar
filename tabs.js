@@ -65,6 +65,15 @@ function localLabels() {
 // fenêtre), ou null si l'onglet actif n'est pas une conversation Claude.
 // Même définition que l'ack (ack.js) : ailleurs = simplement affiché, pas
 // sélectionné.
+//
+// EXPORTÉE (plan repli-auto étape 9) pour le ⌂-focus (lier l'onglet actif
+// comme master) : contrairement à `lastActiveLabel`/`getTabs().activeLabel`
+// ci-dessous — qui RESTE sur le dernier onglet Claude vu tant qu'on n'en
+// revisite pas un autre, exprès pour ne pas éteindre le surlignage quand on
+// bascule sur un fichier — le ⌂-focus a besoin de la vérité INSTANTANÉE :
+// « l'onglet actif EST-IL une conv Claude, là, maintenant ? ». Un onglet
+// non-Claude actif doit faire échouer le lien, jamais retomber sur le
+// souvenir d'une conv visitée plus tôt.
 function localActiveLabel() {
   try {
     const group = vscode.window.tabGroups.activeTabGroup;
@@ -219,4 +228,4 @@ function createTabTracker(handlers = {}) {
   };
 }
 
-module.exports = { createTabTracker, TABS_DIR, OWN_FILE };
+module.exports = { createTabTracker, localActiveLabel, TABS_DIR, OWN_FILE };

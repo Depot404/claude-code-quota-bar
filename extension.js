@@ -9,8 +9,12 @@ const WebSocket = require('ws');
 const { ClaudePanelProvider } = require('./panel');
 const { createStateEngine, DEFAULTS: STATE_DEFAULTS, projectDirFor, readSessionsState } = require('./state');
 const { focusConversation, closeConversationTab, createFocusRelay } = require('./focus');
-const { createTabTracker } = require('./tabs');
-const { createAckTracker, DWELL_MS: ACK_DWELL_MS } = require('./ack');
+const { createTabTracker, localActiveLabel } = require('./tabs');
+const { createAckTracker } = require('./ack');
+// Journal d'instrumentation du chemin d'ack (étape 18 phase 1, 5e récidive des
+// ✓ acquittés sans consultation) : une trace, jamais une décision — cf.
+// ack-journal.js pour le pourquoi de la méthode.
+const { logEvent: logAckEvent } = require('./ack-journal');
 const { convMatchesLabel } = require('./labels');
 const { createSessionTitles } = require('./session-titles');
 const { createSoundPlayer } = require('./sounds');
@@ -19,8 +23,8 @@ const { createSoundPlayer } = require('./sounds');
 const { createBootSettler } = require('./warmup');
 // Création groupée de conversations (lot 1) : le métier est en Node pur dans
 // batch.js, l'orchestration du lancement dans launcher.js — ici, que du câblage.
-const { normalizeTasks, conflictingEnvVars, createIntentStore, mismatchOf, readInheritSettings, MODELS, EFFORTS } = require('./batch');
-const { createBatchLauncher } = require('./launcher');
+const { normalizeTasks, appendTasksAfterWave, conflictingEnvVars, createIntentStore, mismatchOf, readInheritSettings, MODELS, EFFORTS } = require('./batch');
+const { createBatchLauncher, OPEN_COMMAND: LAUNCH_OPEN_COMMAND, NEW_CONVERSATION_COMMAND: LAUNCH_NEW_CONVERSATION_COMMAND } = require('./launcher');
 // Recalcul du message de « Create » (lot 6, correctif §3) : un membre lancé
 // mais dont aucun hook n'a encore tiré n'a pas d'entrée dans le snapshot de
 // state.js (le premier hook n'écrit qu'au premier Entrée) — le seul signal
@@ -30,7 +34,7 @@ const { liveSessionIds } = require('./live-sessions.js');
 // Groupes (lot 2) : le store est du Node pur (persistance injectée), le
 // rattachement par préfixe de prompt aussi — les deux se testent sans VS Code.
 const { createGroupStore, hueOf } = require('./groups');
-const { matchPending } = require('./attach');
+const { matchPending, pendingForRelink } = require('./attach');
 const { firstUserText } = require('./hooks/transcript.js');
 // Moteur de vagues (lot 4) : Node pur, ne connaît que `{wave, status}` — le
 // statut RÉEL de chaque membre (queued/launched/done/stale) est résolu ici,
@@ -42,6 +46,10 @@ const { launchedWave, waveToAutoLaunch, canForceLaunch } = require('./waves');
 // affichée ». Sources injectées ici (registre des sessions, transcripts,
 // sessions-state.json, vue), logique dans member-truth.js, Node pur.
 const { memberTruth } = require('./member-truth');
+// « Ce qui reste à faire » (plan repli-auto étape 11) : plie le statut déjà
+// tranché par member-truth.js en une condition de non-rendu du groupe entier,
+// ne re-déduit rien — cf. group-done.js.
+const { groupDone } = require('./group-done');
 // Conversation maîtresse d'un groupe (lot 11) : la résolution est du Node pur
 // (normalisation + « exactement un transcript contient ce bloc »), les lectures
 // de transcripts restent ici — et sont PONCTUELLES, déclenchées par un Create,
@@ -79,7 +87,6 @@ let panelProvider;
 let stateEngine;
 let tabTracker;
 let ackTracker;
-let ackRecheckTimer = null;
 let soundPlayer;
 let lastSource = null;
 // Ce qui a été DEMANDÉ à la création, par sessionId (lot 1). En mémoire : le
@@ -302,13 +309,19 @@ function activate(context) {
     toggleGroupCollapse: (msg) => toggleGroupCollapse(msg && msg.id),
     removeMember: (msg) => removeMember(msg && msg.id, msg && msg.key),
     linkMember: (msg) => linkMember(msg && msg.id, msg && msg.key),
+    // Remède du lien mort-né (plan lien-mort-né 2026-08-04) : rouvrir une
+    // conversation pour la tâche, quand son onglet, lui, est vraiment parti.
+    relaunchMember: (msg) => relaunchMember(msg && msg.id, msg && msg.key),
+    // « + » (adopter une conv existante) retiré du webview (plan repli-auto
+    // étape 9 — l'ajout de tâches passe par « + ajouter à cette vague/nouvelle
+    // vague ») : le handler reste câblé, inoffensif, aucun bouton ne l'appelle
+    // plus (convention du projet, cf. CLAUDE.md de ce dossier).
     addToGroup: (msg) => addToGroup(msg && msg.id),
     closeConvTab: (msg) => closeConversationTab(msg),
-    // Chip unique « fermer & retirer » (lot micro-allègements 2026-07-24) :
-    // ferme l'onglet PUIS retire le membre, retrait non conditionné au succès
-    // de la fermeture — un onglet qui refuse de se fermer reste visible dans la
-    // barre, rien ne se perd côté groupe.
-    closeAndRemoveMember: (msg) => closeAndRemoveMember(msg),
+    // Porte de sortie d'un ⌂ posé par erreur (survol de la ligne master,
+    // hover-only) : dissocier sans confirmation, geste réversible (on peut
+    // relier tout de suite après) — même esprit que `unsetMaster` côté store.
+    unlinkGroupMaster: (msg) => unlinkGroupMaster(msg && msg.id),
     // Moteur de vagues (lot 4).
     toggleGroupAdvance: (msg) => toggleGroupAdvance(msg && msg.id),
     launchWave: (msg) => handleLaunchWave(msg),
@@ -316,11 +329,15 @@ function activate(context) {
     // Ajout en file à un groupe existant (plan ajout-tache 2026-07-24) : « + »
     // par vague en file / ligne fantôme « nouvelle vague » du panneau.
     addTaskToGroup: (msg) => addTaskToGroup(msg),
-    // Conversation maîtresse (lot 11) : étage 2 (édition manuelle) du même
-    // mécanisme — QuickPick natif, comme le lien d'un membre. Le gbtn ⌂ de
-    // l'en-tête est le point d'entrée unique (set / changer / dissocier,
-    // lot allègement 2026-07-24) — dissocier est une entrée du même QuickPick,
-    // plus un message dédié.
+    // Transfert d'un bloc claude-convs multi-tâches collé, À LA SUITE d'un
+    // groupe existant (plan repli-auto étape 10) : le webview a déjà confirmé
+    // avec l'user et résolu modèle/effort par section ; les vagues envoyées
+    // sont RELATIVES (1..M), décalées ICI sur l'état à jour du groupe.
+    addTasksToGroup: (msg) => addTasksToGroup(msg),
+    // Conversation maîtresse : ⌂-focus (plan repli-auto étape 9) — visible
+    // SEULEMENT quand le groupe n'a pas encore de master, un clic lie
+    // directement l'onglet VS Code ACTIF de cette fenêtre (plus de QuickPick :
+    // ambiguïté ou onglet non-Claude → no-op + message, jamais un lien deviné).
     setGroupMaster: (msg) => setGroupMaster(msg && msg.id),
     // Astuce du champ paste (2026-07-23) : le × la masque définitivement, le
     // « ? » du label la ramène. Persisté par machine (globalState), push manuel.
@@ -351,10 +368,21 @@ function activate(context) {
 
   // Accusé de lecture (lot 6) : consulter l'onglet éteint le ✓ vif. Créé avant
   // le moteur, qui l'interroge à chaque snapshot.
-  ackTracker = createAckTracker({ onDwell: () => ackConversations() });
-  context.subscriptions.push({
-    dispose: () => { clearTimeout(ackRecheckTimer); ackRecheckTimer = null; ackTracker.dispose(); },
+  //
+  // Borne de session dans le journal d'ack (étape 18 phase 1) : toutes les
+  // fenêtres VS Code écrivent le MÊME fichier — sans cette ligne, impossible de
+  // rattacher un `ack-post` à sa fenêtre, à son workspace ni à la version qui
+  // l'a produit. C'est aussi elle qui date un reload (nouveau pid).
+  logAckEvent('window-start', {
+    workspace: workspacePath,
+    version: (context.extension && context.extension.packageJSON && context.extension.packageJSON.version) || null,
   });
+  // Sans `onDwell` depuis 2026-08-06 : le séjour sur un onglet n'acquitte plus
+  // rien (cf. le bloc « L'ACCUSÉ DE LECTURE N'EST PLUS JAMAIS AUTOMATIQUE »).
+  // Le tracker reste branché pour ce qu'il sait faire sans rien décider :
+  // alimenter le journal et fournir le contexte de séjour aux lignes d'ack.
+  ackTracker = createAckTracker({});
+  context.subscriptions.push({ dispose: () => ackTracker.dispose() });
 
   // Titres d'onglet RÉELS (2026-07-22) : seul l'hôte d'extension peut situer le
   // state.vscdb du workspace, d'où ce câblage ici plutôt qu'un défaut dans
@@ -368,11 +396,15 @@ function activate(context) {
     tabs: () => tabTracker.getTabs(),
     sessionTitles: () => sessionTitles.get(),
     sortOrder: () => getConfig().sortOrder,
+    // Ce que les GROUPES affichent, ajouté à la clé de changement du moteur
+    // (cf. state.js `extraKey`) : sans elle, une bascule de statut qui ne
+    // touche aucune conversation de la liste n'était jamais poussée au webview.
+    extraKey: groupsRenderKey,
     // L'ack APRÈS le push : la conv apparaît terminée tout de suite, l'accusé
     // suit. Ici passe le cas « l'onglet était déjà sous les yeux quand Claude a
     // fini » — aucune bascule d'onglet ne se produira, c'est donc l'arrivée du
     // `done` qui doit aller consulter le séjour en cours.
-    onChange: (snap) => { attachPendingMembers(); maybeAdvanceWaves(); pushPanelState(); ackConversations(); maybeFetchOnTransition(snap); },
+    onChange: (snap) => { attachPendingMembers(); maybeAdvanceWaves(); pushPanelState(); maybeFetchOnTransition(snap); },
   });
   context.subscriptions.push({ dispose: () => stateEngine.dispose() });
   // Amorce lastConvStates avec le snapshot initial : createStateEngine le
@@ -404,7 +436,18 @@ function activate(context) {
     for (const i of groupStore.intents()) intentStore.record(i.sessionId, i);
   }
   batchLauncher = createBatchLauncher({
-    executeCommand: (...args) => vscode.commands.executeCommand(...args),
+    // Point d'accrochage unique (récidive n°4, 2026-08-05) : les deux
+    // commandes qui font naître/activer un onglet Claude PROGRAMMATIQUEMENT
+    // (jamais un clic) sont marquées ICI, juste avant exécution — c'est le
+    // seul chemin par lequel launcher.js ouvre un onglet, batch initial comme
+    // moteur de vagues. ack.js s'en sert pour ne jamais confondre cette
+    // activation avec un acte utilisateur (cf. ack.js, en-tête du fichier).
+    executeCommand: (...args) => {
+      if (ackTracker && (args[0] === LAUNCH_OPEN_COMMAND || args[0] === LAUNCH_NEW_CONVERSATION_COMMAND)) {
+        ackTracker.markProgrammaticOpen();
+      }
+      return vscode.commands.executeCommand(...args);
+    },
     listCommands: () => vscode.commands.getCommands(true),
     env: process.env,
     workspacePath,
@@ -516,8 +559,6 @@ function restartTimer() {
 
 function deactivate() {
   clearInterval(timer);
-  clearTimeout(ackRecheckTimer);
-  ackRecheckTimer = null;
 }
 
 // `force` (commande Refresh / bouton du panneau, lot 13 §2) court-circuite la
@@ -634,9 +675,9 @@ const DEMO_GROUPS = [{
   // Démo : les champs dérivés de la table de vérité (lot 10) sont écrits à la
   // main ici — aucune source réelle derrière une conversation fictive.
   members: [
-    { key: 'm1', prompt: 'Implémenter le lot 1 du panneau sidebar', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'd1', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, note: '', hint: '' },
-    { key: 'm2', prompt: 'Watchdog Jeedom Z-Wave', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd3', status: 'done', waveStatus: 'done', canLink: false, canClose: true, note: '', hint: '' },
-    { key: 'm3', prompt: 'Mettre à jour la doc une fois les deux autres terminées', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, note: '', hint: 'Queued — opens when this wave starts.' },
+    { key: 'm1', prompt: 'Implémenter le lot 1 du panneau sidebar', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'd1', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
+    { key: 'm2', prompt: 'Watchdog Jeedom Z-Wave', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd3', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
+    { key: 'm3', prompt: 'Mettre à jour la doc une fois les deux autres terminées', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' },
   ],
 }];
 
@@ -668,69 +709,36 @@ function closeConversations(labels) {
   }
 }
 
-// Conv terminée dont l'onglet est consulté depuis assez longtemps → on pose
-// l'accusé de lecture (lot 6a). Écriture via updateSession : l'extension est le
-// SECOND écrivain de sessions-state.json (les hooks étaient seuls), et c'est un
-// read-modify-write partagé — le lock de la lib des hooks est obligatoire ici,
-// une écriture maison écraserait l'état posé par un hook concurrent.
+// L'ACCUSÉ DE LECTURE N'EST PLUS JAMAIS AUTOMATIQUE (décision user, 2026-08-06).
 //
-// Pas de boucle : l'écriture déclenche un recompute, qui rend `acked` vrai, donc
-// la condition ci-dessous devient fausse et plus rien n'est écrit.
+// Ce qui existait ici : « onglet actif + fenêtre au premier plan, tenu 2 s »
+// valait « tu as lu ». Quatre incidents successifs ont montré que ce signal ne
+// décrit pas la lecture — onglet posé là depuis avant le run, rename_tab de fin
+// de tour, onglet ouvert par le moteur de vagues, et enfin (8e signalement,
+// 2026-08-06) une fenêtre qui revient au premier plan avec cette conversation
+// déjà active : 2 s plus tard, ✓ éteint sans que personne ait rien lu. Chaque
+// fois la parade fut un garde-fou de plus SUR le chemin (busySince, seuil
+// postérieur au done, identité d'onglet, marque programmatique) ; le chemin
+// lui-même restait une DEVINETTE sur une intention humaine.
 //
-// ACK STRICT (lot 10) — incident 2026-07-15 (conv « Déboguer tbid 44220 ») :
-// ✓ passé « lu » sans jamais avoir été consulté. Cause : le dwell (actif +
-// focus + 2 s) était satisfait par un onglet posé là depuis AVANT le
-// lancement du run, pendant qu'on travaillait ailleurs dans la même fenêtre —
-// ack.js ne voit qu'un séjour ininterrompu, pas quand ce séjour a commencé
-// relativement au run. Fix : n'acquitter que si le séjour a débuté APRÈS
-// `busySince` de la conv (venir regarder travailler est un acte observé ;
-// « j'y étais déjà » ne l'est plus). `busySince` absent (conv d'avant ce lot,
-// ou hooks pas encore redéployés) → on ne peut rien exclure, le doute profite
-// à l'affichage (même logique que `tabs.known:false` au lot 5).
-//
-// LE SEUIL COURT APRÈS LA FIN DU TOUR (2026-07-22) — le lot 10 comparait le
-// séjour au DÉBUT du run (`busySince`) : « être venu regarder travailler »
-// valait donc « avoir lu le résultat », alors que le résultat n'était pas encore
-// écrit. Combiné au `rename_tab` de fin de tour (cf. ack.js), ça posait l'accusé
-// ~2,3 s après le `done` sans le moindre acte de l'utilisateur. Le séjour doit
-// désormais couvrir DWELL_MS ENTIÈREMENT POSTÉRIEURES à `since` — les yeux sur
-// l'onglet pendant que le résultat est à l'écran, pas avant. Le garde-fou
-// `busySince` du lot 10 reste en place par-dessus.
-//
-// Un re-check est programmé quand le seuil n'est pas encore atteint : sans lui,
-// une conv qui finit sous les yeux de l'user ne serait jamais acquittée, faute
-// d'événement ultérieur pour rappeler cette fonction.
-function ackConversations() {
-  if (!stateEngine || !ackTracker) return;
-  clearTimeout(ackRecheckTimer);
-  ackRecheckTimer = null;
-  const label = ackTracker.stayLabel();
-  if (!label) return;
-  const dwellSince = ackTracker.dwellSince();
-  const now = Date.now();
-  let soonest = Infinity;
-  for (const c of stateEngine.getSnapshot().conversations) {
-    if (c.state !== 'done' || c.acked) continue;
-    if (!convMatchesLabel(label, c)) continue;
-    if (c.busySince != null && dwellSince != null && dwellSince <= c.busySince) continue;
-    const watchedSince = Math.max(dwellSince || 0, c.since || 0);
-    const remaining = ACK_DWELL_MS - (now - watchedSince);
-    if (remaining > 0) { soonest = Math.min(soonest, remaining); continue; }
-    try { updateSession(c.sessionId, { ack_ts: Date.now() }); } catch {}
-  }
-  if (soonest !== Infinity) {
-    ackRecheckTimer = setTimeout(() => { ackRecheckTimer = null; ackConversations(); }, soonest + 20);
-  }
-}
+// On ne devine plus : le ✓ ne s'éteint QUE sur un acte explicite — le clic sur
+// la ligne du panneau (ackConversationById ci-dessous), seul endroit du code qui
+// écrive encore ack_ts. Le dwell de ack.js continue de tourner pour le JOURNAL
+// (ack-journal.js) : il observe, il ne décide plus rien.
 
-// Clic explicite sur la ligne panneau (lot 10, point 1c) : le clic EST l'acte
-// observé, inconditionnellement — y compris quand l'onglet est déjà actif, cas
-// où aucune transition ne peut jamais se produire (le mono-onglet n'a sinon
-// aucune porte de sortie pour son ✓ vif).
+// Clic explicite sur la ligne panneau : le clic EST l'acte observé,
+// inconditionnellement — et, depuis 2026-08-06, le SEUL. Y compris quand
+// l'onglet est déjà actif, cas où aucune transition ne peut jamais se produire.
 function ackConversationById(sessionId) {
   if (!stateEngine || !sessionId) return;
   const c = stateEngine.getSnapshot().conversations.find((x) => x.sessionId === sessionId);
   if (!c || c.state !== 'done' || c.acked) return;
+  // Journalisé : c'est desormais la SEULE origine possible d'un ack — une
+  // ligne ack-click par ✓ éteint, et rien d'autre ne doit jamais en éteindre un.
+  logAckEvent('ack-click', {
+    sessionId, title: c.title, convSince: c.since, busySince: c.busySince,
+    ...(ackTracker && ackTracker.journalContext ? ackTracker.journalContext() : {}),
+  });
   try { updateSession(sessionId, { ack_ts: Date.now() }); } catch {}
 }
 
@@ -897,11 +905,17 @@ function groupsState(convs, sources, superseded) {
     const rm = g.members.map((m) => redirectMember(m, sup));
     const truths = rm.map((m) => memberTruth(m, src));
     const abstract = rm.map((m, i) => ({ wave: m.wave, status: truths[i].waveStatus }));
+    const master = masterState(g, src, convById, sup);
     return {
       id: g.id,
       name: g.name,
       hue: hueOf(g.name),
       collapsed: !!g.collapsed,
+      // « Ce qui reste à faire » (étape 11) : groupe ENTIER terminé (membres
+      // ET maîtresse, si désignée) → le webview ne le rend plus DU TOUT (rien
+      // n'est muté ici, group-done.js ne fait que plier des statuts déjà
+      // tranchés — panel.js filtre au rendu, cf. CLAUDE.md du dossier).
+      done: groupDone(truths.map((t) => t.status), master ? master.status : null),
       autoAdvance: !!g.autoAdvance,
       // Conv maîtresse (lot 11) : un POINTEUR vers une conversation qui vit sa
       // vie ailleurs — elle n'est pas un membre, ne compte dans aucune vague, et
@@ -909,7 +923,7 @@ function groupsState(convs, sources, superseded) {
       // de vérité que les membres (lot 10) : la vue ne décide de rien, ici non
       // plus. `title` = celui de la conv si elle est listée, sinon celui qui a
       // été persisté au moment du lien.
-      master: masterState(g, src, convById, sup),
+      master,
       launchedWave: launchedWave(abstract),
       nextWave: canForceLaunch(abstract),
       waveNotice: waveNotices.get(g.id) || null,
@@ -927,6 +941,7 @@ function groupsState(convs, sources, superseded) {
         waveStatus: truths[i].waveStatus,
         canLink: truths[i].canLink,
         canClose: truths[i].canClose,
+        canRelaunch: truths[i].canRelaunch,
         // NOTES/HINTS (member-truth.js) sont du Node pur, sans vscode — le
         // texte anglais qu'elles rendent sert de CLÉ à la traduction ici, au
         // seul point où le résultat part vers l'affichage.
@@ -935,6 +950,32 @@ function groupsState(convs, sources, superseded) {
       })),
     };
   });
+}
+
+// Signature de ce que les GROUPES affichent — la moitié de la clé de rendu que
+// `renderKey` (state.js) ne peut pas voir, puisqu'elle ne décrit que la liste
+// des conversations. Injectée dans le moteur (`extraKey`) pour que TOUT ce qui
+// est à l'écran participe à la décision « faut-il repousser un état ? ».
+//
+// LA MÊME RÉSOLUTION QUE LE RENDU, jamais une seconde : on appelle `groupsState`
+// — exactement ce que `buildPanelState` enverra — et on n'en garde que les
+// champs qui se voient. Recalculer ici une vérité « équivalente » serait la
+// classe d'erreur que member-truth.js documente en tête.
+//
+// Coût : nul sans groupe (sortie immédiate). Avec des groupes, une lecture du
+// registre des sessions + une de sessions-state.json par recompute (mutualisées
+// par memberSources), soit l'ordre de grandeur de ce que le recompute fait déjà.
+function groupsRenderKey() {
+  if (!stateEngine || !groupStore) return '';
+  try {
+    if (!groupStore.all().length) return '';
+    return JSON.stringify(groupsState(conversationsState()).map((g) => [
+      g.id, g.name, g.done, g.collapsed, g.autoAdvance,
+      g.launchedWave, g.nextWave, g.waveNotice,
+      g.master && [g.master.convId, g.master.title, g.master.listed, g.master.status],
+      g.members.map((m) => [m.key, m.convId, m.status, m.canLink, m.canRelaunch]),
+    ]));
+  } catch { return ''; }
 }
 
 // Pointeur vers la conv maîtresse d'un groupe (lot 11). `null` quand aucune
@@ -960,6 +1001,11 @@ function masterState(g, src, convById, superseded) {
     listed: !!conv,
     tabTitle: (conv && conv.tabTitle) || null,
     hint: t.hint ? vscode.l10n.t(t.hint) : t.hint,
+    // Statut canonique (member-truth.js) de la maîtresse — exposé pour que
+    // `groupsState`/`maybeAutoCollapseGroups` partagent la MÊME résolution
+    // que ce qui est affiché ici, jamais un second calcul divergent (plan
+    // repli-auto, décision « UNE seule résolution partagée »).
+    status: t.status,
   };
 }
 
@@ -972,15 +1018,27 @@ const firstUserCache = new Map();          // `${transcript}:${mtime}` → texte
 
 function attachPendingMembers() {
   if (!groupStore || !stateEngine) return false;
-  const pending = groupStore.pending();
-  if (!pending.length) return false;
   const now = Date.now();
   if (now - lastAttachTry < ATTACH_RETRY_MS) return false;
+
+  const snap = stateEngine.getSnapshot();
+  const byId = new Map(snap.conversations.map((c) => [c.sessionId, c]));
+  // Deux populations, un seul appariement (fix « fermée avant envoi »
+  // 2026-08-04) : les membres jamais liés, et ceux dont le lien est MORT-NÉ —
+  // process mort sans qu'un octet soit parti, donc rien qui ait commencé sous
+  // cet identifiant (cf. attach.js pendingForRelink). Les mélanger avant
+  // matchPending est volontaire : son principe « ambiguïté = aucun
+  // rattachement » doit voir les deux d'un coup, sinon un même transcript
+  // pourrait être revendiqué deux fois.
+  const src = memberSources((id) => byId.get(id));
+  const pending = groupStore.pending()
+    .concat(pendingForRelink(groupStore.all(), (m) => memberTruth(m, src)));
+  if (!pending.length) return false;
   lastAttachTry = now;
 
   const taken = groupStore.attachedIds();
   const candidates = [];
-  for (const c of stateEngine.getSnapshot().conversations) {
+  for (const c of snap.conversations) {
     if (!c.transcript || taken.has(c.sessionId)) continue;
     const key = `${c.transcript}:${c.mtime || 0}`;
     let text;
@@ -1082,6 +1140,13 @@ function buildPanelState() {
   // dans le même instant — deux lectures ne pourraient que se contredire.
   const convById = new Map(convs.map((c) => [c.id, c]));
   const sources = memberSources((id) => convById.get(id));
+  // Point d'accrochage unique du cycle de vie du notice de batch (plan
+  // repli-auto étape 6) : AVANT composeBatchNotice()/composeBatchNoticeHint()
+  // ci-dessous, pour que les deux voient le MÊME batchLastLaunch déjà purgé
+  // si son groupe a disparu — jamais une seconde résolution divergente.
+  if (shouldPurgeBatchLaunch(batchLastLaunch, (id) => !!(groupStore && groupStore.get(id)))) {
+    batchLastLaunch = null;
+  }
   return {
     conversations: convs,
     quota: quotaState(),
@@ -1102,6 +1167,11 @@ function buildPanelState() {
       envConflict: envConflictVars(),
       busy: batchStatus.busy,
       notice: batchStatus.busy ? batchStatus.notice : composeBatchNotice(convs, sources),
+      // Disclaimer du menu officiel (plan repli-auto étape 6) : tooltip du
+      // notice, jamais concaténé au texte courant — `null` tant qu'il n'y a
+      // pas de dernier lot à décrire (busy, ou aucun Create depuis l'ouverture
+      // du panneau).
+      noticeHint: batchStatus.busy ? null : (batchLastLaunch ? batchLastLaunch.hint : null),
       // Lot 12 §3, pré-sélection au lot 14 : relu à CHAQUE push, jamais mis en
       // cache — /effort dans n'importe quelle conversation fait dériver ce
       // défaut global (NOTES). { model: null, effort: null } si le fichier est
@@ -1260,7 +1330,6 @@ async function createBatch(msg) {
   const tasks = normalizeTasks(msg && msg.tasks, readInheritSettings());
   if (!tasks.length) return;
 
-  const waveCount = new Set(tasks.map((t) => t.wave)).size;
   const wave1 = tasks.filter((t) => t.wave === 1);
   batchStatus = { busy: true, notice: vscode.l10n.t('Opening {0} conversation(s)…', wave1.length) };
 
@@ -1283,7 +1352,12 @@ async function createBatch(msg) {
   // collage tout frais pour la désigner). Le webview ne transmet le texte collé
   // QUE lorsqu'il a reconnu un bloc claude-convs valide (plan : « au collage
   // d'un bloc VALIDE ») ; sans lui, aucune recherche n'a lieu.
-  const master = group ? resolveMasterForGroup(group.id, msg && msg.paste, msg && msg.session) : null;
+  // Le retour de resolveMasterForGroup n'est plus lu ici (plan repli-auto
+  // étape 6) : la capsule d'en-tête (étape 3) montre déjà titre + point
+  // d'état de la maîtresse, le répéter en texte de notice était le doublon
+  // que l'étape 6 supprime. On l'appelle quand même pour son effet de bord
+  // (groupStore.setMaster), seul ce qui compte ici.
+  if (group) resolveMasterForGroup(group.id, msg && msg.paste, msg && msg.session);
   pushPanelState();
 
   let result = null;
@@ -1313,44 +1387,100 @@ async function createBatch(msg) {
   }
 
   const unlinked = result.launched.filter((r) => !r.sessionId).length;
-  // Partie FIXE du message (ce qui ne dépend d'aucun état vivant) : nom de
-  // groupe, annonce de vague, non-identifiés, repli — la partie « N/M ouverts,
-  // Entrée dans chaque onglet » est recalculée à chaque push par
-  // composeBatchNotice(), cf. déclaration de batchLastLaunch.
-  let staticSuffix = '';
-  if (group) staticSuffix += vscode.l10n.t(' Grouped as “{0}”.', group.name);
-  if (master) {
-    staticSuffix += master.title
-      ? vscode.l10n.t(' Master conversation: “{0}”.', master.title)
-      : vscode.l10n.t(' Master conversation linked.');
-  }
-  if (waveCount > 1) {
-    staticSuffix += vscode.l10n.t(' Wave 1 of {0} opened — the rest will follow (auto) or wait for ▶ (manual).', waveCount);
-  }
-  // Depuis le lot 2, « pas de fichier de session » n'est plus un cul-de-sac :
-  // l'étage 2 réessaie par le prompt dès que la conversation a démarré, et
-  // l'étage 3 (« Link… ») reste disponible dans le groupe.
-  if (unlinked) {
-    staticSuffix += group
-      ? vscode.l10n.t(' {0} not identified yet — they will link themselves once started, or use “Link…” in the group.', unlinked)
-      : vscode.l10n.t(' {0} could not be identified (no session file) — model/effort mismatch badge unavailable for those.', unlinked);
-  }
-  if (result.fallbackAt != null) staticSuffix += vscode.l10n.t(' Stopped at task {0} — see the message above.', result.fallbackAt + 1);
-  // Hint discret (lot 7, livrable 3) : la limite cosmétique du menu officiel
-  // (son sélecteur d'effort se cale sur le modèle par défaut PERSISTÉ tant que
-  // le premier tour n'a pas tourné, cf. README « Known limitations »). Lot 14 :
-  // un modèle sélectionné est TOUJOURS explicite désormais — ANTHROPIC_MODEL
-  // est posée à CHAQUE lancement (plus de cas « lot 100% inherit » où rien
-  // n'aurait été posé) — donc le hint s'affiche systématiquement.
-  staticSuffix += vscode.l10n.t(' (The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.)');
+  const staticSuffix = buildBatchStaticSuffix({ unlinked, grouped: !!group, fallbackAt: result.fallbackAt });
 
   batchLastLaunch = {
     total: result.total,
     trackedSessionIds: result.launched.filter((r) => r.sessionId).map((r) => r.sessionId),
     staticSuffix,
+    // Hint discret (lot 7, livrable 3 ; déplacé en tooltip par le plan
+    // repli-auto étape 6) : la limite cosmétique du menu officiel (son
+    // sélecteur d'effort se cale sur le modèle par défaut PERSISTÉ tant que
+    // le premier tour n'a pas tourné, cf. README « Known limitations »). N'est
+    // plus jamais concaténé au texte courant — panel.js le pose en `title`
+    // du notice, jamais en texte visible en permanence.
+    hint: vscode.l10n.t('The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.'),
+    // Identité du groupe décrit par ce notice (plan repli-auto étape 6,
+    // « cycle de vie ») : sans elle, un groupe dissous/purgé laisse son
+    // texte affiché pour un objet qui n'existe plus — purgeStaleBatchLaunch()
+    // la relit à chaque push pour effacer le notice au bon moment. `null`
+    // pour un batch sans groupe (tâche unique) : rien à surveiller.
+    groupId: group ? group.id : null,
   };
   batchStatus = { busy: false, notice: composeBatchNotice(conversationsState()) };
   pushPanelState();
+}
+
+// Partie STATIQUE du message de « Create » (plan repli-auto étape 6) :
+// réduite à l'ACTIONNABLE — nom de groupe, maîtresse et progression des
+// vagues sont déjà montrés par la capsule d'en-tête (étape 3) ; les répéter
+// ici serait le même doublon d'affichage que l'anti-doublon des NOTES de
+// member-truth.js. Ne restent que les faits qu'aucun autre élément du
+// panneau ne dit déjà : tâches jamais identifiées, arrêt en cours de lot.
+// Pure (aucun état de module) : testable directement, cf. test-batch-notice.js.
+function buildBatchStaticSuffix({ unlinked, grouped, fallbackAt }) {
+  let s = '';
+  // Depuis le lot 2, « pas de fichier de session » n'est plus un cul-de-sac :
+  // l'étage 2 réessaie par le prompt dès que la conversation a démarré, et
+  // l'étage 3 (« Link… ») reste disponible dans le groupe.
+  if (unlinked) {
+    s += grouped
+      ? vscode.l10n.t(' {0} not identified yet — they will link themselves once started, or use “Link…” in the group.', unlinked)
+      : vscode.l10n.t(' {0} could not be identified (no session file) — model/effort mismatch badge unavailable for those.', unlinked);
+  }
+  if (fallbackAt != null) s += vscode.l10n.t(' Stopped at task {0} — see the message above.', fallbackAt + 1);
+  return s;
+}
+
+// Un groupe dissous ou purgé ne doit plus porter le notice qui le décrivait
+// (plan repli-auto étape 6, « cycle de vie ») — classe d'erreur connue du
+// projet : un état d'affichage posé une fois, jamais invalidé par la
+// disparition de son objet (member-truth.js en documente 5 précédents). Le
+// cas « tout est parti » (plus aucun membre pending/lost) s'efface déjà tout
+// seul via computeBatchNoticeFromLaunch (pending === 0 && !lost → null) —
+// celui-ci couvre le cas RESTANT : le groupe disparaît alors que des membres
+// sont encore trackés. `groupExists` est injecté (jamais `groupStore` lu
+// directement) pour rester testable sans mock vscode.
+//
+// Étape 14 — CARTOGRAPHIE des sorties de `batchLastLaunch` (le constat était :
+// « 0/2 conversation(s) opened — press Enter » qui persiste sur des onglets
+// qui n'existent plus). Toutes les façons dont le monde change sous ce
+// notice, et ce qui les couvre déjà :
+//   1. Un membre envoie son premier message → `sent` monte (hasTranscript/vue),
+//      couvert par le recompte de computeBatchNoticeFromLaunch à chaque push.
+//   2. Tous les membres ont envoyé → `pending === 0 && lost === 0` → `null`
+//      (déjà couvert, cf. tests 5/10).
+//   3. Le groupe qui portait ce lot est dissous ou purgé (⨯ explicite) →
+//      `shouldPurgeBatchLaunch` (ci-dessous) → `batchLastLaunch = null`.
+//   4. Un membre retiré via ✕ vide le groupe de son dernier membre →
+//      `groups.js` `removeMember` dissout lui-même (`dissolve(id)`) → même
+//      chemin que le cas 3, rien de plus à coder ici.
+//   5. Un onglet `inserted` (prompt jamais envoyé) se ferme et son process CLI
+//      meurt → le membre devient `unsent-lost` (member-truth.js) : il sort de
+//      `pending`, entre dans `lost`. AVANT ce lot, le texte affiché pour ce
+//      cas restait « press Enter in its tab (if still open) » — une
+//      prescription sur un onglet dont on ne sait justement plus rien une
+//      fois `pending === 0` (aucun membre n'est plus PROUVÉ `inserted`/vivant).
+//   6. Un lot SANS groupe (tâche unique, `groupId === null`) dont l'unique
+//      tâche devient `unsent-lost` : `relaunchMember`/`linkMember`
+//      (panel.js, relaunchChip/linkChip) et le ré-appariement automatique
+//      (`attachPendingMembers` ci-dessus, qui ne lit QUE `groupStore.pending()`
+//      /`pendingForRelink(groupStore.all(), …)`) sont des mécanismes DE
+//      GROUPE — un lot ungrouped n'a ni bouton ni ré-appariement pour un lien
+//      mort-né. Avant ce lot, le texte promettait quand même « use Relaunch »
+//      dans ce cas : une action qui n'existe nulle part dans l'UI.
+//
+// Les cas 5 et 6 n'avaient pas de case dédiée : ils partageaient la branche
+// « pending === 0 && lost > 0 » du texte, qui écrivait une prescription fixe
+// sans vérifier si elle restait possible. Invariant qui les remplace (voir
+// computeBatchNoticeFromLaunch) : chaque PHRASE du notice n'apparaît que si
+// l'action qu'elle prescrit est encore possible — « press Enter » exige un
+// membre PROUVÉ `inserted` (pending > 0, cas 5 exclu) ; « lien perdu » exige
+// en plus un groupe pour porter le remède (lost > 0 && groupId, cas 6 exclu).
+// Aucune action possible du tout → aucune phrase → `null`, le notice
+// disparaît au lieu de prescrire dans le vide.
+function shouldPurgeBatchLaunch(launch, groupExists) {
+  return !!(launch && launch.groupId && !groupExists(launch.groupId));
 }
 
 // Recalcule la partie vivante du message de « Create » : combien de membres du
@@ -1409,12 +1539,20 @@ function memberSources(getConv) {
       const e = hooks[id];
       return (e && e.state) || null;
     },
+    // Onglet PROUVÉ fermé (étape 17) : `stateEngine` le sait EN DIRECT — c'est
+    // lui qui pose `closedAt` dès l'événement d'onglet (closeConversations →
+    // markClosed), avant même que le registre des sessions ou les hooks aient
+    // eu le temps de purger leur propre trace. Sans ce signal, member-truth
+    // retombe sur la course hooks/registre (bug n°6, cf. member-truth.js).
+    tabClosed(id) {
+      return !!(stateEngine && typeof stateEngine.isTabClosed === 'function' && stateEngine.isTabClosed(id));
+    },
   };
 }
 
 function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTranscript) {
   if (!launch) return fallback;
-  const { total, trackedSessionIds, staticSuffix } = launch;
+  const { total, trackedSessionIds, staticSuffix, groupId } = launch;
   // Aucun membre rattaché à suivre (tout non identifié dès le départ, ou lot
   // 100% en repli presse-papier) : rien à recalculer, le texte d'origine reste
   // affiché tel quel — dégradation silencieuse, pas de régression.
@@ -1437,34 +1575,49 @@ function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTran
   };
 
   // Classement par la table de vérité (lot 10), plus par une chaîne de `if`
-  // locale : « en attente d'Entrée » = statut `inserted`, « fermé sans rien
-  // envoyer » = `unsent-closed`, tout le reste a envoyé. Les trois autres
+  // locale : « en attente d'Entrée » = statut `inserted`, « lien perdu sans
+  // rien envoyer » = `unsent-lost`, tout le reste a envoyé. Les trois autres
   // consommateurs répondent exactement pareil.
-  let sent = 0, pending = 0, closed = 0;
+  let sent = 0, pending = 0, lost = 0;
   for (const id of trackedSessionIds) {
     const t = memberTruth({ sessionId: id, launchedAt: 1 }, sources);
     if (t.status === 'inserted') pending++;
-    else if (t.status === 'unsent-closed') closed++;
+    else if (t.status === 'unsent-lost') lost++;
     else sent++;
   }
 
-  if (pending === 0) {
-    // Plus aucun membre « inserted » : tout est parti, ou ce qui reste a fermé
-    // sans jamais avoir été envoyé — le message change de nature (décision du
-    // plan) plutôt que de continuer à réclamer un Entrée qui ne viendra plus.
-    if (!closed) return null;
-    return closed > 1
-      ? vscode.l10n.t('{0} tabs closed before sending — reopen them and press Enter to link them to a conversation.', closed)
-      : vscode.l10n.t('{0} tab closed before sending — reopen it and press Enter to link it to a conversation.', closed);
+  // Invariant (étape 14, cf. commentaire de shouldPurgeBatchLaunch juste
+  // au-dessus pour la cartographie complète) : chaque segment du notice
+  // n'est écrit que si l'action qu'il prescrit est encore possible. Deux
+  // segments indépendants, jamais une chaîne de `if` qui statue sur le
+  // message ENTIER à la place d'une seule phrase à la fois.
+  const segments = [];
+  // « press Enter » : exige un membre PROUVÉ `inserted` (live && !sent). Un
+  // `unsent-lost` n'en fait plus partie par définition (son process est
+  // mort) — pending === 0 signifie qu'aucun onglet n'est plus prouvé ouvert,
+  // donc plus aucune raison d'écrire cette phrase.
+  if (pending > 0) {
+    segments.push(vscode.l10n.t('{0}/{1} conversation(s) opened — press Enter in each tab.', sent, total));
   }
-
-  let notice = vscode.l10n.t('{0}/{1} conversation(s) opened — press Enter in each tab.', sent, total);
-  if (closed) {
-    notice += closed > 1
-      ? vscode.l10n.t(' {0} tabs closed before sending.', closed)
-      : vscode.l10n.t(' {0} tab closed before sending.', closed);
+  // « lien perdu » : exige au moins un `unsent-lost` ET un groupe pour porter
+  // son remède — relaunchChip/linkChip (panel.js) et le ré-appariement
+  // automatique (attachPendingMembers, groupStore.pending()/pendingForRelink)
+  // sont tous les trois des mécanismes DE GROUPE. Un lot ungrouped
+  // (`groupId === null`, tâche unique) n'a rien de tout ça : mentionner
+  // « Relancer » y promettrait un bouton qui n'existe nulle part.
+  if (lost > 0 && groupId) {
+    segments.push(lost > 1
+      ? vscode.l10n.t('{0} tasks lost their link before sending — use “Relaunch”.', lost)
+      : vscode.l10n.t('{0} task lost its link before sending — use “Relaunch”.', lost));
   }
-  return notice + staticSuffix;
+  // Rien d'actionnable du tout (ex. lot ungrouped entièrement unsent-lost) :
+  // aucun segment, aucun texte — le notice s'efface au lieu de prescrire dans
+  // le vide, exactement le symptôme constaté (onglets qui n'existent plus).
+  if (!segments.length) return null;
+  // `staticSuffix` ne décrit que ce qui accompagne « press Enter » (non
+  // identifiés, arrêt en cours de lot, cf. buildBatchStaticSuffix) — il ne
+  // s'accroche donc qu'à ce segment, comme avant ce lot.
+  return segments.join(' ') + (pending > 0 ? staticSuffix : '');
 }
 
 // `sources` = celles du recompute en cours (buildPanelState) quand il y en a —
@@ -1641,39 +1794,33 @@ function addTaskToGroup(msg) {
   pushPanelState();
 }
 
-// Croix rouge = seule action de sortie d'un membre, UNIFORME (lot 5, décision
-// user ~15h) : ferme l'onglet PUIS retire, dans tous les cas de figure — un
-// onglet déjà fermé ou une tâche jamais lancée n'ont rien à fermer, seul le
-// retrait s'exécute. `removeMember` s'exécute même si la fermeture échoue
-// (Escape géré par closeConversationTab lui-même — jamais de throw qui
-// bloquerait le retrait). Seul garde-fou : conversation encore EN COURS DE
-// TRAVAIL (busy/waiting) → confirmation modale native avant d'agir (protège
-// du clic accidentel sans rompre l'uniformité de l'action).
-async function closeAndRemoveMember(msg) {
-  if (isMemberBusy(msg && msg.id, msg && msg.key)) {
-    const closeLabel = vscode.l10n.t('Close & remove');
-    const choice = await vscode.window.showWarningMessage(
-      vscode.l10n.t('This conversation is still working — close its tab and remove it from the group?'),
-      { modal: true },
-      closeLabel
-    );
-    if (choice !== closeLabel) return;
-  }
-  try { await closeConversationTab(msg); } catch (e) { console.log('[QuotaBar] closeAndRemoveMember: close failed: %s', e && e.message); }
-  removeMember(msg && msg.id, msg && msg.key);
-}
-
-// Verdict busy/waiting d'un membre, résolu sur la conversation VIVANTE (redirection
-// husk→successeur incluse, même logique que groupsState/maybeAdvanceWaves) — la
-// seule condition qui déclenche la confirmation ci-dessus.
-function isMemberBusy(id, key) {
-  if (!groupStore || !stateEngine) return false;
+// Transfert d'un bloc claude-convs multi-tâches DANS un groupe existant (plan
+// repli-auto étape 10) : équivalent de cliquer « + nouvelle vague » une fois
+// par tâche du bloc, sans les suppressions manuelles que ça demandait avant
+// (constat du plan — 4 tâches/4 vagues = 4 allers-retours). Le webview a déjà
+// affiché la confirmation et résolu modèle/effort par section (`group:`/
+// `session:` du bloc y sont déjà ignorés, le groupe cible a les siens) ; il
+// envoie des vagues RELATIVES (1..M, contiguës, mêmes garanties que
+// createBatch) — normalizeTasks les redéfend (modèle/effort, jamais la vague :
+// une suite déjà contiguë depuis 1 ne bouge pas sous son renumérotage), puis
+// appendTasksAfterWave les décale sur le SEUL état à jour du groupe (le
+// webview a pu recevoir un state périmé entre son rendu et ce clic).
+function addTasksToGroup(msg) {
+  if (!groupStore) return;
+  const id = msg && msg.id;
   const g = groupStore.get(id);
-  const m = g && g.members.find((x) => x.key === key);
-  if (!m || !m.sessionId) return false;
-  const sid = resolveConvId(m.sessionId, currentSuperseded());
-  const conv = stateEngine.getSnapshot().conversations.find((c) => c.sessionId === sid);
-  return !!conv && (conv.state === 'busy' || conv.state === 'waiting');
+  if (!g) return;
+  const kept = normalizeTasks(msg && msg.tasks, readInheritSettings());
+  if (!kept.length) return;
+  const appendAfter = g.members.reduce((max, m) => Math.max(max, m.wave), 0);
+  const remapped = appendTasksAfterWave(kept, appendAfter);
+  let added = false;
+  for (const task of remapped) {
+    if (groupStore.addTask(id, task, task.wave)) added = true;
+  }
+  if (!added) return;
+  maybeAdvanceWaves();
+  pushPanelState();
 }
 
 // Conversations du panneau qui n'appartiennent à aucun groupe — la matière des
@@ -1721,6 +1868,54 @@ async function linkMember(id, key) {
   pushPanelState();
 }
 
+// Chip « Relancer » (plan lien-mort-né 2026-08-04) : le remède quand le lien
+// est mort-né ET que l'onglet, lui, est vraiment parti — le re-lien automatique
+// de l'étage 2 attend un Entrée qui ne viendra jamais. Tout ce qu'il faut pour
+// rouvrir la tâche est dans le store (prompt, modèle, effort, vague), donc on
+// rejoue exactement le chemin d'une vague : launch → attach → intention.
+//
+// LA GARDE : la vérité est recalculée ICI, à l'instant, sur des sources
+// fraîches. Le webview a pu être rendu il y a plusieurs secondes ; entre-temps
+// l'utilisateur a très bien pu appuyer sur Entrée dans l'onglet orphelin (le
+// re-lien s'est alors fait tout seul). Relancer là-dessus ouvrirait un doublon
+// et écraserait un lien vivant — exactement le genre de faute que ce chantier
+// supprime.
+async function relaunchMember(id, key) {
+  if (!groupStore || !batchLauncher) return;
+  const g = groupStore.get(id);
+  const m = g && g.members.find((x) => x.key === key);
+  if (!m) return;
+
+  const convs = stateEngine ? stateEngine.getSnapshot().conversations : [];
+  const byId = new Map(convs.map((c) => [c.sessionId, c]));
+  const truth = memberTruth(redirectMember(m, currentSuperseded()), memberSources((sid) => byId.get(sid)));
+  if (truth.status !== 'unsent-lost') return;
+
+  const at = Date.now();
+  if (!groupStore.rearm(id, key, at)) return;
+  waveNotices.delete(id);
+  pushPanelState();
+
+  let result;
+  try {
+    result = await batchLauncher.launch([{ prompt: m.prompt, model: m.model, effort: m.effort, wave: m.wave }]);
+  } catch (e) {
+    waveNotices.set(id, vscode.l10n.t('Could not reopen the task — {0}.', (e && e.message) || vscode.l10n.t('unknown error')));
+    pushPanelState();
+    return;
+  }
+
+  // Étage 1 : le registre a rendu l'identité tout de suite. Sinon (repli
+  // presse-papier, fichier de session en retard) le membre reste « en attente »
+  // et l'étage 2 le rattrapera au premier Entrée — le cas normal, pas un échec.
+  const r = result.launched && result.launched[0];
+  if (r && r.sessionId) {
+    intentStore.record(r.sessionId, { model: m.model, effort: m.effort });
+    groupStore.attach(id, key, r.sessionId);
+  }
+  pushPanelState();
+}
+
 async function addToGroup(id) {
   if (!(groupStore && groupStore.get(id))) return;
   const sessionId = await pickConversation(vscode.l10n.t('Add a conversation to this group'));
@@ -1729,48 +1924,53 @@ async function addToGroup(id) {
   if (groupStore.addExisting(id, sessionId, (conv && conv.title) || '')) pushPanelState();
 }
 
-// ── Conversation maîtresse (lot 11) ─────────────────────────────────────────
-// Étage 2 : édition manuelle. Couvre tout ce que la recherche automatique ne
-// peut pas conclure — bloc écrit à la main, collage non retrouvé (l'utilisateur
-// a édité le bloc), changement d'avis. Contrairement au lien d'un membre, la
-// liste proposée n'exclut PAS les conversations déjà groupées ailleurs : la
-// conv qui propose des handoffs est très souvent elle-même le membre d'un lot
-// précédent. Seuls les membres de CE groupe sont hors-jeu.
+// ── Conversation maîtresse — ⌂-focus (plan repli-auto étape 9) ─────────────
+// Remplace l'ancien QuickPick set/change/unlink (lot 11) : le bouton ⌂ n'est
+// visible côté webview que quand le groupe N'A PAS de master (garde répétée
+// ici, défensive — un double message ou un double clic ne doit pas écraser un
+// lien déjà posé). Un clic lie DIRECTEMENT l'onglet VS Code actif de CETTE
+// fenêtre : aucune saisie, aucun choix dans une liste — la seule décision
+// possible est l'échec propre. Trois garde-fous, dans l'ordre du plan :
+//   1. onglet non-Claude (ou aucun onglet actif) → no-op + message ;
+//   2. résolution ambiguë (0 ou ≥2 conversations correspondent au libellé de
+//      l'onglet actif) → no-op + message, jamais un lien deviné ;
+//   3. refus du store (déjà membre de CE groupe) → relayé, pas avalé en
+//      silence.
+// `localActiveLabel()` (tabs.js), pas `tabTracker.getTabs().activeLabel` : ce
+// dernier RESTE sur le dernier onglet Claude vu tant qu'on n'en revisite pas
+// un autre (c'est voulu pour le surlignage) — le ⌂-focus a besoin de la
+// vérité instantanée, sinon un onglet fichier actif lierait la conv d'avant.
 async function setGroupMaster(id) {
   const g = groupStore && groupStore.get(id);
-  if (!g || !stateEngine) return;
-  const mine = new Set(g.members.map((m) => m.sessionId).filter(Boolean));
-  const convs = stateEngine.getSnapshot().conversations.filter((c) => !mine.has(c.sessionId));
-  const items = convs.map((c) => ({
-    label: c.title || vscode.l10n.t('Untitled'),
-    description: [c.model, c.effort].filter(Boolean).join(' · '),
-    detail: c.state,
-    id: c.sessionId,
-  }));
-  // Étage unique de dissociation (lot allègement 2026-07-24) : la ligne
-  // d'en-tête dédiée qui portait l'action « Unset » a disparu, ce QuickPick
-  // (déjà le point d'entrée pour poser/changer la maîtresse) devient aussi
-  // celui pour l'oublier.
-  if (g.masterSessionId) {
-    items.unshift({ label: vscode.l10n.t('Unlink (forget where this batch came from)'), id: null, unlink: true });
-  }
-  if (!items.length) {
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: no ungrouped conversation to pick from.'));
+  if (!g || g.masterSessionId || !stateEngine) return;
+  const activeLabel = localActiveLabel();
+  if (!activeLabel) {
+    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: the active tab is not a Claude conversation.'));
     return;
   }
-  const pick = await vscode.window.showQuickPick(items, {
-    placeHolder: vscode.l10n.t('Set the conversation this batch came from'),
-    matchOnDescription: true,
-  });
-  if (!pick) return;
-  if (pick.unlink) {
-    if (groupStore.unsetMaster(id)) pushPanelState();
+  const matches = stateEngine.getSnapshot().conversations.filter((c) => convMatchesLabel(activeLabel, c));
+  if (matches.length !== 1) {
+    vscode.window.showInformationMessage(matches.length > 1
+      ? vscode.l10n.t('Claude Convs: the active tab matches more than one conversation — cannot link automatically.')
+      : vscode.l10n.t('Claude Convs: could not identify the conversation in the active tab.'));
     return;
   }
-  const conv = convs.find((c) => c.sessionId === pick.id);
-  if (groupStore.setMaster(id, pick.id, (conv && conv.title) || '')) pushPanelState();
+  const conv = matches[0];
+  if (!groupStore.setMaster(id, conv.sessionId, conv.title || '')) {
+    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: this conversation is already a member of this group.'));
+    return;
+  }
+  pushPanelState();
 }
 
+// Porte de sortie d'un ⌂ posé par erreur (survol de la ligne master, hover-only
+// — plan repli-auto étape 9) : dissocie sans confirmation, geste réversible
+// (relier ne coûte qu'un clic sur l'onglet voulu). Mêmes métadonnées seules
+// que `dissolveGroup` : rien n'est fermé, rien n'est interrompu.
+function unlinkGroupMaster(id) {
+  if (!groupStore) return;
+  if (groupStore.unsetMaster(id)) pushPanelState();
+}
 
 // Recherche PONCTUELLE de la conv d'où vient le bloc collé (lot 11, étages 0
 // et 1). Appelée UNE fois, au « Create » qui suit le collage — jamais en tâche
@@ -2232,4 +2432,7 @@ function writeOrgIdCache(orgId) {
 
 function hhmm(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
 
-module.exports = { activate, deactivate, computeBatchNoticeFromLaunch, computeLastChoiceFromTasks };
+module.exports = {
+  activate, deactivate, computeBatchNoticeFromLaunch, computeLastChoiceFromTasks,
+  buildBatchStaticSuffix, shouldPurgeBatchLaunch,
+};

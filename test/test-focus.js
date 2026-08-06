@@ -84,6 +84,29 @@ async function run() {
     && req.origin_pid === process.pid && Date.now() - req.ts < 5000,
     JSON.stringify(req));
 
+  console.log('\n5. Onglet renommé : le titre du store trouve ce que le transcript ne trouve plus');
+  GROUPS = [group(1, [claude('Upload Error TF400898:…')], true)];
+  check('titre transcript seul → aucun match (le bug d\'origine)',
+    focus.findTab('Afficher ? au lieu du loading') === null);
+  m = focus.findTab('Afficher ? au lieu du loading', 'Upload Error TF400898: An Internal Error…');
+  check('titre d\'onglet réel en second → onglet retrouvé', !!m, 'aucun match');
+
+  COMMANDS = [];
+  await focus.focusConversation({
+    title: 'Afficher ? au lieu du loading', tabTitle: 'Upload Error TF400898: An Internal Error…', id: 'y',
+  });
+  check('le clic focus bien l\'onglet renommé',
+    COMMANDS.join(' + ') === 'workbench.action.focusFirstEditorGroup + workbench.action.openEditorAtIndex(0)',
+    COMMANDS.join(' + '));
+
+  try { fs.unlinkSync(focus.REQUEST_PATH); } catch {}
+  GROUPS = [group(1, [claude('Rien à voir')], true)];
+  await focus.focusConversation({ title: 'Conv ailleurs', tabTitle: 'Titre d\'onglet réel', id: 'sess-43' });
+  const req2 = JSON.parse(fs.readFileSync(focus.REQUEST_PATH, 'utf8'));
+  check('le relais transporte AUSSI le titre d\'onglet (sinon la voisine ne trouve rien)',
+    req2.tab_title === 'Titre d\'onglet réel', JSON.stringify(req2));
+  try { fs.unlinkSync(focus.REQUEST_PATH); } catch {}
+
   console.log(`\n${pass} ok, ${fail} fail`);
   process.exit(fail ? 1 : 0);
 }

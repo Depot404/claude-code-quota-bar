@@ -1,6 +1,144 @@
 # Changelog
 
-## [2.21.6] - 2026-07-24
+## [2.27.12] - 2026-08-06
+
+### Changed
+- **Read receipts are never automatic any more.** A finished conversation's ✓ stays bright until you click its row in the panel — nothing else can dim it. The old rule ("the tab was active and focused for 2 seconds") never meant *read*: it fired for a tab left open while you worked elsewhere, for the tab-rename at the end of a turn, for tabs opened by the wave launcher, and — the eighth report — for a window simply coming back to the foreground with that conversation already active. Four guards had been stacked on that path over as many releases; a signal that needs five exceptions was not measuring what we thought. The dwell tracker still runs, but only to write the journal: it observes, it no longer decides.
+- **Wider gap between the two checks.** Unread keeps the full colour and now also carries weight; read drops from 45% to 25%. The distinction no longer rests on hue alone, which matters on light themes where the fallback green is very pale.
+
+### Fixed
+- **"Finished, never read" no longer dies with the CLI process.** `SessionEnd` deleted the whole session entry — including the very record that a conversation had finished and had never been opened. Since that hook fires when the process dies, reloading a VS Code window wiped it for every conversation at once, and the panel, falling back to "the hooks know nothing", repainted them all as already read. The entry now survives when it still carries that fact (and only then: read, running, or `/clear`ed conversations are pruned exactly as before).
+
+## [2.27.11] - 2026-08-06
+
+### Fixed
+- **A finished group (and its master row) lingered on screen after its last tab was closed**, sometimes for minutes, until an unrelated event — creating a conversation, a quota refresh — made it vanish. The panel is only re-pushed when its *render key* changes, and that key described the conversation list alone. Closing the last tab does two things a fraction of a second apart: the conversation leaves the list (pushed), then the hooks entry is purged and the session registry file disappears, flipping the master to "finished" — a recompute that produced an identical key, hence no push at all. Group truth (member and master statuses, waves, notices) is now part of that key, so anything the panel shows takes part in the decision to repaint.
+
+### Changed
+- **Group member titles are now one notch smaller than everything else** (12 px vs 13 px), matching the queued-task line right below them. The master row and conversations outside groups keep the base size, so rank reads in the type as much as in the colored rail.
+
+## [2.27.10] - 2026-08-06
+
+### Fixed
+- **The busy spinner was invisible inside groups — the ring looked empty while a conversation was working.** Reported four times; two earlier fixes (2.24.x, 2.27.5) addressed the *animation* and were correct, yet changed nothing on screen. Root cause finally proven by pixel sampling: the group ring's opaque disc (a `z-index: -1` pseudo-element that punches the hole in the rail) paints *above* its host element's border in the CSS painting order — and the busy arc was the host's border, so the disc swallowed it entirely. The ✓ and ⚠ glyphs are text, which paints above the disc; busy was the only state drawn purely as a border. The arc now lives in a positioned pseudo-element that paints above the ring, with a single definition shared by flat rows and groups. The render bench now also proves the arc by sampling pixels inside the ring, not just by reading computed styles.
+
+## [2.27.9] - 2026-08-06
+
+### Changed
+- **One less row in the New conversation form.** The "+ Add task" / "+ Add wave divider" buttons and the Cancel / Create buttons now share a single row — adders on the left, actions pushed to the right. On a narrow sidebar the row wraps naturally, nothing overflows.
+
+## [2.27.8] - 2026-08-06
+
+### Fixed
+- **The group frame vanished under the master row's selection.** Selecting (or hovering) a group's master conversation painted its background over the colored capsule's side and bottom edges. The frame is now drawn on a layer above the rows, so no row background can ever cover it, whatever theme or state it is in.
+- **The master row's ✕ overlapped the frame's right edge.** The ✕ has to stay exactly aligned with every other row's ✕, so the frame itself now extends slightly beyond the content column on both sides and encloses the whole row, ✕ included.
+- **The colored rail was drawn inside the capsule.** It now starts at the capsule's bottom edge: the master's ring is still the head of the chain, but the line only appears once it leaves the frame.
+- **The ⚠ glyph was not centered in its ring** (interrupted / dormant tasks inside a group). It is now centered as a box rather than as a line of text, with no hand-tuned offset.
+- **The rail crossed the "▶ WAVE n" launch pill**, which reads as a rendering glitch. The pill now paints over it.
+- **A collapsed group's status chip ("x/y", "✓ done") sat below the ✕ instead of beside it**; the chip and the chevron now line up with the ✕ on the row's first line.
+
+## [2.27.7] - 2026-08-06
+
+### Added
+- **Diagnostic log for read receipts.** A finished conversation's bright ✓ can still dim itself without anyone having read it — four fixes so far, each deduced from the symptom rather than from evidence, and none of them final. That path depends on tab events, a process registry and timestamps that can't be replayed afterwards, so it now records what it actually decided, when it decided it: one JSON line per read receipt posted and per notable verdict, with the full context, in `~/.claude/quotabar-ack-journal.jsonl` (local file, never sent anywhere, rotated past 1 MB). It only records — no decision depends on it, and nothing about the panel's behaviour changes in this release. Set `QUOTABAR_ACK_JOURNAL=off` to disable it.
+
+## [2.27.6] - 2026-08-06
+
+### Fixed
+- **A group task whose tab had just been closed could briefly show "open" instead of disappearing**, because two independent background signals (the CLI process registry and the hook-written state file) each clear their own trace of a closed tab on their own schedule, a few seconds apart — and right in that gap, the task looked like an open, idle conversation. The panel already knows the moment a tab closes; a finished task now hides on the very next render instead of waiting for those two signals to catch up, and an unfinished task (still running, or waiting on you) switches straight to its real remedy state (interrupted/lost link) instead of ever claiming to still be open.
+
+## [2.27.5] - 2026-08-06
+
+### Fixed
+- **A busy task inside a group showed a static dot instead of a spinning ring, unlike an identical task shown as a plain row.** The static busy state was a deliberate but overcautious choice — it now reuses the exact same spin animation as plain rows (no reduced-motion media query, matching the panel's existing pulse animation for tasks waiting on you).
+- **The "▶ WAVE n" control area and its banners could overlap the group's colored rail.** It now starts after the rail's axis, same rule already applied to wave separators and the "+ new wave" ghost row.
+
+### Changed
+- **A group's red ✕/⨯ buttons could close a VS Code tab you didn't expect to lose.** The panel now only ever edits its own grouping metadata from these buttons — it never closes a tab again. A member's ✕ removes it from the group (its conversation and tab, if any, are untouched — it simply becomes a plain row again). The master row's ⨯ dissolves the group only (same confirmation as before); its tab stays open. The close badge on plain, ungrouped conversation rows is unchanged — closing a tab is still its only job.
+
+## [2.27.3] - 2026-08-05
+
+### Fixed
+- **The batch notice ("N/M conversation(s) opened — press Enter in each tab") could keep telling you to press Enter in a tab that no longer existed, or to click "Relaunch" on a single ungrouped task where no such button exists.** Each sentence in the notice is now shown only when the action it describes is still genuinely available: "press Enter" requires at least one task still provably open and waiting, and the "lost its link" remedy is only mentioned for tasks that belong to a group (the only place a "Relaunch"/"Link…" button actually exists). A batch with nothing left to act on now shows no notice at all, instead of a stale one.
+
+## [2.27.2] - 2026-08-05
+
+### Fixed
+- **A group's master conversation was drawn just below the group's colored frame instead of inside it.** The frame now encloses the header row and the master row as one continuous capsule, in every state — master listed, master out of view, group collapsed, no master at all.
+- **The master row's close button and context bar didn't line up with the group's other conversations.** The hover-only "Unlink" action, invisible at rest, was still taking up its full width in the row's layout and squeezed everything else left by about 42 pixels. It's now out of the layout entirely, and the master row measures pixel-for-pixel identical to any other conversation row: icon column, context bar, close button.
+- **Status rings could let the rail show through, so a bubble looked see-through instead of sitting on the line.** Two separate causes: a finished-and-read conversation dimmed its whole icon (ring included) rather than just its checkmark, and a queued task's ring was dimmed the same way. Dimming now applies to the mark and to the ring's outline only — a ring's fill is always fully opaque, in both light and dark themes.
+
+## [2.27.1] - 2026-08-05
+
+### Fixed
+- **A group's colored rail could go missing after a window reload, making its master conversation and tasks look disconnected from the group header.** The rail's height was only measured once, right when the panel re-rendered from a state push — if the panel's layout shifted afterwards without a fresh push (as can happen right after VS Code restores its window), the rail was left at a stale, sometimes zero, height. It's now kept in sync continuously instead of only at render time.
+- **The status rings around a group's task icons could fail to fully hide the rail passing behind them in light color themes**, because the panel had no explicit background of its own and the ring's fill color could end up not quite matching what was actually behind it. The panel's background and the rings now always resolve to the exact same value, so they can no longer drift apart.
+- **A group's master conversation could vanish from the panel entirely** (shown neither inside its group nor back in the plain conversation list) during the brief moment a group's tasks all finish while its master conversation is still open — a bookkeeping gap between two separate checks that has now been closed.
+
+## [2.27.0] - 2026-08-05
+
+### Changed
+- **Finished group tasks whose tab has been closed no longer take up space in the panel — the auto-collapse chevron from 2.23.0 is gone, replaced by simply not showing them.** A task stays hidden as long as it's finished and closed; reopening its tab (or a reload restoring it) brings its row straight back, no state to reconcile. A wave whose every task is now hidden loses its "wave N" header too, rather than sitting there empty. Interrupted, stale and lost-link tasks are never hidden — there's still something left to do about them. A group whose tasks AND master conversation (if any) are all finished and closed disappears from the panel entirely (nothing is deleted — it comes back the moment anything in it needs attention again); a group whose tasks are all done but whose master is still open shows just its header row and a "✓ done" chip. The done counter still counts hidden tasks, so it stays accurate.
+
+## [2.26.0] - 2026-08-05
+
+### Added
+- **Pasting a multi-task `claude-convs` block and clicking "+ new wave" on an existing group now adds the whole block at once**, instead of one task at a time with manual deletion in between. The block's own wave numbers shift to start right after the group's last wave; a confirmation shows how many tasks and waves are about to be added, and says so if the block's own group name or master-conversation token is being ignored (the target group already has its own). Clicking "+ add to this wave" with a multi-task block is refused instead of silently squeezing every task into one wave — use "+ new wave" for that.
+
+## [2.25.0] - 2026-08-05
+
+### Changed
+- **A group's master conversation is now rendered exactly like any other conversation row** — title, model · effort, context bar — instead of the stripped-down title-only capsule header. Its status ring is now the first node on the group's colored rail, same as any task row.
+- **The group header is now a slim "grip" above the master row**: chevron, done counter, auto/manual toggle — nothing else. A collapsed group with a master still shows a single row: the grip hides and the master row itself carries the chevron and the done chip.
+- **Linking a master conversation is now one click on a "⌂" button, and only appears when the group doesn't have one yet** — it links whichever conversation's tab is currently active in the window, no picker involved. It refuses silently (with a message) rather than guessing when the active tab isn't a Claude conversation, or when its title matches more than one conversation. Hovering the master row reveals an "Unlink" action to undo a wrong link, with nothing shown the rest of the time.
+- **Closing a master's tab (⨯) now dissolves its group in the same action** — the group's other conversations are left exactly as they are, never closed or interrupted. It asks first only if something in the group is still working.
+- **The "+" button to adopt an existing conversation into a group is gone** — adding tasks already goes through "+ add to this wave" / "+ new wave".
+
+## [2.24.4] - 2026-08-05
+
+### Fixed
+- **A finished group task could show up twice — once as its group's checkmark, once as a plain, unrelated row lower down — after its background session restarted on its own tab, with no window reload involved.** The duplicate-detection only trusted an exact conversation title match, and the two titles differed by a single word (the resumed run's own title drifted slightly from the original). It now also recognizes a continuation by its very first message, replayed verbatim by any resumed session — a second, independent signal that catches a same-tab restart even when the title itself isn't identical.
+
+## [2.24.3] - 2026-08-05
+
+### Fixed
+- **A finished batch could leave two conversations marked "read" that you'd never actually looked at** — the official extension still showed their unread dot. Cause: opening a tab programmatically (the batch launcher, the wave engine advancing to the next task) makes it the active tab exactly like a click does, and once it sat there alone for a couple of seconds it satisfied the "read" check on its own. The panel now remembers which tabs it opened itself and never auto-marks those as read — only a real tab switch away and back, or clicking the row directly, still does.
+
+## [2.24.2] - 2026-08-05
+
+### Fixed
+- **A group task with no conversation yet showed an empty ring — the icon it was punched out of the rail for simply wasn't there.** A task whose tab is open with the prompt inserted, waiting on you to press Enter, now pulses that ring slowly (opacity only, no motion) — everything else waiting its turn (queued, not yet linked) gets a plain dimmed ring instead, never a pulse. No `prefers-reduced-motion` opt-out: this PC runs with system animations off permanently, so a media query would have hidden the pulse from its own author — it's unconditional, same call as the existing spinner.
+- **A working conversation's ring went empty too, mid-batch.** Busy, waiting, interrupted and stale rows inside a group now all carry a glyph inside their ring, same as the done checkmark — busy gets a plain filled dot rather than the flat list's spinning arc (a whole rail of tiny spinners read as "empty" before it read as "in progress"), waiting keeps its existing "?", and interrupted/stale both get "⚠" for the first time.
+- **The "Create" notice text repeated what the group header above it already showed** (its name, its master conversation, its wave progress) and never went away once its group was dissolved or pruned. It's now cut down to what nothing else on screen says — the open count, "press Enter in each tab," and a lost-link mention when there is one — and it disappears together with its tooltip the moment its group is gone. The official-menu disclaimer moved off the permanent text entirely, into a tooltip on the notice.
+
+## [2.24.1] - 2026-08-05
+
+### Fixed
+- **A launched wave's now-unneeded "+ add to this wave" line could get left behind, stacking up under "+ new wave."** The row is only ever placed in the DOM while its wave is still queued, but it was only ever removed once that wave number disappeared entirely — a queued wave that got launched kept its row orphaned at its old position instead. The row is now cleaned up the moment its wave stops being queued.
+
+## [2.24.0] - 2026-08-05
+
+### Changed
+- **A group's header is now its master conversation.** The framed border that used to sit on a separate master row now wraps the header capsule itself: chevron, title, status dot and tooltip — the title is the master's live name when it's designated (its persisted name once it's out of view), or the group's own name when no master is set. No more separate row, no more color pastille, no more rename (✎) button — the frame carries the group's hue.
+- **A group's task rows are now aligned exactly with the flat conversation list** — the old fixed left indent is gone.
+- **A thin vertical rail now runs down the group, centered precisely on the status-icon column** (the same axis as the flat list), from the header down to the "+ new wave" line. Each row's icon sits inside a small ring — bordered in the group's hue, filled with the panel's own background — that visually "punches through" the rail.
+
+## [2.23.0] - 2026-08-05
+
+### Added
+- **A group whose every task is done — and whose tabs are closed — now collapses itself into a single header row, marked with a "✓ done" chip.** No more scrolling past a finished batch's fully-deployed waves and "finished · closed" rows with nothing left to click. It reopens on its own the moment anything changes it back into something worth looking at (a reopened tab, a task added to a new wave) — and a manual expand of a done group is never re-collapsed behind your back. Nothing is deleted or hidden from the store: the chevron still opens it any time.
+
+## [2.22.0] - 2026-08-05
+
+### Fixed
+- **A task could be labelled "closed before sending" while its tab was wide open, prompt inserted, waiting for you.** When a batch task's background CLI dies in the first seconds after its tab opens, the official Claude extension quietly starts a new one *in the same tab* — but the group member stayed bound to the dead one forever. The panel then concluded the tab had been closed, painted a red "this will not finish on its own" banner and suspended auto-advance, all about a tab that was fine. The status now says only what is actually known — **"link lost before sending"** — and never claims anything about your tab.
+
+### Added
+- **A lost link now repairs itself.** A member bound to a session that died *without ever sending anything* becomes eligible for prompt-prefix matching again: press Enter in the orphaned tab and the task re-links to the conversation that really started, on its own. Every other link stays final, as before — a session that is alive, or dead *with* a transcript (a genuinely interrupted conversation), is never re-bound behind your back.
+- **A "Relaunch" chip** on that same state, for when the tab really is gone: it reopens a conversation for the task with its original prompt, model and effort, and links it back. It refuses to act if the task has re-linked itself in the meantime.
+
+### Changed
+- **The blocked-wave banner is now proportionate.** Red stays for a conversation genuinely interrupted mid-work; a wave held up only by a lost link gets an informational banner that states the remedy (press Enter in the tab, or use Relaunch). The batch notice after a "Create" was reworded the same way.
 
 ### Changed
 - **The master conversation's row now gets a framed border in the group's own hue**, matching the color of the member thread below it and blending into it seamlessly at the bottom-left corner (no rounding there, so the line appears to grow directly out of the frame). A faint tint of the same hue fills the background.

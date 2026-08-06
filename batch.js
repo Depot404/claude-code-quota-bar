@@ -308,6 +308,19 @@ function normalizeTasks(tasks, resolved = { model: null, effort: null }) {
   return kept.sort((a, b) => a.wave - b.wave);
 }
 
+// Étape 10 (plan repli-auto) : un bloc claude-convs multi-tâches collé dans le
+// champ, transféré À LA SUITE d'un groupe EXISTANT (webview : ligne fantôme
+// « + nouvelle vague », jamais « + ajouter à cette vague » — refusé côté
+// webview, pas de télescopage de topologies). `tasks` est déjà passé par
+// normalizeTasks (vagues RELATIVES, contiguës depuis 1) — cette fonction ne
+// fait que la seconde moitié du plan : les DÉCALER après `appendAfter` (max
+// des vagues déjà présentes dans le groupe cible, 0 pour un groupe sans
+// membre — les vagues du bloc valent alors telles quelles, stage 1 → vague 1).
+function appendTasksAfterWave(tasks, appendAfter) {
+  const offset = Number.isFinite(appendAfter) && appendAfter > 0 ? Math.floor(appendAfter) : 0;
+  return (Array.isArray(tasks) ? tasks : []).map((t) => ({ ...t, wave: t.wave + offset }));
+}
+
 // Variables à poser pour CETTE tâche. Lot 14 : un modèle sélectionné est
 // TOUJOURS explicite (plus de bouton « inherit ») — ANTHROPIC_MODEL est donc
 // posée à CHAQUE lancement dès que `task.model` est une valeur connue ; seule
@@ -439,6 +452,7 @@ module.exports = {
   blankTask, normalizeTasks,
   resolveDefaultModel, resolveDefaultEffort,
   findClaudeConvsBlock, parseClaudeConvsBlock,
+  appendTasksAfterWave,
   envForTask, applyEnv, conflictingEnvVars,
   createIntentStore, mismatchOf,
   SETTINGS_PATH, readInheritSettings,

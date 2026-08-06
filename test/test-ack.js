@@ -75,8 +75,21 @@ console.log('\n1. État dérivé : fin du fade 30 min (6b.1) et done pendant le 
   check('anti-rebond : écriture 3 s après le Stop mais plus rien depuis 20 min → done, PAS stale',
     state.effectiveState(done(now - 20 * MIN), now - 20 * MIN + 3000, now) === 'done',
     state.effectiveState(done(now - 20 * MIN), now - 20 * MIN + 3000, now));
-  check('busy dont le transcript est muet depuis 10 min → stale (zombie, lot 2 intact)',
+  check('busy muet depuis 10 min, process MORT → stale (vrai zombie, lot 2 intact)',
+    state.effectiveState({ state: 'busy', since: now - 10 * MIN }, now - 10 * MIN, now, false) === 'stale');
+  // Le fix « en sommeil » (2026-07-24) : un process CLI VIVANT qui se tait
+  // travaille encore (longue réflexion, outil long) — jamais un zombie.
+  check('busy muet depuis 10 min mais process VIVANT → busy, PAS stale',
+    state.effectiveState({ state: 'busy', since: now - 10 * MIN }, now - 10 * MIN, now, true) === 'busy',
+    state.effectiveState({ state: 'busy', since: now - 10 * MIN }, now - 10 * MIN, now, true));
+  check('isLive omis (appel unitaire) → comportement d\'avant (stale)',
     state.effectiveState({ state: 'busy', since: now - 10 * MIN }, now - 10 * MIN, now) === 'stale');
+  check('waiting repris depuis 30 min, process MORT → stale (zombie)',
+    state.effectiveState({ state: 'waiting', since: now - 30 * MIN }, now - 10 * MIN, now, false) === 'stale',
+    state.effectiveState({ state: 'waiting', since: now - 30 * MIN }, now - 10 * MIN, now, false));
+  check('waiting repris depuis 30 min, process VIVANT → busy (travail repris, pas zombie)',
+    state.effectiveState({ state: 'waiting', since: now - 30 * MIN }, now - 10 * MIN, now, true) === 'busy',
+    state.effectiveState({ state: 'waiting', since: now - 30 * MIN }, now - 10 * MIN, now, true));
   check('waiting : reprise après permission → busy (lot 2 intact)',
     state.effectiveState({ state: 'waiting', since: now - 60000 }, now - 1000, now) === 'busy');
 }
@@ -167,8 +180,14 @@ async function dwellTests() {
   check('après dispose → plus rien n\'est acquitté', tracker.dwellLabel() === null);
 }
 
-// ── 4. Bout en bout : le ✓ vif s'éteint quand on lit, se rallume au Stop ──
-console.log('\n4. Bout en bout : snapshot ↔ ack, sur de vrais fichiers');
+// ── 4. Bout en bout : le ✓ ne s'éteint QUE sur un clic ──────────────────────
+//
+// INVARIANT DEPUIS LE 2026-08-06 (décision user, 8e signalement) : aucun séjour
+// sur un onglet, si long soit-il, n'acquitte quoi que ce soit. Ce banc ne teste
+// donc plus les cinq garde-fous de l'ancien chemin automatique (ils ont disparu
+// avec lui) — il teste qu'il n'y a PLUS de chemin du tout : on tient le dwell
+// bien au-delà du seuil, et le ✓ doit rester VIF.
+console.log('\n4. Bout en bout : le ✓ ne s\'éteint QUE sur un clic');
 async function e2eTests() {
   const WS = 'C:\\Users\\Test\\Projets VSCODE\\Demo';
   const dir = state.projectDirFor(WS);
@@ -184,37 +203,16 @@ async function e2eTests() {
   updateSession('sess', { state: 'done', transcript: file });
 
   ACTIVE_TAB = null; FOCUSED = true;
-  const tracker = createAckTracker({ dwellMs: 120, onDwell: () => ack() });
+  const ACK_DWELL = 120;
+  // Tracker branché SANS onDwell, exactement comme extension.js depuis la
+  // décision : il observe pour le journal, il n'a plus de sortie vers l'ack.
+  const tracker = createAckTracker({ dwellMs: ACK_DWELL });
   const engine = state.createStateEngine({
     workspacePath: WS, tabs: () => ({ known: true, labels: ['Lot 6 deux teintes du c…'] }),
     tickMs: 3600000, debounceMs: 10,
   });
-  // Réplique fidèle du câblage d'extension.js (ackConversations +
-  // ackConversationById) : lot 10 — ack strict, le séjour ne compte comme acte
-  // observé que s'il a commencé APRÈS busySince du run qui vient de finir ; et
-  // correctif 2026-07-22 — le seuil de séjour court à partir de la FIN du tour
-  // (`since`), avec re-check programmé quand il n'est pas encore atteint.
-  const ACK_DWELL = 120;
-  let recheck = null;
-  function ack() {
-    clearTimeout(recheck);
-    recheck = null;
-    const label = tracker.stayLabel();
-    if (!label) return;
-    const dwellSince = tracker.dwellSince();
-    const now = Date.now();
-    let soonest = Infinity;
-    for (const c of engine.getSnapshot().conversations) {
-      if (c.state !== 'done' || c.acked) continue;
-      if (!labelMatches(label, c.title)) continue;
-      if (c.busySince != null && dwellSince != null && dwellSince <= c.busySince) continue;
-      const watchedSince = Math.max(dwellSince || 0, c.since || 0);
-      const remaining = ACK_DWELL - (now - watchedSince);
-      if (remaining > 0) { soonest = Math.min(soonest, remaining); continue; }
-      updateSession(c.sessionId, { ack_ts: Date.now() });
-    }
-    if (soonest !== Infinity) recheck = setTimeout(() => { recheck = null; ack(); }, soonest + 20);
-  }
+  // Réplique du SEUL écrivain d'ack_ts restant (extension.js
+  // ackConversationById) : le clic sur la ligne du panneau.
   function ackById(id) {
     const c = engine.getSnapshot().conversations.find((x) => x.sessionId === id);
     if (!c || c.state !== 'done' || c.acked) return;
@@ -222,117 +220,39 @@ async function e2eTests() {
   }
   const conv = () => engine.getSnapshot().conversations.find((c) => c.sessionId === 'sess');
 
-  check('conv terminée jamais lue → ✓ vif', conv() && conv().state === 'done' && conv().acked === false,
-    JSON.stringify(conv()));
+  check('conv terminée jamais lue → ✓ vif',
+    conv() && conv().state === 'done' && conv().acked === false, JSON.stringify(conv()));
 
-  // L'utilisateur va lire le résultat.
+  // L'utilisateur ouvre l'onglet et y reste LONGTEMPS. Avant la décision, ceci
+  // acquittait — c'est le geste qui éteignait des ✓ jamais lus (une fenêtre qui
+  // revient au premier plan suffisait).
   ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');
-  await sleep(220);
+  await sleep(ACK_DWELL * 4);
   engine.refresh();
-  check('après consultation de l\'onglet → ✓ atténué', conv().acked === true, JSON.stringify(conv()));
-  check('ack_ts est bien persisté dans sessions-state.json (survit à un restart)',
+  check('séjour très au-delà du seuil → le ✓ reste VIF (plus aucun ack automatique)',
+    conv().acked === false, JSON.stringify(conv()));
+  check('aucun ack_ts écrit dans sessions-state.json',
+    readState().sessions.sess.ack_ts === undefined, JSON.stringify(readState().sessions.sess));
+
+  // Le clic sur la ligne, lui, acquitte — inconditionnellement.
+  ackById('sess');
+  engine.refresh();
+  check('clic sur la ligne du panneau → ✓ atténué', conv().acked === true, JSON.stringify(conv()));
+  check('ack_ts persisté dans sessions-state.json (survit à un restart)',
     typeof readState().sessions.sess.ack_ts === 'number', JSON.stringify(readState().sessions.sess));
   check('l\'ack n\'a pas écrasé l\'état posé par le hook',
     readState().sessions.sess.state === 'done' && readState().sessions.sess.transcript === file);
 
-  // CAS DE L'INCIDENT (lot 10, 2026-07-15, conv « Déboguer tbid 44220 ») :
-  // l'onglet est DÉJÀ actif depuis AVANT le lancement du run — le dwell est
-  // tenu, mais aucun acte observé ne s'est produit pendant que ça travaillait.
-  await sleep(5);
-  const busyBeforeTs = Date.now();
-  updateSession('sess', { state: 'busy', busy_since: busyBeforeTs });
-  engine.refresh();
-  check('nouveau tour : la conv repasse busy', conv().state === 'busy', JSON.stringify(conv()));
-  updateSession('sess', { state: 'done' });
-  engine.refresh();
-  check('Stop alors que l\'onglet est déjà actif → d\'abord vif (rien ne l\'a encore lu)',
-    conv().state === 'done' && conv().acked === false, JSON.stringify(conv()));
-  check('busySince bien exposé et antérieur au dwell en cours',
-    conv().busySince === busyBeforeTs && tracker.dwellSince() < busyBeforeTs,
-    `busySince=${conv().busySince} dwellSince=${tracker.dwellSince()}`);
-  ack();                                    // ce que fait onChange dans extension.js
-  engine.refresh();
-  check('CAS DE L\'INCIDENT REJOUÉ : dwell antérieur au démarrage du run → PAS d\'ack',
-    conv().acked === false, JSON.stringify(conv()));
-
-  // Arrivée sur l'onglet PENDANT le run (après busy_since) → l'acte est observé,
-  // le ✓ s'éteint dès le done qui suit.
-  ACTIVE_TAB = null; emit('tabs');
-  await sleep(150);                         // laisse le séjour précédent expirer
-  const busyDuringTs = Date.now();
-  updateSession('sess', { state: 'busy', busy_since: busyDuringTs });
-  engine.refresh();
-  await sleep(30);
-  ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');   // arrivée mid-run
-  await sleep(150);                         // dwell tenu AVANT même le done
-  updateSession('sess', { state: 'done' });
-  engine.refresh();
-  check('arrivée mi-run, après busySince', tracker.dwellSince() > busyDuringTs,
-    `dwellSince=${tracker.dwellSince()} busySince=${busyDuringTs}`);
-  ack();
-  engine.refresh();
-  check('le done tout juste arrivé ne s\'acquitte PAS instantanément (seuil postérieur au résultat)',
-    conv().acked === false, JSON.stringify(conv()));
-  await sleep(ACK_DWELL + 80);              // le re-check programmé fait le travail
-  engine.refresh();
-  check('arrivée sur l\'onglet PENDANT le run, tenue jusqu\'au done PUIS le seuil → ack',
-    conv().acked === true, JSON.stringify(conv()));
-
-  // Clic panneau (lot 10, point 1c) : même incident (onglet actif depuis avant
-  // le run), mais cette fois un CLIC explicite doit acquitter quand même — la
-  // seule porte de sortie du mono-onglet.
-  await sleep(5);
-  updateSession('sess', { state: 'busy', busy_since: Date.now() });
-  engine.refresh();
-  updateSession('sess', { state: 'done' });
-  engine.refresh();
-  ack();
-  check('même incident (onglet déjà actif) → toujours pas d\'ack automatique',
-    conv().acked === false, JSON.stringify(conv()));
-  ackById('sess');
-  engine.refresh();
-  check('… mais le clic sur la ligne acquitte, même onglet déjà actif',
-    conv().acked === true, JSON.stringify(conv()));
-
-  // CAS DE L'INCIDENT 2026-07-22 (signalé plusieurs fois : « le ✓ vif passe pâle
-  // tout seul au bout de quelques secondes, sans que j'aie regardé l'onglet »).
-  // L'onglet est actif depuis AVANT le run — la garde du lot 10 doit bloquer.
-  // Puis, à la fin du tour, l'extension Claude officielle réécrit l'onglet
-  // (`rename_tab` : title réaffecté + iconPath → claude-logo-done.svg). Avant le
-  // correctif, cette réécriture fabriquait un séjour tout neuf, postérieur à
-  // busySince, qui BLANCHISSAIT la garde du lot 10 → ack ~2 s après le done.
-  await sleep(5);
-  ACTIVE_TAB = null; emit('tabs');
-  await sleep(ACK_DWELL + 30);
-  ACTIVE_TAB = claudeTab('Lot 6 deux teintes du c…'); emit('tabs');
-  await sleep(ACK_DWELL + 30);              // séjour bien établi AVANT le run
-  const busyBeforeRename = Date.now();
-  updateSession('sess', { state: 'busy', busy_since: busyBeforeRename });
-  engine.refresh();
-  await sleep(10);
-  updateSession('sess', { state: 'done' });
-  engine.refresh();
-  ack();
-  check('rename : ✓ vif au moment du done (séjour antérieur au run)',
-    conv().acked === false, JSON.stringify(conv()));
-  // La réécriture de l'onglet par l'extension officielle : MÊME objet Tab, seuls
-  // le libellé et l'icône changent.
-  ACTIVE_TAB.label = 'Lot 6 deux teintes du ch…';
-  emit('tabs');
-  check('le rename ne redémarre pas le séjour (dwellSince reste antérieur au run)',
-    tracker.dwellSince() < busyBeforeRename,
-    `dwellSince=${tracker.dwellSince()} busySince=${busyBeforeRename}`);
-  await sleep(ACK_DWELL + 80);
-  engine.refresh();
-  check('INCIDENT REJOUÉ : rename_tab de fin de tour → toujours PAS d\'ack automatique',
-    conv().acked === false, JSON.stringify(conv()));
-
-  // Réarmement automatique : un nouveau Stop doit redonner un ✓ vif.
+  // Réarmement : un nouveau Stop redonne un ✓ vif, onglet toujours actif.
   await sleep(5);
   updateSession('sess', { state: 'busy', busy_since: Date.now() });
   updateSession('sess', { state: 'done' });
   engine.refresh();
   check('nouveau Stop sur une conv déjà lue → le ✓ redevient vif tout seul',
+    conv().acked === false, JSON.stringify(conv()));
+  await sleep(ACK_DWELL * 3);
+  engine.refresh();
+  check('… et rester sur l\'onglet ne le rééteint pas',
     conv().acked === false, JSON.stringify(conv()));
 
   // Multi-fenêtres : l'ack posé « ailleurs » (autre process → même fichier).
@@ -350,7 +270,6 @@ async function e2eTests() {
   check('conv sans état hooks → idle + acked (✓ atténué, jamais de pastille grise)',
     plain && plain.state === 'idle' && plain.acked === true, JSON.stringify(plain));
 
-  clearTimeout(recheck);
   tracker.dispose();
   engine.dispose();
 }
@@ -486,11 +405,59 @@ async function realHookTests() {
   engine.dispose();
 }
 
+// ── 7. « en sommeil » : busy + transcript figé, de bout en bout (2026-07-24) ─
+// Reproduit l'incident signalé — une conv en pleine réflexion (ou sur un outil
+// long) n'écrit rien dans son transcript > 5 min et se faisait afficher « en
+// sommeil » (stale). Le registre des sessions vivantes tranche : process vivant
+// ⇒ travail en cours, jamais un zombie.
+console.log('\n7. busy + transcript figé > 5 min : stale seulement si le process est MORT');
+async function staleLiveTests() {
+  const WS = 'C:\\Users\\Test\\Projets VSCODE\\Stale';
+  const dir = state.projectDirFor(WS);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'think.jsonl');
+  const line = (o) => JSON.stringify(o) + '\n';
+  fs.writeFileSync(file, line({ type: 'user', message: { content: 'go' } })
+    + line({ type: 'assistant', message: { model: 'claude-opus-4-8', usage: { input_tokens: 1000 } } })
+    + line({ type: 'ai-title', aiTitle: 'Longue réflexion' }));
+  // Transcript figé depuis 10 min : la conv réfléchit sans rien écrire.
+  const old = new Date(Date.now() - 10 * MIN);
+  fs.utimesSync(file, old, old);
+  updateSession('think', { state: 'busy', transcript: file });
+
+  let LIVE = new Set();                       // process absent du registre = mort
+  const engine = state.createStateEngine({
+    workspacePath: WS, tabs: () => ({ known: true, labels: ['Longue réflexion'] }),
+    liveSessions: () => LIVE,
+    tickMs: 3600000, debounceMs: 10,
+  });
+  const conv = () => engine.getSnapshot().conversations.find((c) => c.sessionId === 'think');
+
+  engine.refresh();
+  check('busy figé 10 min, process absent du registre → stale (« en sommeil » légitime)',
+    conv() && conv().state === 'stale', JSON.stringify(conv()));
+
+  LIVE = new Set(['think']);                  // le process CLI est bien vivant
+  engine.refresh();
+  check('busy figé 10 min mais process VIVANT → busy (fix « en sommeil »)',
+    conv() && conv().state === 'busy', JSON.stringify(conv()));
+
+  engine.dispose();
+}
+
+// ── 8. SUPPRIMÉE le 2026-08-06 ──────────────────────────────────────────────
+// Elle vérifiait qu'un onglet ouvert PAR le moteur de vagues n'était pas
+// acquitté tout seul — 4e garde-fou empilé sur le chemin d'ack automatique.
+// Ce chemin n'existe plus (décision user : seul le clic acquitte), donc son
+// garde-fou non plus. Le nouvel invariant, plus fort et couvrant ce cas comme
+// tous les autres, est prouvé en section 4 : un séjour ne pose JAMAIS d'ack.
+
 (async () => {
   await dwellTests();
   await e2eTests();
   await noiseTests();
   await realHookTests();
+  await staleLiveTests();
   try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
   console.log(`\n${pass} ok, ${fail} fail`);
   process.exit(fail ? 1 : 0);

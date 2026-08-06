@@ -47,7 +47,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
-const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool, wasInterrupted } = require('./hooks/transcript.js');
+const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool, wasInterrupted, firstUserText } = require('./hooks/transcript.js');
 const { labelMatches, convMatchesLabel } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 const { liveSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
@@ -382,10 +382,34 @@ function listTranscripts(projectDir) {
   } catch { return []; }
 }
 
+// Lecture (avec cache) du premier message user d'un transcript — second signal
+// d'identité de computeSupersededBy (supersede.js, durci 2026-08-05) : un
+// resume REJOUE ce message à l'identique même quand l'ai-title, lui, a dérivé
+// d'un mot d'une session à l'autre. Clé de cache = le CHEMIN seul, jamais
+// (mtime,size) comme createTranscriptReader ci-dessus : le premier message
+// d'un transcript n'écrit plus une fois posé (fichier append-only), une entrée
+// reste donc vraie pour toute la durée de vie du process.
+function createFirstUserReader() {
+  const cache = new Map();
+  return function readFirstUser(filePath) {
+    if (!filePath) return null;
+    if (cache.has(filePath)) return cache.get(filePath);
+    let text = null;
+    try { text = firstUserText(filePath); } catch { text = null; }
+    cache.set(filePath, text);
+    if (cache.size > 500) cache.clear();
+    return text;
+  };
+}
+
 // Construit le snapshot : union des sessions connues des hooks et des
 // transcripts récents du workspace (une conv ouverte avant l'installation des
 // hooks n'a pas d'entrée d'état — elle doit quand même apparaître, en idle).
-function buildSnapshot(opts, readTranscript) {
+// `readFirstUser` est OPTIONNEL (rétro-compatible avec les bancs qui appellent
+// buildSnapshot à deux arguments) : absent → `firstUser` reste null pour
+// toutes les convs, computeSupersededBy retombe sur le groupement par titre
+// seul, comportement d'avant.
+function buildSnapshot(opts, readTranscript, readFirstUser) {
   const { workspacePath, recentMs, maxItems } = opts;
   const now = Date.now();
   const projectDir = projectDirFor(workspacePath);
@@ -460,8 +484,16 @@ function buildSnapshot(opts, readTranscript) {
   const tabOpenMisses = opts.tabOpenMisses instanceof Map ? opts.tabOpenMisses : new Map();
 
   const conversations = [];
+  // Convs dont l'identité (titre, et plus bas premier message) peut nourrir
+  // computeSupersededBy — VISIBLES (mêmes objets que `conversations`) ET
+  // MASQUÉES par isGone (durci 2026-08-05) : un husk dont le titre a dérivé ne
+  // matche plus aucun onglet — isGone le juge donc `gone` sur ce seul critère,
+  // AVANT même que la supplantation ait pu jouer — et sortirait de tout calcul
+  // si on ne gardait pas trace de son identité ici. `computeSupersededBy` a
+  // besoin de le VOIR pour le comparer au successeur ; il n'a pas besoin d'être
+  // RENDU (`conversations`) pour ça, seulement présent dans ce tableau.
+  const supersedeCandidates = [];
   for (const c of candidates.slice(0, SCAN_LIMIT)) {
-    if (conversations.length >= maxItems) break;
     const t = c.transcript ? readTranscript(c.transcript) : null;
     // `live.has` : process CLI vivant ⇒ un `busy` muet reste `busy` (travail en
     // cours), jamais `stale` par simple vieillissement du mtime.
@@ -503,8 +535,22 @@ function buildSnapshot(opts, readTranscript) {
       { sessionId: c.sessionId, title, tabTitle, titleSource: picked.titleSource, state, mtime: c.mtime },
       tabs, closedAt, live
     );
-    if (gone) continue;
-    conversations.push({
+    if (gone) {
+      // Jamais rendue — mais son identité reste candidate à la supplantation
+      // (cf. commentaire au-dessus de `supersedeCandidates`). `gone` implique
+      // déjà `!hasOpenTab` (isGone retourne plus tôt sinon) : tabOpen est donc
+      // toujours faux ici, pas besoin de resolveTabOpen.
+      supersedeCandidates.push({
+        sessionId: c.sessionId, title, titleSource: picked.titleSource,
+        mtime: c.mtime, live: live.has(c.sessionId), tabOpen: false, transcript: c.transcript,
+      });
+      continue;
+    }
+    // Le rendu reste borné à maxItems (comme avant), mais le scan, lui,
+    // continue jusqu'à SCAN_LIMIT — sans ça, un husk plus ancien que les
+    // maxItems convs visibles ne serait jamais lu, donc jamais candidat.
+    if (conversations.length >= maxItems) continue;
+    const row = {
       sessionId: c.sessionId,
       title,
       // Un onglet porte-t-il encore cette conv (union de toutes les fenêtres) ?
@@ -539,25 +585,32 @@ function buildSnapshot(opts, readTranscript) {
       isActive: false,
       transcript: c.transcript,
       mtime: c.mtime,
-    });
+    };
+    conversations.push(row);
+    supersedeCandidates.push(row);
   }
 
-  // Supplantation de session à travers un reload (supersede.js) : quand
-  // l'extension officielle relance une conversation restaurée sous un NOUVEAU
-  // sessionId (nouveau transcript, même titre), l'ancien transcript subsiste
-  // en HUSK mort. Deux lignes pour une seule conversation (bug 3, 2026-07-24) :
-  // on sort le husk de la VUE et on PUBLIE la redirection husk→successeur, pour
-  // que les membres de groupe rattachés à l'ancien id suivent le successeur
-  // vivant (bugs 1 & 2, résolus côté extension.js — la vue ne réécrit rien de
-  // durable). Calculé sur la liste effectivement construite : deux homonymes
-  // hors de la vue n'ont de toute façon pas de doublon à l'écran.
-  const supersededBy = computeSupersededBy(conversations.map((c) => ({
+  // Supplantation de session, à travers un reload OU un respawn spontané
+  // (supersede.js) : quand l'extension officielle relance une conversation
+  // sous un NOUVEAU sessionId, l'ancien transcript subsiste en HUSK mort. Deux
+  // lignes pour une seule conversation (bug 3, 2026-07-24) : on sort le husk de
+  // la VUE et on PUBLIE la redirection husk→successeur, pour que les membres de
+  // groupe rattachés à l'ancien id suivent le successeur vivant (bugs 1 & 2,
+  // résolus côté extension.js — la vue ne réécrit rien de durable). Calculé sur
+  // `supersedeCandidates` (visibles + masquées, cf. plus haut), PAS sur la
+  // seule `conversations` : depuis le durcissement 2026-08-05, un husk dont le
+  // titre a dérivé ne matche plus aucun onglet — isGone le masque avant même
+  // que ce calcul tourne — mais son premier message, lui, reste comparable.
+  const supersededBy = computeSupersededBy(supersedeCandidates.map((c) => ({
     sessionId: c.sessionId,
     title: c.title,
     titleSource: c.titleSource,
     mtime: c.mtime,
     live: live.has(c.sessionId),
     tabOpen: c.tabOpen,
+    // Second signal (durci 2026-08-05) : premier message user, pour folder un
+    // respawn même quand l'ai-title a dérivé d'un mot — cf. createFirstUserReader.
+    firstUser: typeof readFirstUser === 'function' ? readFirstUser(c.transcript) : null,
   })));
   if (Object.keys(supersededBy).length) {
     for (let i = conversations.length - 1; i >= 0; i--) {
@@ -653,18 +706,55 @@ function createStateEngine(options = {}) {
   // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
   const opts = { liveSessions: liveSessionIds, ...DEFAULTS, ...options, closedAt, tabOpenMisses };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
+  // Part de la clé de rendu qui N'EST PAS dans les conversations (2026-08-06).
+  //
+  // POURQUOI — `renderKey` ne décrit que la LISTE. Or le panneau affiche aussi
+  // les groupes, dont le statut (member-truth.js) se déduit de sources que la
+  // liste ne porte pas : registre des sessions vivantes, état des hooks, onglet
+  // prouvé fermé. Ces sources bougent SANS que la liste change — typiquement
+  // juste après la fermeture du dernier onglet d'un groupe : la conversation a
+  // déjà quitté la vue (un push a eu lieu), puis, quelques centaines de ms plus
+  // tard, la purge de sessions-state.json / la disparition du fichier de session
+  // fait basculer la maîtresse en « terminée ». Le recompute correspondant
+  // tirait bien (les watchers sont là), mais sa clé — conversations seules —
+  // était IDENTIQUE : aucun onChange, donc aucun push, donc le groupe et sa
+  // ligne maîtresse restaient à l'écran jusqu'au prochain événement sans
+  // rapport (ouverture d'une conversation, rafraîchissement du quota).
+  //
+  // L'appelant injecte donc une signature de CE QU'IL RENDRA en plus de la
+  // liste. Absente (bancs, usage isolé) → comportement d'avant, à l'octet près.
+  const extraKey = typeof opts.extraKey === 'function' ? opts.extraKey : null;
+  let extraKeyErrors = 0;
   const readTranscript = createTranscriptReader();
+  const readFirstUser = createFirstUserReader();
   const watchers = [];
-  let snapshot = buildSnapshot(opts, readTranscript);
+  let snapshot = buildSnapshot(opts, readTranscript, readFirstUser);
+  // Pas d'extraKey ici : l'appelant construit son moteur AVANT d'avoir de quoi
+  // répondre (extension.js n'a pas encore sa référence `stateEngine`). Le
+  // premier recompute verra donc une clé différente et poussera une fois — un
+  // push de plus au démarrage, jamais un push de moins.
   let lastKey = renderKey(snapshot.conversations);
   let debounce = null;
   let disposed = false;
 
   function recompute() {
     if (disposed) return;
-    const next = buildSnapshot(opts, readTranscript);
-    const key = renderKey(next.conversations);
+    const next = buildSnapshot(opts, readTranscript, readFirstUser);
+    // AVANT de composer la clé : extraKey() interroge l'appelant, qui relit ce
+    // moteur (getSnapshot) pour résoudre ses groupes — il doit y trouver le
+    // snapshot du tour courant, pas celui du précédent.
     snapshot = next;
+    let key = renderKey(next.conversations);
+    if (extraKey) {
+      // Une signature qui jette ne doit jamais empêcher la notification : le
+      // doute profite à l'affichage, comme partout ailleurs dans ce module.
+      let extra;
+      // Un compteur, pas une horloge : deux recomputes peuvent tomber dans la
+      // même milliseconde, et la clé serait alors identique — le panneau
+      // resterait muet précisément quand on ne sait plus rien.
+      try { extra = String(extraKey()); } catch { extra = 'err:' + (++extraKeyErrors); }
+      key += '|' + extra;
+    }
     // generatedAt et mtime bougent en permanence : ne notifier que si le RENDU
     // change vraiment (cf. renderKey).
     if (key === lastKey) return;
@@ -707,6 +797,13 @@ function createStateEngine(options = {}) {
   return {
     getSnapshot: () => snapshot,
     refresh: recompute,
+    // Onglet PROUVÉ fermé (étape 17, member-truth.js bug n°6) : `closedAt` est
+    // posé ICI, au moment même de l'événement d'onglet — avant que le registre
+    // des sessions ou les hooks aient eu le temps de purger leur propre trace.
+    // C'est le fait le plus À JOUR que le module détienne sur cet onglet ;
+    // l'exposer permet à member-truth de ne plus jamais présumer un onglet
+    // ouvert (`idle`/`inserted`) pendant la course asynchrone qui suit.
+    isTabClosed: (sessionId) => closedAt.has(sessionId),
     // Onglet(s) fermé(s) : on retire tout de suite, SANS attendre la purge de
     // sessions-state.json que fait l'appelant derrière — celle-ci prend un lock
     // inter-process et peut traîner ; l'affichage, lui, doit tomber sous la
@@ -749,6 +846,7 @@ module.exports = {
   readSessionsState,
   readActiveSessionId,
   createTranscriptReader,
+  createFirstUserReader,
   SESSIONS_STATE_PATH,
   STALE_MS,
   RESUME_GRACE_MS,

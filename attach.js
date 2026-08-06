@@ -93,4 +93,46 @@ function matchPending(members, candidates) {
   return out;
 }
 
-module.exports = { matchPending, looksLikeSamePrompt, normalizeForMatch, MIN_PREFIX, CMP_LEN };
+// ── Liens MORT-NÉS : le seul cas où un membre déjà lié redevient candidat ────
+//
+// Incident 2026-08-04 : l'étage 1 lie un membre au premier sessionId apparu ;
+// ce CLI meurt dans les secondes qui suivent (cause interne à l'extension
+// officielle) ; celle-ci en respawne un autre SOUS LE MÊME ONGLET ; le membre,
+// lui, garde le mort pour toujours. Le panneau annonçait alors « fermée avant
+// envoi » — faux au sujet de l'onglet, qui était grand ouvert avec le prompt
+// dedans — et suspendait la vague derrière un bandeau rouge.
+//
+// La sûreté du « lié = définitif » (lot 8) tient à ce qu'un lien protège un
+// travail COMMENCÉ. Un lien mort-né n'en protège aucun : `sent === false` +
+// process mort ⇒ rien n'a jamais tourné sous cet identifiant. Ces membres-là
+// repassent donc par l'étage 2 — dès que l'utilisateur appuie sur Entrée dans
+// l'onglet orphelin, le transcript naît sous le NOUVEL id, le préfixe de prompt
+// matche, et le ticket se répare seul. Tous les autres liens (session vivante,
+// ou morte AVEC transcript = vrai `stale`) restent intouchables.
+//
+// groups  : le tableau de groupes du store (store.all())
+// truthOf : (member) => memberTruth(member, sources) — injecté, ce module reste
+//           du Node pur sans dépendance sur la table de vérité.
+// → même forme que store.pending() : [{ groupId, key, prompt, launchedAt }],
+//   directement concaténable avant matchPending, dont le principe
+//   « ambiguïté = aucun rattachement » s'applique alors tel quel aux deux
+//   populations mélangées.
+function pendingForRelink(groups, truthOf) {
+  const out = [];
+  if (!Array.isArray(groups) || typeof truthOf !== 'function') return out;
+  for (const g of groups) {
+    if (!g || !g.id || !Array.isArray(g.members)) continue;
+    for (const m of g.members) {
+      // Lié, avec un prompt à retrouver et un repère temporel : sans l'un des
+      // trois, l'étage 2 n'a rien sur quoi travailler.
+      if (!m || !m.sessionId || !m.prompt || m.launchedAt == null) continue;
+      let t = null;
+      try { t = truthOf(m); } catch { t = null; }
+      if (!t || t.status !== 'unsent-lost') continue;
+      out.push({ groupId: g.id, key: m.key, prompt: m.prompt, launchedAt: m.launchedAt });
+    }
+  }
+  return out;
+}
+
+module.exports = { matchPending, pendingForRelink, looksLikeSamePrompt, normalizeForMatch, MIN_PREFIX, CMP_LEN };

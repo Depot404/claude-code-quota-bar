@@ -2,7 +2,7 @@
 // TABLE DE VÉRITÉ UNIQUE du statut d'un membre de groupe (lot 10 du plan
 // PLAN_creation_groupes_2026-07-22.md).
 //
-// POURQUOI — quatre bugs de la MÊME classe se sont succédé, chacun corrigé à la
+// POURQUOI — cinq bugs de la MÊME classe se sont succédé, chacun corrigé à la
 // pièce dans son coin de code :
 //   1. « Link… » qui réapparaît sur une tâche finie (lot 8, panel.js) ;
 //   2. « closed before sending » sur des conversations terminées (lot 9,
@@ -10,7 +10,28 @@
 //   3. « ✓ done · closed » affiché sur les membres d'une vague qu'on VIENT
 //      d'ouvrir (rien n'a encore été envoyé) ;
 //   4. les mêmes membres vus `stale` par le moteur de vagues, qui suspend
-//      l'auto et affiche un bandeau rouge, au Create.
+//      l'auto et affiche un bandeau rouge, au Create ;
+//   5. (2026-08-04) « fermée avant envoi » annoncé sur un onglet GRAND OUVERT,
+//      prompt inséré : le premier CLI meurt dans les secondes suivant
+//      l'ouverture, l'extension officielle en respawne un autre SOUS LE MÊME
+//      ONGLET, et le membre reste collé au mort. Même faute, une source de
+//      plus : la vivacité d'un PROCESS ne dit rien d'un ONGLET. D'où
+//      `unsent-lost`, qui n'affirme plus que ce qui est prouvé, et le
+//      re-lien des liens mort-nés (attach.js `pendingForRelink`).
+//   6. (2026-08-05, étape 17) « ouverte » affiché juste après la fermeture
+//      d'un onglet : à la fermeture, `isLive(id)` (registre ~/.claude/sessions)
+//      et l'état des hooks (sessions-state.json) se purgent chacun à son
+//      rythme, de façon asynchrone (SessionEnd tire quand le process a fini
+//      de mourir) — pendant la fenêtre où l'un des deux a déjà purgé et pas
+//      l'autre, `live` restait vrai et `state` retombait sur `idle`, un
+//      libellé qui PRÉSUME un onglet ouvert. Le panneau, lui, sait DÉJÀ que
+//      l'onglet est fermé (l'événement d'onglet l'a fait sortir de la vue) —
+//      c'est ce fait-là, jamais la course hooks/registre, qui doit trancher.
+//      D'où `tabClosed(id)`, une source de plus qui dégrade `live` de force
+//      dès que l'onglet est PROUVÉ fermé : `idle`/`inserted` (qui présument
+//      un onglet) deviennent structurellement inatteignables, et un membre
+//      TERMINÉ tombe direct en `done-closed` (masqué) sans attendre que la
+//      course se résolve d'elle-même.
 // Cause commune : un FAIT DURABLE (lié ? envoyé ? terminé ?) déduit d'une VUE
 // PARTIELLE — la liste affichée par le panneau, qui ne contient que les
 // conversations ayant un transcript ET un onglet, bornée à `maxItems`. Une
@@ -58,10 +79,14 @@ const WAVE_STATUS = {
   done: 'done',
   'done-closed': 'done',
   stale: 'stale',
-  // Onglet fermé sans qu'un seul message soit parti : la tâche ne finira jamais
-  // toute seule. Comme `stale` pour le moteur (l'auto se suspend, ▶ reste), et
-  // le libellé, lui, dit la vérité à l'écran.
-  'unsent-closed': 'stale',
+  // Le process suivi est mort sans qu'un seul message soit parti. Ce qu'on SAIT :
+  // plus rien ne tourne sous cet identifiant, la tâche ne finira pas toute seule.
+  // Ce qu'on ne sait PAS, et qu'on n'affirme donc plus : que l'ONGLET, lui, ait
+  // été fermé (incident 2026-08-04 — le premier CLI meurt dans les secondes qui
+  // suivent l'ouverture, l'extension officielle en respawne un autre sous le même
+  // onglet, et le membre garde le mort). Comme `stale` pour le moteur (l'auto se
+  // suspend, ▶ reste) ; le libellé, lui, dit exactement ce qui est prouvé.
+  'unsent-lost': 'stale',
 };
 
 // Note courte affichée dans le pied du membre — SEULEMENT quand la
@@ -78,7 +103,7 @@ const NOTES = {
   done: '✓ done',
   'done-closed': '✓ done · closed',
   stale: 'interrupted — never finished',
-  'unsent-closed': 'closed before sending',
+  'unsent-lost': 'link lost before sending',
 };
 
 // Infobulle de la ligne « en attente » (le prompt, quand aucune conversation
@@ -95,7 +120,7 @@ const HINTS = {
   done: 'Finished.',
   'done-closed': 'Finished — its tab has been closed.',
   stale: 'Its process is gone and it never reached the end of a turn.',
-  'unsent-closed': 'The tab was closed before anything was sent.',
+  'unsent-lost': 'Its background process died before anything was sent. If the tab is still open, press Enter — it will link itself back. Otherwise use “Relaunch”.',
 };
 
 // États que state.js/les hooks peuvent produire et qu'on relaie tels quels.
@@ -115,6 +140,10 @@ function memberTruth(member, sources) {
   const hasTranscript = fnOr(s.hasTranscript, NEVER);
   const hookState = fnOr(s.hookState, NOTHING);
   const getConv = fnOr(s.getConv, NOTHING);
+  // Onglet PROUVÉ fermé (bug n°6 ci-dessus) : source optionnelle, absente par
+  // défaut (dégradation silencieuse, comme les trois autres) — sans elle,
+  // comportement identique à avant l'étape 17.
+  const tabClosed = fnOr(s.tabClosed, NEVER);
 
   const convId = m.sessionId || m.convId || null;
 
@@ -127,7 +156,12 @@ function memberTruth(member, sources) {
   }
 
   const conv = getConv(convId) || null;
-  const live = !!isLive(convId);
+  // `live` dégradé de force dès que l'onglet est PROUVÉ fermé : `isLive` et
+  // `hookState` peuvent chacun retarder leur purge de quelques secondes après
+  // la fermeture (course asynchrone, cf. bug n°6) — le panneau, lui, sait déjà
+  // que l'onglet est parti, et rien de ce qui suppose un onglet ouvert
+  // (`inserted`, `idle`) ne doit plus pouvoir en sortir.
+  const live = !!isLive(convId) && !tabClosed(convId);
   // « A envoyé » : le transcript existe. Sa PRÉSENCE DANS LA VUE en est une
   // preuve suffisante (state.js ne liste que des conversations qui en ont un),
   // mais jamais une condition — c'est tout le correctif du lot 9.
@@ -145,7 +179,11 @@ function memberTruth(member, sources) {
   } else if (live) {
     status = state || 'idle';
   } else if (!sent) {
-    status = 'unsent-closed';
+    // Le process lié est mort sans avoir jamais envoyé. On ne prétend RIEN sur
+    // l'onglet (cf. WAVE_STATUS) : le lien est perdu, un point c'est tout — et
+    // parce que rien n'a jamais commencé sous cet identifiant, il n'y a rien à
+    // protéger : le membre redevient rattachable (canLink/canRelaunch).
+    status = 'unsent-lost';
   } else {
     // Session morte avec transcript. `state === null` = les hooks ne savent
     // plus rien (entrée purgée après 24 h, ou hooks jamais installés) : on
@@ -193,7 +231,14 @@ function build(status, ctx) {
     sent: ctx.sent,
     // Un membre lié l'est DÉFINITIVEMENT (lot 8) : proposer « Link… » sur un
     // membre qui a déjà un sessionId invite à rebrancher une tâche finie.
-    canLink: status === 'not-linked',
+    // UNE exception, et une seule : le lien MORT-NÉ (`unsent-lost`) — process
+    // mort ET rien jamais envoyé sous cet id, donc rien qui ait commencé, donc
+    // rien à protéger. L'interdit reste entier partout ailleurs (session
+    // vivante, ou morte AVEC transcript = vrai `stale`).
+    canLink: status === 'not-linked' || status === 'unsent-lost',
+    // Rouvrir une conversation pour cette tâche (prompt/modèle/effort du
+    // membre) : le remède quand l'onglet, lui, est vraiment parti.
+    canRelaunch: status === 'unsent-lost',
     // Fermer l'onglet : seulement une conversation terminée dont un onglet est
     // encore ouvert — donc forcément visible dans la vue (c'est la seule chose
     // que la vue a le droit de décider ici).

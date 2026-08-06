@@ -29,7 +29,7 @@ const conv = (o) => ({
   mtime: Date.now(),
   ...o,
 });
-const gone = (c, t, closed = new Map()) => state.isGone(c, t, closed);
+const gone = (c, t, closed = new Map(), live = new Set()) => state.isGone(c, t, closed, live);
 
 console.log('\n1. Règle de présence (isGone)');
 check('aucune info sur les onglets (known:false) → jamais masquée',
@@ -80,6 +80,52 @@ closed = new Map([['s1', Date.now() - 60000]]);
 check('rouverte (onglet de retour) → affichée malgré la marque',
   gone(conv({ state: 'idle', mtime: 0 }), tabs('Implémenter lot 5 onglet…'), closed) === false);
 
+// ── Identités stables : session vivante + titre d'onglet réel ──────────────
+console.log('\n3bis. Session CLI vivante (~/.claude/sessions) → jamais masquée');
+const live = new Set(['s1']);
+check('ai-title sans onglet matchant MAIS session vivante → affichée',
+  gone(conv({ state: 'idle' }), noTabs, new Map(), live) === false);
+check('… même conv, session morte → MASQUÉE (comportement d\'avant le lot)',
+  gone(conv({ state: 'idle' }), noTabs, new Map(), new Set()) === true);
+check('stale + session vivante → affichée',
+  gone(conv({ state: 'stale' }), noTabs, new Map(), live) === false);
+closed = new Map([['s1', Date.now()]]);
+check('fermeture observée pendant la grâce → MASQUÉE malgré la session vivante',
+  gone(conv({ state: 'busy' }), noTabs, closed, live) === true);
+
+console.log('\n3ter. Titre d\'onglet divergent (state.vscdb)');
+const divergent = {
+  sessionId: 's1',
+  title: 'Upload Error TF400898: An Internal Error…',   // titre affiché (store)
+  tabTitle: 'Upload Error TF400898: An Internal Error…',
+  titleSource: 'tab-store',
+  state: 'idle',
+  mtime: Date.now(),
+};
+check('onglet renommé → la conv est reconnue par son titre de store',
+  gone(divergent, tabs('Upload Error TF400898: A…')) === false);
+check('titre de store matchable : sans onglet nulle part → MASQUÉE',
+  gone(divergent, noTabs) === true);
+check('l\'ancien titre transcript matche encore un onglet → affichée',
+  gone({ ...divergent, title: 'Afficher ? au lieu du loading' },
+    tabs('Afficher ? au lieu du l…')) === false);
+
+console.log('\n3quater. pickTitle : on affiche le nom de l\'ONGLET');
+const pick = state.pickTitle;
+check('store + transcript qui ne matche aucun onglet → titre du store',
+  pick('Vieux titre transcript', 'ai-title', 'Titre onglet réel', tabs('Titre onglet réel'))
+    .title === 'Titre onglet réel');
+check('… et sa source devient tab-store (donc masquable)',
+  pick('Vieux titre', 'ai-title', 'Titre onglet réel', tabs('Titre onglet réel'))
+    .titleSource === 'tab-store');
+check('transcript qui matche un onglet ouvert → titre transcript conservé',
+  pick('Conv ouverte à garder', 'ai-title', 'Entrée de store périmée',
+    tabs('Conv ouverte à garder')).title === 'Conv ouverte à garder');
+check('pas d\'entrée de store → titre transcript intact',
+  pick('Conv sans store', 'ai-title', null, noTabs).title === 'Conv sans store');
+check('libellé de store terminé par un caractère de remplacement → nettoyé à l\'affichage',
+  pick('Vieux titre', 'ai-title', 'Titre tronqué�', noTabs).title === 'Titre tronqué');
+
 // ── Snapshot complet sur de vrais fichiers ────────────────────────────────
 console.log('\n4. buildSnapshot de bout en bout (transcripts réels fabriqués)');
 
@@ -99,22 +145,28 @@ const userMsg = (t) => ({ type: 'user', message: { content: [{ type: 'text', tex
 // b : titre ai-title, onglet ouvert           → doit rester
 // c : titre de repli (pas d'ai-title), fermé  → doit rester (non matchable)
 // d : ai-title, busy sans onglet (CLI)        → doit rester
+// e : ai-title, busy, préfixe ambigu (lot « bascule au focus »)
 writeTranscript('a', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Conv fermée à masquer' }]);
 writeTranscript('b', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Conv ouverte à garder' }]);
 writeTranscript('c', [userMsg('Titre de repli sans ai-title'), assistant]);
 writeTranscript('d', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Conv CLI au travail' }]);
+writeTranscript('e', [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Refactor auth middlewarate et clic-focus multi-fenêtres' }]);
 
 fs.writeFileSync(path.join(SANDBOX, '.claude', 'sessions-state.json'), JSON.stringify({
   version: 1,
   sessions: {
     d: { state: 'busy', since: Date.now(), updated_at: Date.now(), transcript: path.join(projectDir, 'd.jsonl') },
+    e: { state: 'busy', since: Date.now(), updated_at: Date.now(), transcript: path.join(projectDir, 'e.jsonl') },
   },
 }));
 
-function snapshot(tabProvider) {
+function snapshot(tabProvider, extra = {}) {
   const reader = state.createTranscriptReader();
   return state.buildSnapshot({
     workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12, tabs: tabProvider,
+    // Injection : aucun accès au vrai ~/.claude/sessions ni au vrai state.vscdb.
+    liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    ...extra,
   }, reader);
 }
 
@@ -126,11 +178,73 @@ check('la conv busy sans onglet (CLI) reste', titles.includes('Conv CLI au trava
 
 titles = snapshot(undefined).conversations.map((c) => c.title);
 check('sans fournisseur d\'onglets, aucune conv n\'est masquée (compat lot 4)',
-  titles.length === 4, titles.join(' | '));
+  titles.length === 5, titles.join(' | '));
 
 titles = snapshot(() => tabs('Conv fermée à masq…')).conversations.map((c) => c.title);
 check('libellé tronqué réel de VS Code → la conv est reconnue et gardée',
   titles.includes('Conv fermée à masquer'), titles.join(' | '));
+
+// ── Snapshot : identités stables de bout en bout ───────────────────────────
+console.log('\n4bis. Snapshot : session vivante et titre d\'onglet réel');
+{
+  // 'a' = la conv de l'incident : ai-title que plus aucun onglet ne porte.
+  const openTab = () => tabs('Titre réel de l\'onglet…');
+  const titles = () => new Map([['a', 'Titre réel de l\'onglet renommé']]);
+
+  let snap = snapshot(openTab, { sessionTitles: titles });
+  let a = snap.conversations.find((c) => c.sessionId === 'a');
+  check('conv à onglet renommé : réaffichée', !!a,
+    snap.conversations.map((c) => c.title).join(' | '));
+  check('… sous le titre de l\'ONGLET', a && a.title === 'Titre réel de l\'onglet renommé',
+    a && a.title);
+  check('… et le libellé brut du store voyage dans le snapshot (clic-focus)',
+    a && a.tabTitle === 'Titre réel de l\'onglet renommé', a && String(a.tabTitle));
+
+  // Même conv, aucun onglet nulle part et pas de session vivante : elle reste
+  // masquée — le titre de store est matchable, donc son absence prouve quelque
+  // chose (pas de régression du lot 5).
+  snap = snapshot(() => noTabs, { sessionTitles: titles });
+  check('titre de store sans onglet et sans session vivante → masquée',
+    !snap.conversations.some((c) => c.sessionId === 'a'),
+    snap.conversations.map((c) => c.title).join(' | '));
+
+  // La même, avec son process CLI vivant : jamais masquée.
+  snap = snapshot(() => noTabs, { sessionTitles: titles, liveSessions: () => new Set(['a']) });
+  check('session vivante sans onglet matchant → affichée quand même',
+    snap.conversations.some((c) => c.sessionId === 'a'),
+    snap.conversations.map((c) => c.title).join(' | '));
+
+  // Tri tabOrder + surlignage doivent la retrouver par son titre de store.
+  snap = snapshot(() => ({ known: true, labels: ['Conv ouverte à garder', 'Titre réel de l\'onglet…'], activeLabel: 'Titre réel de l\'onglet…' }),
+    { sessionTitles: titles, sortOrder: 'tabOrder' });
+  const ids = snap.conversations.map((c) => c.sessionId);
+  check('tri tabOrder : la conv renommée se range à la position de son onglet',
+    ids.indexOf('a') === 1, ids.join(','));
+  check('surlignage : l\'onglet actif renommé désigne bien cette conv',
+    snap.conversations.find((c) => c.isActive || false) &&
+    snap.conversations.find((c) => c.isActive).sessionId === 'a',
+    JSON.stringify(snap.conversations.map((c) => [c.sessionId, c.isActive])));
+}
+
+console.log('\n4ter. Transcript plus vieux que recentMs mais session vivante');
+{
+  const old = 'C:\\Users\\Test\\Projets VSCODE\\Old';
+  const dir = state.projectDirFor(old);
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, 'zz.jsonl');
+  fs.writeFileSync(f, [userMsg('p'), assistant, { type: 'ai-title', aiTitle: 'Conv ouverte ce matin' }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const when = (Date.now() - 8 * 3600 * 1000) / 1000;          // 8 h → hors recentMs
+  fs.utimesSync(f, when, when);
+  const build = (liveIds) => state.buildSnapshot({
+    workspacePath: old, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => unknown, liveSessions: () => new Set(liveIds), sessionTitles: () => new Map(),
+  }, state.createTranscriptReader());
+  check('transcript inactif depuis 8 h, session morte → hors candidats (inchangé)',
+    build([]).conversations.length === 0);
+  check('même transcript, session CLI vivante → candidate quand même',
+    build(['zz']).conversations.some((c) => c.title === 'Conv ouverte ce matin'));
+}
 
 // ── Les convs masquées ne doivent pas manger les places de la liste ────────
 console.log('\n5. Une conv ouverte reste listée même derrière maxItems convs fermées');
@@ -186,7 +300,75 @@ check('après markClosed : partie, sans dépendre de sessions-state.json',
   !after.includes('Conv CLI au travail'), after.join(' | '));
 check('les autres conversations ne bougent pas',
   after.includes('Titre de repli sans ai-title'), after.join(' | '));
+// Étape 17 (member-truth.js bug n°6) : `isTabClosed` expose le même fait que
+// `markClosed` vient de poser — c'est la source que memberSources() branche
+// pour ne plus jamais présumer un onglet ouvert pendant la course
+// hooks/registre.
+check('isTabClosed(id) → vrai juste après markClosed', engine2.isTabClosed(id) === true);
+check('isTabClosed d\'un id jamais fermé → faux', engine2.isTabClosed('jamais-vu') === false);
 engine2.dispose();
+
+// ── Lot 2 (2026-07-24) : le chip vert ne doit plus basculer au focus ──────
+console.log('\n7. resolveTabOpen : tolère un manque isolé, pas deux consécutifs');
+{
+  const resolve = state.resolveTabOpen;
+  const misses = new Map();
+  check('ouvert → true, compteur remis à zéro',
+    resolve('s1', true, misses) === true && !misses.has('s1'));
+  check('un SEUL manque (le focus bascule ailleurs le temps d\'un recompute) → reste true',
+    resolve('s1', false, misses) === true);
+  check('un deuxième manque CONSÉCUTIF → bascule enfin à false',
+    resolve('s1', false, misses) === false);
+  check('un match qui revient repart de zéro',
+    resolve('s1', true, misses) === true && !misses.has('s1'));
+  check('… donc un manque isolé APRÈS un retour reste toléré',
+    resolve('s1', false, misses) === true);
+  check('sessions indépendantes : le compteur de l\'une n\'affecte pas l\'autre',
+    resolve('s2', false, new Map()) === true);
+}
+
+console.log('\n8. buildSnapshot : un recompute isolé sans match ne fait pas tomber le chip');
+{
+  // 'e' : préfixe partagé avec d'autres membres d'un même groupe (« Implémenter
+  // lot N… ») — le cas décrit par le lot. Reste affichée (busy) qu'un onglet
+  // matche ou non ; seul tabOpen doit rester stable d'un recompute à l'autre.
+  const misses = new Map();
+  const eTab = () => tabs('Implémenter lot 4 b…');   // libellé tronqué VS Code
+  const findE = (snap) => snap.conversations.find((c) => c.sessionId === 'e');
+
+  let snap = snapshot(eTab, { tabOpenMisses: misses });
+  check('onglet ouvert et matché → tabOpen true', findE(snap).tabOpen === true);
+
+  // Un seul recompute où le matching rate (ambiguïté de préfixe résolue autrement
+  // ce coup-ci, ou tout autre bruit ponctuel) — l'onglet, lui, n'a pas bougé.
+  snap = snapshot(() => noTabs, { tabOpenMisses: misses });
+  check('UN recompute sans match (bruit isolé) → le chip reste affiché',
+    findE(snap).tabOpen === true);
+
+  // L'onglet revient dès le recompute suivant : le compteur de manques doit
+  // être remis à zéro, pas seulement suspendu.
+  snap = snapshot(eTab, { tabOpenMisses: misses });
+  check('… et redevient vrai dès que le match revient', findE(snap).tabOpen === true);
+
+  // Deux ratés CONSÉCUTIFS (l'onglet a vraiment disparu, ou tabs.known devient
+  // durablement incohérent) : là, la vue doit finir par suivre.
+  snapshot(() => noTabs, { tabOpenMisses: misses });
+  snap = snapshot(() => noTabs, { tabOpenMisses: misses });
+  check('deux manques consécutifs → le chip finit par disparaître',
+    findE(snap).tabOpen === false);
+}
+
+console.log('\n9. renderKey : tabOpen fait partie de la clé de rendu');
+{
+  // Deux conversations identiques en tout point SAUF tabOpen : sans lot 2, un
+  // recompute qui corrige tabOpen tout seul (cf. §8) ne repousserait rien au
+  // panneau tant qu'aucun autre champ n'a changé — la correction resterait
+  // invisible jusqu'à un événement sans rapport.
+  const base = { sessionId: 's1', title: 'T', state: 'idle', acked: true, model: null, effort: null, ctx: null, isActive: false, message: null };
+  const keyOpen = state.renderKey([{ ...base, tabOpen: true }]);
+  const keyClosed = state.renderKey([{ ...base, tabOpen: false }]);
+  check('tabOpen seul change → la clé de rendu change aussi', keyOpen !== keyClosed);
+}
 
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
 console.log(`\n${pass} ok, ${fail} fail`);

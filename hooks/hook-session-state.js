@@ -13,7 +13,36 @@
 // panneau affiche « ? » et joue le son). Aucune forme d'attente ne doit
 // dépendre du seul événement `Notification` — cf. ci-dessous.
 
-const { updateSession, removeSession, readHookInput } = require('./sessions-state.js');
+const { updateSession, removeSession, readHookInput, readState } = require('./sessions-state.js');
+
+// « Terminée et jamais relue » est un FAIT DURABLE, pas un état de process
+// (2026-08-06, 8e signalement du ✓ vif qui n'apparaît jamais).
+//
+// CE QUI SE PASSAIT : SessionEnd effaçait l'entrée ENTIÈRE — donc `state: done`
+// ET `ack_ts`, seule trace de « tu n'es jamais revenu voir le résultat ». Or ce
+// hook tire précisément quand le CLI meurt, ce qui arrive en masse au
+// RECHARGEMENT d'une fenêtre VS Code : tous les CLI sont tués, toutes les
+// entrées purgées, et le panneau — qui retombe alors sur `idle`, c'est-à-dire
+// « les hooks ne savent rien » — repeint en ✓ ATTÉNUÉ des conversations
+// terminées que personne n'a lues. Le fait survivait à l'écran (la conv est
+// toujours là, son transcript aussi) mais sa vérité, elle, était détruite.
+//
+// Même classe d'erreur que celle documentée en tête de member-truth.js : un
+// fait durable déduit d'une source volatile. La correction est symétrique de
+// celle-là — on ne détruit plus la trace tant qu'elle a quelque chose à dire.
+// Le fichier reste borné : `prune` (24 h sans activité) et la fermeture de
+// l'onglet (extension.js closeConversations → removeSession) continuent de
+// nettoyer, eux, sur des faits qui, eux, terminent vraiment la conversation.
+//
+// `reason: 'clear'` fait exception : /clear efface la conversation elle-même,
+// il n'y a plus rien à revenir lire.
+function isUnreadDone(sessionId) {
+  try {
+    const e = (readState().sessions || {})[sessionId];
+    if (!e || e.state !== 'done') return false;
+    return (e.ack_ts || 0) < (e.since || e.updated_at || 0);
+  } catch { return false; }
+}
 
 // ── Notification : liste NOIRE, pas liste blanche ───────────────────────────
 // Ces types ne rendent PAS la main :
@@ -131,6 +160,12 @@ function handle(data) {
       // disparaît donc plus grâce à lui mais parce que son onglet n'existe plus
       // (tabs.js + filtre de présence de state.js). On le garde : quand il tire,
       // il nettoie l'entrée gratuitement — mais rien ne doit plus en dépendre.
+      //
+      // SAUF si l'entrée porte encore un fait que rien d'autre ne détient :
+      // terminée, jamais relue (cf. isUnreadDone ci-dessus). Nettoyer « gratuit »
+      // ne l'est plus quand ça efface la seule preuve qu'il reste quelque chose
+      // à lire — le ✓ vif redeviendrait pâle à chaque rechargement de fenêtre.
+      if (data.reason !== 'clear' && isUnreadDone(sessionId)) break;
       removeSession(sessionId);
       break;
   }

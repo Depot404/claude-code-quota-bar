@@ -275,6 +275,26 @@ function createGroupStore(deps = {}) {
       return true;
     },
 
+    // Réarmer un membre dont le lien est MORT-NÉ (chip « Relancer », plan
+    // lien-mort-né 2026-08-04) : le ticket redevient « en attente », les trois
+    // étages du rattachement rejouent normalement sur la conversation qu'on
+    // s'apprête à rouvrir. Le nouveau `launchedAt` est indispensable : c'est le
+    // repère temporel qui empêche l'étage 2 d'accrocher un vieux transcript.
+    // Garde : un membre `queued` (jamais lancé) n'a rien à réarmer — c'est déjà
+    // son état. La décision « ce membre est-il vraiment mort-né ? » n'est PAS
+    // ici : elle appartient à la table de vérité (member-truth.js), que
+    // l'appelant interroge à l'instant.
+    rearm(id, key, at) {
+      const g = find(id);
+      if (!g) return false;
+      const m = g.members.find((x) => x.key === key);
+      if (!m || m.launchedAt == null) return false;
+      m.sessionId = null;
+      m.launchedAt = Number.isFinite(at) ? at : now();
+      persist();
+      return true;
+    },
+
     // Déplacer un membre PAS ENCORE LANCÉ vers la vague voisine (édition en
     // cours de route, décision 5 du plan : « une tâche lancée ne bouge plus »).
     // `delta` = +1/-1 ; refuse de descendre sous la vague déjà lancée + 1 (on ne

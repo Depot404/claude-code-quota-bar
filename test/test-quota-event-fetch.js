@@ -65,7 +65,9 @@ const vscodeStub = {
       onDidChangeTabGroups: () => ({ dispose() {} }),
     },
     registerWebviewViewProvider: (_type, p) => { provider = p; return { dispose() {} }; },
+    createStatusBarItem: () => ({ show() {}, dispose() {} }),
   },
+  StatusBarAlignment: { Left: 1, Right: 2 },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: 'C:\\Users\\Test\\Projets VSCODE\\Demo9' } }],
     getConfiguration: () => ({ get: (_k, d) => d }),
@@ -77,6 +79,7 @@ const vscodeStub = {
   },
   env: { openExternal: async () => {} },
   Uri: { parse: (s) => s },
+  l10n: { t: (message, ...args) => (args.length ? message.replace(/\{(\d+)\}/g, (_, i) => (args[i] !== undefined ? args[i] : '')) : message) },
 };
 
 const origLoad = Module._load;

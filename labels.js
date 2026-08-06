@@ -31,6 +31,22 @@ function labelMatches(label, title) {
   return !!truncated && t.startsWith(truncated[1]);
 }
 
+// Une conversation porte DEUX titres depuis le lot « présence par identité »
+// (2026-07-22) : celui du transcript (`ai-title`) et celui de l'onglet réel
+// (state.vscdb, cf. session-titles.js), qui peuvent diverger. Tout endroit où un
+// libellé d'onglet rencontre une conversation doit essayer les deux — sinon on
+// retombe exactement sur le bug d'origine (conv ouverte, aucun titre ne matche,
+// conv masquée / clic sans effet). D'où cette fonction, et pas un `||` recopié
+// dans state.js, focus.js et extension.js.
+//
+// conv : { title, tabTitle } — `tabTitle` est le libellé BRUT du store (le
+// nettoyage d'affichage se fait ailleurs, cf. cleanLabel).
+function convMatchesLabel(label, conv) {
+  if (!conv) return false;
+  if (labelMatches(label, conv.title)) return true;
+  return !!conv.tabTitle && labelMatches(label, conv.tabTitle);
+}
+
 // Onglet de conversation Claude (webview de l'extension officielle), par
 // opposition à un fichier, un diff, un terminal…
 function isClaudeTab(tab) {
@@ -51,4 +67,4 @@ function claudeTabLabels(groups) {
   return out;
 }
 
-module.exports = { norm, labelMatches, isClaudeTab, claudeTabLabels };
+module.exports = { norm, labelMatches, convMatchesLabel, isClaudeTab, claudeTabLabels };

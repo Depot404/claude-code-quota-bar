@@ -40,7 +40,9 @@ const vscodeStub = {
       onDidChangeTabGroups: () => ({ dispose() {} }),
     },
     registerWebviewViewProvider: (_type, p) => { provider = p; return { dispose() {} }; },
+    createStatusBarItem: () => ({ show() {}, dispose() {} }),
   },
+  StatusBarAlignment: { Left: 1, Right: 2 },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: 'C:\\Users\\Test\\Projets VSCODE\\Demo' } }],
     getConfiguration: () => ({ get: (_k, d) => d }),
@@ -52,6 +54,7 @@ const vscodeStub = {
   },
   env: { openExternal: async () => {} },
   Uri: { parse: (s) => s },
+  l10n: { t: (message, ...args) => (args.length ? message.replace(/\{(\d+)\}/g, (_, i) => (args[i] !== undefined ? args[i] : '')) : message) },
 };
 const netStub = { get: () => { throw new Error('network disabled in test'); } };
 const procStub = {
@@ -90,6 +93,17 @@ function writeTranscript(id, title) {
 }
 writeTranscript('close-me', 'Conversation à fermer maintenant');
 writeTranscript('keep-me', 'Conversation qui doit rester');
+// Titres VOISINS (plan bug chip fermeture 2026-07-24) : VS Code tronque un
+// libellé d'onglet sur la LARGEUR (police proportionnelle), pas un nombre de
+// caractères fixe — deux titres qui partagent un long préfixe peuvent donc
+// produire des libellés tronqués de longueurs différentes. Ici, fermer
+// amb-a livre un libellé dont le préfixe (une fois l'ellipse ôtée) matche
+// AUSSI le titre complet, non tronqué, d'amb-b — alors qu'amb-b garde son
+// PROPRE onglet ouvert, avec un libellé différent (donc jamais « gone » côté
+// tabs.js). C'est exactement le bug : fermer amb-a devait faire disparaître
+// AMB-A, pas retirer le chip d'amb-b.
+writeTranscript('amb-a', "Implémente le lot unique du bug de fermeture d'onglet manuel");
+writeTranscript('amb-b', "Implémente le lot unique de l'ajout de tâche au groupe existant");
 
 const STATE_FILE = path.join(SANDBOX, '.claude', 'sessions-state.json');
 const now = Date.now();
@@ -99,6 +113,8 @@ fs.writeFileSync(STATE_FILE, JSON.stringify({
     // busy : la règle user veut qu'une conv fermée EN PLEIN TRAVAIL disparaisse.
     'close-me': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'close-me.jsonl') },
     'keep-me': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'keep-me.jsonl') },
+    'amb-a': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'amb-a.jsonl') },
+    'amb-b': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'amb-b.jsonl') },
   },
 }));
 
@@ -157,6 +173,37 @@ async function run() {
   check('l\'entrée de la conv fermée est purgée', !sessions['close-me'], JSON.stringify(Object.keys(sessions)));
   check('l\'entrée de l\'autre conv est intacte',
     sessions['keep-me'] && sessions['keep-me'].state === 'busy', JSON.stringify(sessions['keep-me']));
+
+  console.log('\n3bis. Libellé ambigu (titres voisins) : fermer amb-a ne doit JAMAIS retirer amb-b');
+  // amb-a et amb-b sont ouvertes ; leurs vrais titres partagent un long préfixe
+  // commun. Le libellé (tronqué) qui va être signalé « fermé » n'est ni celui
+  // d'amb-a ni celui d'amb-b tel quel, mais un préfixe des deux : c'est ce
+  // libellé, une fois passé à convMatchesLabel, qui matchait AUSSI amb-b
+  // avant le fix.
+  GROUPS = [group([
+    claude('Conversation qui doit …'),
+    claude("Implémente le lot uniq…"),
+    claude("Implémente le lot unique de l'ajout de t…"),
+  ])];
+  await sleep(50);
+  const beforeAmb = titlesOf();
+  check('amb-a et amb-b affichées avant fermeture',
+    beforeAmb.some((t) => t.startsWith("Implémente le lot unique du bug"))
+    && beforeAmb.some((t) => t.startsWith("Implémente le lot unique de l'ajout")),
+    beforeAmb.join(' | '));
+
+  GROUPS = [group([
+    claude('Conversation qui doit …'),
+    claude("Implémente le lot unique de l'ajout de t…"),
+  ])];
+  emitTabs({ closed: [claude("Implémente le lot uniq…")], opened: [], changed: [] });
+  await sleep(300);
+  const afterAmb = titlesOf();
+  check('amb-b (onglet toujours ouvert, titre voisin) n\'est JAMAIS retirée par la fermeture d\'amb-a',
+    afterAmb.some((t) => t.startsWith("Implémente le lot unique de l'ajout")), afterAmb.join(' | '));
+  const sessionsAmb = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).sessions;
+  check('l\'entrée sessions-state.json d\'amb-b n\'est pas purgée',
+    sessionsAmb['amb-b'] && sessionsAmb['amb-b'].state === 'busy', JSON.stringify(sessionsAmb['amb-b']));
 
   console.log('\n4. Aucun résidu');
   for (const s of context.subscriptions) { try { s.dispose(); } catch {} }
