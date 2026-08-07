@@ -47,7 +47,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
-const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool, wasInterrupted, firstUserText } = require('./hooks/transcript.js');
+const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool, wasInterrupted, lastActivityTs, firstUserText } = require('./hooks/transcript.js');
 const { labelMatches, convMatchesLabel } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 const { liveSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
@@ -129,8 +129,15 @@ function busyOrStale(mtime, now, isLive) {
 // La condition de fraîcheur n'est pas cosmétique — sans elle, une entrée d'état
 // ancienne dont la dernière écriture est postérieure de 3 s au hook serait lue
 // comme « en train de travailler » pour l'éternité.
-function isResuming(since, mtime, now) {
-  return mtime > since + RESUME_GRACE_MS && now - mtime <= STALE_MS;
+// `activity` = timestamp du dernier MESSAGE conversationnel (lastActivityTs),
+// jamais le mtime brut quand il est disponible : au reload de la fenêtre, le
+// CLI respawné par l'extension officielle appende des lignes de comptabilité
+// (`last-prompt`…) qui bougent le mtime sans aucun travail — chaque conv `done`
+// non lue affichait alors un spinner pendant STALE_MS (incident 2026-08-07,
+// prouvé sur transcript-témoin : dernier assistant à 03:23:07 = le Stop,
+// mtime à 03:24:33 = la naissance du CLI respawné).
+function isResuming(since, activity, now) {
+  return activity > since + RESUME_GRACE_MS && now - activity <= STALE_MS;
 }
 
 // État affiché = état posé par les hooks, corrigé par l'activité réelle du
@@ -151,16 +158,24 @@ function isResuming(since, mtime, now) {
 //    cf. busyOrStale. `isLive` est injecté par buildSnapshot depuis le registre
 //    des sessions vivantes (live-sessions.js) ; absent (appel unitaire) = faux,
 //    donc le comportement d'avant.
-function effectiveState(entry, mtime, now, isLive) {
+// `activityTs` (optionnel) : timestamp du dernier message conversationnel du
+// transcript (tail-reader → lastActivityTs), qui remplace le mtime dans les
+// détections de REPRISE (waiting/done) — un write de comptabilité du CLI
+// respawné ne relance plus un spinner (cf. isResuming). Absent (appel unitaire,
+// transcript illisible, message non daté) → repli mtime = comportement d'avant.
+// busy→stale reste sur le mtime : là, N'IMPORTE QUELLE écriture est un signe de
+// vie, et le doute doit profiter à `busy`.
+function effectiveState(entry, mtime, now, isLive, activityTs) {
   if (!entry || !entry.state) return 'idle';
   const since = entry.since || entry.updated_at || 0;
+  const activity = activityTs || mtime;
   switch (entry.state) {
     case 'waiting':
-      return mtime > since + RESUME_GRACE_MS ? busyOrStale(mtime, now, isLive) : 'waiting';
+      return activity > since + RESUME_GRACE_MS ? busyOrStale(mtime, now, isLive) : 'waiting';
     case 'busy':
       return busyOrStale(mtime, now, isLive);
     case 'done':
-      return isResuming(since, mtime, now) ? 'busy' : 'done';
+      return isResuming(since, activity, now) ? 'busy' : 'done';
     default:
       return 'idle';
   }
@@ -318,10 +333,12 @@ function createTranscriptReader() {
     const hit = cache.get(filePath);
     if (hit && hit.key === key) return hit.value;
 
-    let value = { title: null, titleSource: null, modelId: null, model: null, effort: null, ctx: null, mtime: stat.mtimeMs, pendingInteractive: false, interrupted: false };
+    let value = { title: null, titleSource: null, modelId: null, model: null, effort: null, ctx: null, mtime: stat.mtimeMs, activityTs: stat.mtimeMs, pendingInteractive: false, interrupted: false };
     try {
       value.pendingInteractive = hasPendingInteractiveTool(filePath);
       value.interrupted = wasInterrupted(filePath);
+      // Reprise ≠ comptabilité (2026-08-07) : cf. effectiveState/isResuming.
+      value.activityTs = lastActivityTs(filePath) || stat.mtimeMs;
       const last = extractLastAssistant(filePath);
       if (last) {
         value.modelId = last.modelId;
@@ -497,7 +514,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     const t = c.transcript ? readTranscript(c.transcript) : null;
     // `live.has` : process CLI vivant ⇒ un `busy` muet reste `busy` (travail en
     // cours), jamais `stale` par simple vieillissement du mtime.
-    let state = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId));
+    let state = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId), t && t.activityTs);
     // Interruption manuelle (bouton Stop / Échap) : aucun hook ne tire (by
     // design, anthropics/claude-code#45289), donc l'entrée reste `busy` — le
     // transcript est seul à savoir (wasInterrupted). Prioritaire sur le détour

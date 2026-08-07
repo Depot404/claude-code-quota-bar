@@ -332,8 +332,30 @@ function wasInterrupted(filePath) {
   return false;
 }
 
+// Écriture de reprise ≠ travail (incident 2026-08-07) : au reload de la
+// fenêtre, l'extension officielle respawne le CLI de chaque onglet restauré,
+// et ce respawn APPEND des lignes de comptabilité au transcript (constaté :
+// `last-prompt` SANS timestamp, 86 s après le Stop) — le mtime bouge sans le
+// moindre travail. Même discrimination que wasInterrupted ci-dessus : seul un
+// vrai message user/assistant témoigne d'une activité. Rend le timestamp (ms
+// epoch) du DERNIER message conversationnel non-meta, ou null s'il n'est pas
+// datable (absent de la fenêtre de queue, ou sans champ timestamp) — le caller
+// retombe alors sur le mtime, c.-à-d. le comportement d'avant.
+function lastActivityTs(filePath) {
+  let entries;
+  try { entries = parseSlice(readSlice(filePath, TAIL_BYTES, 'tail')); } catch { return null; }
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.type !== 'user' && e.type !== 'assistant') continue;
+    if (e.type === 'user' && e.isMeta) continue;
+    const t = Date.parse(e.timestamp || '');
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
+}
+
 module.exports = {
   readSlice, parseSlice, usageTokens, extractLastAssistant, extractTitleInfo,
   scanAiTitleIncremental, cleanTitle, firstUserText, TITLE_MAX,
-  hasPendingInteractiveTool, wasInterrupted, INTERACTIVE_TOOLS,
+  hasPendingInteractiveTool, wasInterrupted, lastActivityTs, INTERACTIVE_TOOLS,
 };

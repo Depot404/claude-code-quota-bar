@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.27.15] - 2026-08-07
+
+### Fixed
+- **Reloading the VS Code window no longer turns every finished conversation into a spinner.** On reload, the official extension respawns a CLI for each restored tab, and that respawn appends bookkeeping lines to the transcript (observed: a `last-prompt` record, no timestamp, 86 s after the turn's Stop). The "did work resume after the Stop?" check keyed on the file's modification time, so each unread finished conversation flipped back to a busy spinner for up to 5 minutes — on every reload. (Surfaced by 2.27.12: before it, those entries were purged at reload, which also wiped the unread ✓ this was fixing.) Resume detection now keys on the timestamp of the last real user/assistant message — the same discrimination the interrupt detector already used against these bookkeeping lines — with the file time kept only as a fallback when no dated message is readable. Liveness (busy → stale) still trusts the file time: there, any write is a sign of life.
+
 ## [2.27.14] - 2026-08-07
 
 ### Fixed
