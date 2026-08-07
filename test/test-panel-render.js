@@ -430,18 +430,18 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
     check('la section de groupe est rendue',
-      await cdp.evaluate(`document.querySelectorAll('#groups .grp').length`) === 1);
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 1);
     check('les convs groupées quittent la liste plate (aucune en double)',
-      await cdp.evaluate(`document.querySelectorAll('#convs .conv').length`) === 4
+      await cdp.evaluate(`document.querySelectorAll('#flow > .conv').length`) === 4
       && await cdp.evaluate(`document.querySelectorAll('.conv').length`) === 6,
-      await cdp.evaluate(`document.querySelectorAll('#convs .conv').length + '/' + document.querySelectorAll('.conv').length`));
+      await cdp.evaluate(`document.querySelectorAll('#flow > .conv').length + '/' + document.querySelectorAll('.conv').length`));
     check('la ligne de la conv busy a MIGRÉ dans le groupe (nœud réutilisé, pas recréé)',
-      await cdp.evaluate(`document.querySelector('#groups .ico-busy').dataset.probe`) === 'grouped');
+      await cdp.evaluate(`document.querySelector('#flow .ico-busy').dataset.probe`) === 'grouped');
     // Étape 16 (révoque l'amendement étape 5) : dans le rail d'un groupe,
     // busy reprend LA MÊME animation `spin` que les lignes plates — même nom
     // d'animation, aucune divergence de classe entre les deux contextes.
     const grpBusyAnim = await cdp.evaluate(`(() => {
-      const anims = document.querySelector('#groups .ico-busy').getAnimations({ subtree: true });
+      const anims = document.querySelector('#flow .ico-busy').getAnimations({ subtree: true });
       return { count: anims.length, name: anims[0] ? anims[0].animationName : null };
     })()`);
     check('… son arc tourne dans le rail du groupe, comme une ligne plate (étape 16)',
@@ -454,7 +454,7 @@ async function run() {
     // peint APRÈS les z-négatifs. Preuve par les PIXELS, pas par le style :
     // l'INTÉRIEUR de l'anneau de groupe doit contenir l'encre de l'arc.
     const grpBusyInk = await cdp.evaluate(`(() => {
-      const n = document.querySelector('#groups .ico-busy');
+      const n = document.querySelector('#flow .ico-busy');
       const cs = getComputedStyle(n, '::before');
       return { border: cs.borderTopColor, pos: cs.position, content: cs.content };
     })()`);
@@ -467,7 +467,7 @@ async function run() {
     // l'arc était peint puis ENTIÈREMENT recouvert par le disque opaque.
     const busyPng = (await cdp.send('Page.captureScreenshot', {
       format: 'png', captureBeyondViewport: false,
-      clip: await cdp.evaluate(`(() => { const b = document.querySelector('#groups .ico-busy').getBoundingClientRect();
+      clip: await cdp.evaluate(`(() => { const b = document.querySelector('#flow .ico-busy').getBoundingClientRect();
         return { x: b.left + b.width / 2 - 12, y: b.top + b.height / 2 - 12, width: 24, height: 24, scale: 6 }; })()`),
     })).data;
     await cdp.evaluate(`(() => {
@@ -527,14 +527,14 @@ async function run() {
     };
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: hidden })}, '*')`);
     await sleep(150);
-    const hiddenPrompts = await cdp.evaluate(`[...document.querySelectorAll('#groups .m-prompt')].map(e => e.textContent)`);
+    const hiddenPrompts = await cdp.evaluate(`[...document.querySelectorAll('#flow .m-prompt')].map(e => e.textContent)`);
     check('les 2 membres done-closed (vague 1) n\'ont plus de ligne',
       !hiddenPrompts.includes('Tâche 1 finie') && !hiddenPrompts.includes('Tâche 2 finie'), JSON.stringify(hiddenPrompts));
     check('… mais stale et unsent-lost restent visibles (un remède existe encore)',
       hiddenPrompts.includes('Interrompue') && hiddenPrompts.includes('Lien mort-né'), JSON.stringify(hiddenPrompts));
     check('… et une vague en file (jamais done-closed) reste visible',
       hiddenPrompts.includes('Vague 3, pas encore lancée'), JSON.stringify(hiddenPrompts));
-    const waveLabels = await cdp.evaluate(`[...document.querySelectorAll('#groups .wave-hdr-label')].map(e => e.textContent)`);
+    const waveLabels = await cdp.evaluate(`[...document.querySelectorAll('#flow .wave-hdr-label')].map(e => e.textContent)`);
     check('en-tête « wave 1 » absent : plus aucun membre visible dessous',
       !waveLabels.includes('wave 1'), JSON.stringify(waveLabels));
     check('… en-têtes des vagues encore utiles présents (jamais toutes retirées d\'un coup)',
@@ -542,7 +542,7 @@ async function run() {
     check('compteur « terminées » : calculé sur le store COMPLET (les cachés comptent)',
       await cdp.evaluate(`document.querySelector('.grp-count').textContent`) === '2/5 done');
     check('groupe pas ENTIÈREMENT terminé (maîtresse encore vivante) : toujours rendu',
-      await cdp.evaluate(`document.querySelectorAll('#groups .grp').length`) === 1);
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 1);
 
     // Onglet rouvert (extension.js relisterait la conv sous un id réel,
     // member-truth.js recalcule alors `done`, tabOpen vrai) : le membre repasse
@@ -555,7 +555,7 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: reopened })}, '*')`);
     await sleep(150);
     check('… réapparaît une fois l\'onglet rouvert (statut `done`, plus `done-closed`)',
-      await cdp.evaluate(`[...document.querySelectorAll('#groups .conv .title')].some(e => e.textContent === 'Terminée jamais lue')`));
+      await cdp.evaluate(`[...document.querySelectorAll('#flow .conv .title')].some(e => e.textContent === 'Terminée jamais lue')`));
 
     // Maîtresse ENCORE VIVANTE, mais tous les membres finis : « capsule seule +
     // chip ✓ done » (cas dégradé de la décision 90 — rien à faire côté
@@ -568,13 +568,13 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: allDoneMasterOpen })}, '*')`);
     await sleep(150);
     check('capsule seule : le groupe reste rendu (maîtresse pas done-closed)',
-      await cdp.evaluate(`document.querySelectorAll('#groups .grp').length`) === 1);
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 1);
     check('… chip « ✓ done » visible (plus aucun membre à faire)',
       await cdp.evaluate(`getComputedStyle(document.querySelector('.grp-done')).display`) !== 'none'
       && await cdp.evaluate(`document.querySelector('.grp-done').textContent`) === '✓ done');
     check('… plus aucun membre ni en-tête de vague sous la capsule',
-      await cdp.evaluate(`document.querySelectorAll('#groups .member').length`) === 0
-      && await cdp.evaluate(`document.querySelectorAll('#groups .wave-hdr').length`) === 0);
+      await cdp.evaluate(`document.querySelectorAll('#flow .member').length`) === 0
+      && await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr').length`) === 0);
     check('… la maîtresse (encore vivante) reste rendue',
       await cdp.evaluate(`!!document.querySelector('.grp-master-fallback')`));
 
@@ -587,7 +587,7 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: fullyDone })}, '*')`);
     await sleep(150);
     check('groupe ENTIÈREMENT terminé (maîtresse comprise) : plus rendu du tout',
-      await cdp.evaluate(`document.querySelectorAll('#groups .grp').length`) === 0);
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 0);
 
     // Retour à l'état de base de la section 9 pour la suite du banc (9bis).
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
@@ -596,7 +596,7 @@ async function run() {
     console.log('\n9bis. Vie des bulles en attente + glyphes de groupe (plan repli-auto étape 5)');
     // m3 (queued, pas de conv liée) → anneau statique atténué, jamais de pulse.
     const queuedRing = await cdp.evaluate(`(() => {
-      const ico = document.querySelector('#groups .m-pending .ico-pending');
+      const ico = document.querySelector('#flow .m-pending .ico-pending');
       const cs = getComputedStyle(ico, '::after');
       const alpha = (c) => { const m = c.match(/[\\d.]+/g) || []; return m.length > 3 ? +m[3] : 1; };
       return { cls: ico.className, anims: ico.getAnimations().length,
@@ -621,7 +621,7 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: insertedState })}, '*')`);
     await sleep(120);
     const insertedRing = await cdp.evaluate(`(() => {
-      const ico = document.querySelector('#groups .m-pending .ico-pending');
+      const ico = document.querySelector('#flow .m-pending .ico-pending');
       // L'animation cible ::after (l'anneau), pas l'élément lui-même —
       // getAnimations() de l'élément ne la voit pas ; on lit le style calculé
       // du pseudo-élément, même méthode que le glyphe « ? » de waiting plus haut.
@@ -641,7 +641,7 @@ async function run() {
     // (structurel : pendingLine() n'est appelée que quand aucune conv n'est
     // trouvée — vérifié explicitement pour couvrir le banc du plan).
     check('ligne de conv rendue : aucune classe ico-pending-wait/idle qui traîne',
-      await cdp.evaluate(`!document.querySelector('#groups .conv .ico-pending-wait, #groups .conv .ico-pending-idle')`) === true);
+      await cdp.evaluate(`!document.querySelector('#flow .conv .ico-pending-wait, #flow .conv .ico-pending-idle')`) === true);
 
     // waiting/interrupted/stale d'une conv LISTÉE (c1, réutilisée) : chacun un
     // glyphe visible dans l'anneau, en plus du ✓ done déjà couvert.
@@ -651,7 +651,7 @@ async function run() {
       await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: s })}, '*')`);
       await sleep(120);
       const g = await cdp.evaluate(`(() => {
-        const ico = document.querySelector('#groups .grp-body .member .conv .ico');
+        const ico = document.querySelector('#flow .grp-body .member .conv .ico');
         const before = getComputedStyle(ico, '::before');
         return { cls: ico.className, glyph: before.content.replace(/"/g, ''), anims: ico.getAnimations().length };
       })()`);
@@ -663,8 +663,8 @@ async function run() {
     await sleep(120);
 
     check('en-tête de vague affiché (groupe multi-vagues)',
-      await cdp.evaluate(`document.querySelectorAll('#groups .wave-hdr').length`) === 2);
-    const waveHdrTexts = await cdp.evaluate(`Array.from(document.querySelectorAll('#groups .wave-hdr')).map(h => h.textContent).join('|')`);
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr').length`) === 2);
+    const waveHdrTexts = await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .wave-hdr')).map(h => h.textContent).join('|')`);
     // Lot 4 §2 : la mention « — queued » ne reste que pour une vague plus loin
     // en file — la PROCHAINE à lancer (ici la vague 2) devient elle-même le
     // bouton ▶ (vérifié plus bas), elle ne porte donc plus « — queued ».
@@ -675,21 +675,21 @@ async function run() {
     // Lot 4 §2 (2026-07-24) : plus de bouton ▶ dédié — le séparateur de la
     // PROCHAINE vague à ouvrir (g.nextWave) devient lui-même le bouton.
     check('aucun bouton ▶ dédié en bas de vague (supprimé, lot 4)',
-      await cdp.evaluate(`!Array.from(document.querySelectorAll('#groups button')).some(b => b.textContent.includes('Launch wave'))`) === true);
+      await cdp.evaluate(`!Array.from(document.querySelectorAll('#flow button')).some(b => b.textContent.includes('Launch wave'))`) === true);
     check('le séparateur de la vague 2 devient le bouton de lancement (▶ wave 2)',
-      await cdp.evaluate(`(() => { const h = document.querySelector('#groups .wave-hdr.launch'); return h ? h.textContent.trim() : null; })()`) === '▶ wave 2');
+      await cdp.evaluate(`(() => { const h = document.querySelector('#flow .wave-hdr.launch'); return h ? h.textContent.trim() : null; })()`) === '▶ wave 2');
     // Lot allègement 2026-07-24 — décision 3 amendée, portée par le lot 4 §2 sur
     // le séparateur : reste toujours cliquable mais atténué (classe dim) en
     // mode auto tant que rien n'est bloqué ; plus aucune bannière de succès.
     check('séparateur atténué (dim) en mode auto, vague non bloquée',
-      await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').classList.contains('dim')`) === true);
+      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('dim')`) === true);
     check('… et pas "pri" (bleu) en même temps',
-      await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').classList.contains('pri')`) === false);
-    check('aucune bannière de succès affichée', await cdp.evaluate(`!document.querySelector('#groups .banner.info')`) === true);
+      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === false);
+    check('aucune bannière de succès affichée', await cdp.evaluate(`!document.querySelector('#flow .banner.info')`) === true);
     // Clic sur le séparateur en mode auto/non bloqué → launchWave avec force:true
     // (même confirmation modale que l'ancien bouton, côté extension.js).
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').click()`);
     const afterLaunchClick = await cdp.evaluate(`window.__sent`);
     check('clic séparateur (dim) → launchWave avec force: true',
       Array.isArray(afterLaunchClick) && afterLaunchClick.length === 1 && afterLaunchClick[0].type === 'launchWave'
@@ -711,19 +711,19 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: manualMode })}, '*')`);
     await sleep(120);
     check('séparateur franc/bleu (pri) en mode manuel',
-      await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').classList.contains('pri')`) === true);
-    check('… et plus dim', await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').classList.contains('dim')`) === false);
+      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === true);
+    check('… et plus dim', await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('dim')`) === false);
     const blockedWave = JSON.parse(JSON.stringify(grouped));
     blockedWave.groups[0].members[0].waveStatus = 'stale';
     blockedWave.groups[0].members[0].status = 'stale';
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: blockedWave })}, '*')`);
     await sleep(120);
     check('séparateur franc/bleu (pri) quand la vague est bloquée, même en mode auto (chemin de secours)',
-      await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').classList.contains('pri')`) === true);
+      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === true);
     // Bandeaux PROPORTIONNÉS (plan lien-mort-né 2026-08-04) : le rouge est
     // réservé à une conv vraiment interrompue à mi-travail.
     const bannerOf = `(() => {
-      const b = document.querySelector('#groups .wave-ctrl .banner');
+      const b = document.querySelector('#flow .wave-ctrl .banner');
       return b ? { cls: b.className, text: b.textContent } : null;
     })()`;
     let banner = await cdp.evaluate(bannerOf);
@@ -737,8 +737,8 @@ async function run() {
     // c'est le CONTENU (la bannière) qu'il faut mesurer, comme wave-ghost/
     // wave-hdr mesurent déjà leur propre boîte décalée par marge/padding.
     const ctrlVsRail = await cdp.evaluate(`(() => {
-      const rail = document.querySelector('#groups .grp-rail').getBoundingClientRect();
-      const banner = document.querySelector('#groups .wave-ctrl .banner').getBoundingClientRect();
+      const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
+      const banner = document.querySelector('#flow .wave-ctrl .banner').getBoundingClientRect();
       return { railRight: rail.left + rail.width, bannerLeft: banner.left };
     })()`);
     check('waveCtrl (bannières) : commence après l\'axe du rail, ne le recouvre pas',
@@ -757,7 +757,7 @@ async function run() {
     check('… avec le remède énoncé (Entrée dans l\'onglet, sinon Relaunch)',
       banner && /Enter/.test(banner.text) && /Relaunch/.test(banner.text), JSON.stringify(banner));
     check('… et l\'auto reste suspendu (le séparateur garde son chemin de secours)',
-      await cdp.evaluate(`document.querySelector('#groups .wave-hdr.launch').classList.contains('pri')`) === true);
+      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === true);
     // Mélange des deux dans la même vague : la conv interrompue prime.
     const mixedWave = JSON.parse(JSON.stringify(lostWave));
     mixedWave.groups[0].members[1].waveStatus = 'stale';
@@ -771,7 +771,7 @@ async function run() {
     await sleep(120);
     const afterBlockedClick = await cdp.evaluate(`(() => {
       window.__sent = [];
-      document.querySelector('#groups .wave-hdr.launch').click();
+      document.querySelector('#flow .wave-hdr.launch').click();
       return window.__sent;
     })()`);
     check('… clic sans force (pri, pas dim) → launchWave sans force',
@@ -788,7 +788,7 @@ async function run() {
     });
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: triWave })}, '*')`);
     await sleep(120);
-    const triHdrTexts = await cdp.evaluate(`Array.from(document.querySelectorAll('#groups .wave-hdr')).map(h => h.textContent).join('|')`);
+    const triHdrTexts = await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .wave-hdr')).map(h => h.textContent).join('|')`);
     check('3 vagues : la 2 (prochaine à lancer) devient ▶ wave 2, la 3 (plus loin) garde « — queued »',
       triHdrTexts.indexOf('▶ wave 2') !== -1 && triHdrTexts.indexOf('wave 3 — queued') !== -1, triHdrTexts);
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
@@ -815,8 +815,8 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
     check('groupe dissous → aucune conv perdue, aucune ligne fantôme',
-      await cdp.evaluate(`document.querySelectorAll('#groups .grp').length`) === 0
-      && await cdp.evaluate(`document.querySelectorAll('#convs .conv').length`) === 6);
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 0
+      && await cdp.evaluate(`document.querySelectorAll('#flow > .conv').length`) === 6);
     check('… et l\'arc de la conv qui travaille a survécu au trajet groupe → liste plate',
       await cdp.evaluate(`document.querySelector('.ico-busy').getAnimations({ subtree: true })[0].playState`) === 'running');
 
@@ -836,9 +836,11 @@ async function run() {
     }];
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: linkedInView })}, '*')`);
     await sleep(150);
-    // Lot 5 : le chip vert « fermer & retirer » a disparu — la croix rouge
-    // inline (.m-out) est désormais la SEULE action de sortie, toujours
-    // visible, quel que soit le statut du membre.
+    // Lot 5 : le chip vert « fermer & retirer » a disparu — le bouton de
+    // retrait (.m-out) est désormais la SEULE action de sortie, présente quel
+    // que soit le statut du membre. Depuis 2026-08-07 c'est une flèche en
+    // overlay révélée au survol, jamais masquée par un display:none : ce que
+    // ces checks vérifient est bien sa PRÉSENCE inconditionnelle.
     const memberInfo = `(() => {
       const members = Array.from(document.querySelectorAll('.member'));
       return members.map((m) => {
@@ -861,24 +863,24 @@ async function run() {
       info[0].linkDisplay === 'none', JSON.stringify(info[0]));
     check('… note vide (la ligne de conv réelle porte l\'info, pas de doublon)',
       info[0].noteText === '', JSON.stringify(info[0]));
-    check('… onglet ouvert + terminé → la croix rouge (.m-out) est visible',
+    check('… onglet ouvert + terminé → le bouton de retrait (.m-out) est là',
       info[0].removeDisplay !== 'none', JSON.stringify(info[0]));
     check('membre jamais lié : Link… visible',
       info[1].linkDisplay !== 'none', JSON.stringify(info[1]));
     check('… note « not linked yet »', info[1].noteText === 'not linked yet', JSON.stringify(info[1]));
-    check('membre jamais lié : croix rouge (.m-out) visible aussi (action uniforme)',
+    check('membre jamais lié : bouton de retrait (.m-out) là aussi (action uniforme)',
       info[1].removeDisplay !== 'none', JSON.stringify(info[1]));
     check('« Relaunch » masqué partout tant qu\'aucun lien n\'est mort-né',
       info[0].relaunchDisplay === 'none' && info[1].relaunchDisplay === 'none',
       JSON.stringify(info.map((x) => x.relaunchDisplay)));
 
-    // Clic sur la croix rouge d'un membre done + onglet ouvert → UN SEUL
+    // Clic sur le bouton de retrait d'un membre done + onglet ouvert → UN SEUL
     // message removeMember (étape 15 : métadonnées seules, plus jamais de
     // fermeture d'onglet — ni titre ni tabTitle à transporter).
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`document.querySelectorAll('.member')[0].querySelector('.m-out').click()`);
     const afterMergedClick = await cdp.evaluate(`window.__sent`);
-    check('clic croix rouge (done + onglet ouvert) → removeMember (id du groupe + clé du membre)',
+    check('clic retrait (done + onglet ouvert) → removeMember (id du groupe + clé du membre)',
       Array.isArray(afterMergedClick) && afterMergedClick.length === 1
       && afterMergedClick[0].type === 'removeMember' && afterMergedClick[0].id === 'g8' && afterMergedClick[0].key === 'linked',
       JSON.stringify(afterMergedClick));
@@ -905,13 +907,13 @@ async function run() {
     check('le membre jamais lié n\'est pas affecté par la sortie de vue d\'un autre membre',
       info[0].linkDisplay !== 'none' && info[0].noteText === 'not linked yet', JSON.stringify(info[0]));
     // Onglet jamais ouvert (membre jamais lancé, rien à fermer) → un clic sur
-    // la croix envoie toujours removeMember, sans jamais rien fermer. Le membre
-    // done-closed d'à côté n'a plus de croix à cliquer (ligne absente,
+    // le retrait envoie toujours removeMember, sans jamais rien fermer. Le
+    // membre done-closed d'à côté n'a plus de bouton à cliquer (ligne absente,
     // vérifié ci-dessus) : c'est le membre jamais lié qui porte ce cas.
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`document.querySelectorAll('.member')[0].querySelector('.m-out').click()`);
     const afterClosedClick = await cdp.evaluate(`window.__sent`);
-    check('clic croix rouge (jamais lancée, rien à fermer) → removeMember',
+    check('clic retrait (jamais lancée, rien à fermer) → removeMember',
       Array.isArray(afterClosedClick) && afterClosedClick.length === 1
       && afterClosedClick[0].type === 'removeMember' && afterClosedClick[0].title === undefined,
       JSON.stringify(afterClosedClick));
@@ -957,7 +959,7 @@ async function run() {
     })()`);
     check('pied sans action visible (membre busy, rien à proposer) : hauteur quasi nulle (plus de ligne pleine largeur)',
       footHeight !== null && footHeight <= 4, String(footHeight));
-    // Clic sur la croix rouge inline d'une tâche jamais lancée → removeMember
+    // Clic sur le bouton de retrait d'une tâche jamais lancée → removeMember
     // (étape 15 : métadonnées seules, plus aucune fermeture d'onglet).
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`(() => {
@@ -965,15 +967,65 @@ async function run() {
       m3.querySelector('.m-out').click();
     })()`);
     const afterOutClick = await cdp.evaluate(`window.__sent`);
-    check('clic croix « retirer » inline (tâche en file) → removeMember (id du groupe + clé du membre)',
+    check('clic « retirer » (tâche en file) → removeMember (id du groupe + clé du membre)',
       Array.isArray(afterOutClick) && afterOutClick.length === 1 && afterOutClick[0].type === 'removeMember'
       && afterOutClick[0].id === 'g1' && afterOutClick[0].key === 'm3', JSON.stringify(afterOutClick));
-    // Fix superposition (lot 5 §2bis) : .m-out est un élément du flux flex de
-    // .m-head, jamais en position: absolute — vérifié directement sur le CSS
-    // calculé (contraste avec l'ancien bug de recouvrement du texte).
-    check('.m-out n\'est plus en position: absolute (flux flex, plus de superposition possible)',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('.member .m-out')).position`) !== 'absolute',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('.member .m-out')).position`));
+    // 2026-08-07 — RENVERSEMENT ASSUMÉ du lot 5 §2bis : le bouton de retrait
+    // était un enfant du flux flex, précisément pour que l'ellipsis du titre
+    // s'arrête avant lui. Mais un enfant de flux COÛTE sa largeur, y compris
+    // quand il est invisible — c'est ce qui raccourcissait la barre de
+    // contexte d'une ligne de groupe par rapport à une ligne plate (étape 13,
+    // même diagnostic sur le chip « délier » de la master). L'exigence « 100 %
+    // identiques » tranche : overlay, zéro emprise. Le recouvrement du texte
+    // que le lot 5 fuyait est ramené à un survol, et masqué par un fond opaque.
+    // Le fond du bouton se cale sur celui d'une ligne SURVOLÉE : c'est le seul
+    // état où il se voit, et c'est ce qui lui permet de masquer proprement la
+    // fin du titre qu'il recouvre. On pose la variable de thème (VS Code la
+    // définit toujours ; une page nue, non) puis on vérifie que le fond calculé
+    // vaut EXACTEMENT celui de la ligne survolée — pas juste « non transparent ».
+    const outGeom = await cdp.evaluate(`(() => {
+      document.documentElement.style.setProperty('--vscode-list-hoverBackground', '#2a2d2e');
+      // Une ligne SÉLECTIONNÉE prend le fond de sélection, pas celui du survol
+      // (règle :has plus bas dans la feuille) : on mesure donc sur un membre
+      // qui n'est pas la conv active, sinon on testerait l'autre règle.
+      const b = Array.from(document.querySelectorAll('.member'))
+        .filter(function (m) { return !m.querySelector('.conv.active'); })[0].querySelector('.m-out');
+      const s = getComputedStyle(b);
+      // Lecture EAGER : getComputedStyle rend un objet VIVANT — lire ses
+      // propriétés après avoir retiré la variable donnerait l'état d'après.
+      const out = { position: s.position, opacity: s.opacity, bg: s.backgroundColor };
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--vscode-list-hoverBackground)';
+      document.body.appendChild(probe);
+      out.hover = getComputedStyle(probe).color;
+      probe.remove();
+      document.documentElement.style.removeProperty('--vscode-list-hoverBackground');
+      return out;
+    })()`);
+    check('.m-out est un OVERLAY (position: absolute) : zéro emprise sur la largeur de la ligne',
+      outGeom.position === 'absolute', JSON.stringify(outGeom));
+    check('… invisible au repos (opacity 0), fond calé sur celui d\'une ligne survolée (il masque la fin du titre)',
+      outGeom.opacity === '0' && outGeom.bg === outGeom.hover, JSON.stringify(outGeom));
+    // Plus aucune teinte d'ERREUR sur une ligne : ce geste ne ferme rien. On
+    // compare à la couleur que --vscode-errorForeground prend RÉELLEMENT dans
+    // ce rendu (posée puis relue), jamais à un littéral hexadécimal — le
+    // navigateur ne rend jamais la chaîne source.
+    const outPaint = await cdp.evaluate(`(() => {
+      document.documentElement.style.setProperty('--vscode-errorForeground', '#f14c4c');
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--vscode-errorForeground)';
+      document.body.appendChild(probe);
+      const err = getComputedStyle(probe).color;
+      probe.remove();
+      const btn = document.querySelector('.member .m-out');
+      const s = getComputedStyle(btn);
+      const out = { glyph: btn.textContent, err, color: s.color, border: s.borderTopColor };
+      document.documentElement.style.removeProperty('--vscode-errorForeground');
+      return out;
+    })()`);
+    check('… flèche de retrait et non plus une croix, et plus aucune teinte d\'erreur sur la ligne',
+      outPaint.glyph === '⤴' && outPaint.color !== outPaint.err && outPaint.border !== outPaint.err,
+      JSON.stringify(outPaint));
 
     // Modèle · effort PRÉVUS grisés sur une tâche en file (m3, pas encore liée).
     const intentState = JSON.parse(JSON.stringify(grouped));
@@ -995,12 +1047,12 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: closedTabState })}, '*')`);
     await sleep(150);
     check('conv terminée avec l\'onglet fermé : intitulé barré',
-      await cdp.evaluate(`getComputedStyle(document.querySelectorAll('#convs .conv')[1].querySelector('.title')).textDecorationLine`) === 'line-through');
+      await cdp.evaluate(`getComputedStyle(document.querySelectorAll('#flow > .conv')[1].querySelector('.title')).textDecorationLine`) === 'line-through');
     closedTabState.conversations[1].tabOpen = true;
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: closedTabState })}, '*')`);
     await sleep(150);
     check('… réouverture de l\'onglet : le barré disparaît de lui-même (découle de tabOpen, aucune mémoire)',
-      await cdp.evaluate(`getComputedStyle(document.querySelectorAll('#convs .conv')[1].querySelector('.title')).textDecorationLine`) === 'none');
+      await cdp.evaluate(`getComputedStyle(document.querySelectorAll('#flow > .conv')[1].querySelector('.title')).textDecorationLine`) === 'none');
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
 
@@ -1020,7 +1072,7 @@ async function run() {
 
     console.log('\n10bis. Ajout en file à un groupe existant (plan ajout-tache 2026-07-24)');
     check('ligne fantôme « + nouvelle vague » présente même sur un groupe fini (mono-vague, nextWave null)',
-      await cdp.evaluate(`!!document.querySelector('#groups .wave-ghost')`) === true);
+      await cdp.evaluate(`!!document.querySelector('#flow .wave-ghost')`) === true);
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
@@ -1028,16 +1080,16 @@ async function run() {
     // a disparu ; la ligne d'ajout pleine largeur (.wave-add-row) n'existe
     // dans le DOM QUE pour les vagues strictement en file — jamais masquée
     // par un style, absente pour de vrai sur les autres.
-    const waveAddRowsCount = await cdp.evaluate(`document.querySelectorAll('#groups .wave-add-row').length`);
+    const waveAddRowsCount = await cdp.evaluate(`document.querySelectorAll('#flow .wave-add-row').length`);
     check('« + ajouter à cette vague » absent sur la vague 1 (déjà lancée / en cours) et présent sur la vague 2 (en file) seulement',
       waveAddRowsCount === 1, String(waveAddRowsCount));
     check('ligne fantôme toujours présente (groupe multi-vagues)',
-      await cdp.evaluate(`!!document.querySelector('#groups .wave-ghost')`) === true);
+      await cdp.evaluate(`!!document.querySelector('#flow .wave-ghost')`) === true);
 
     // Prompt rempli → clic sur la ligne d'ajout de la vague 2 → addTaskToGroup, champ vidé.
     await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Nouvelle tache en file'; ta.dispatchEvent(new Event('input')); })()`);
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-add-row').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').click()`);
     const afterAdd = await cdp.evaluate(`window.__sent`);
     check('clic ligne d\'ajout vague en file → addTaskToGroup (id du groupe, vague, prompt)',
       Array.isArray(afterAdd) && afterAdd.length === 1 && afterAdd[0].type === 'addTaskToGroup'
@@ -1048,7 +1100,7 @@ async function run() {
 
     // Prompt vide → clic = aucun message, focus rendu au champ (invitation à taper).
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-add-row').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').click()`);
     const afterEmptyClick = await cdp.evaluate(`window.__sent`);
     check('prompt vide : aucun message envoyé', Array.isArray(afterEmptyClick) && afterEmptyClick.length === 0, JSON.stringify(afterEmptyClick));
     check('… et le focus revient au champ prompt',
@@ -1056,10 +1108,10 @@ async function run() {
 
     // Survol de la ligne d'ajout : la zone prompt passe en surbrillance (lien visuel).
     await cdp.evaluate(`document.querySelector('.task-top textarea.inp').value = 'x'`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-add-row').dispatchEvent(new MouseEvent('mouseenter'))`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').dispatchEvent(new MouseEvent('mouseenter'))`);
     check('survol de la ligne d\'ajout : la zone prompt passe en surbrillance',
       await cdp.evaluate(`document.querySelector('.task-top textarea.inp').classList.contains('hl-target')`) === true);
-    await cdp.evaluate(`document.querySelector('#groups .wave-add-row').dispatchEvent(new MouseEvent('mouseleave'))`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').dispatchEvent(new MouseEvent('mouseleave'))`);
     check('fin du survol : surbrillance retirée',
       await cdp.evaluate(`document.querySelector('.task-top textarea.inp').classList.contains('hl-target')`) === false);
 
@@ -1074,14 +1126,14 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: waveLaunched })}, '*')`);
     await sleep(150);
     check('vague 2 lancée : sa ligne « + add to this wave » disparaît (plus d\'orpheline en fin de corps)',
-      await cdp.evaluate(`document.querySelectorAll('#groups .wave-add-row').length`) === 0);
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-add-row').length`) === 0);
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
 
     // Ligne fantôme → nouvelle vague (wave: null).
     await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Ligne fantome'; ta.dispatchEvent(new Event('input')); })()`);
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-ghost:not(.wave-add-row)').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
     const afterGhost = await cdp.evaluate(`window.__sent`);
     check('clic ligne fantôme → addTaskToGroup avec wave: null (nouvelle vague)',
       Array.isArray(afterGhost) && afterGhost.length === 1 && afterGhost[0].type === 'addTaskToGroup' && afterGhost[0].wave === null,
@@ -1105,7 +1157,7 @@ async function run() {
     // « + ajouter à cette vague » (vague 2, en file) avec un bloc multi-tâches
     // dans le champ → REFUS, aucun message, le formulaire n'est PAS vidé.
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-add-row').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').click()`);
     const afterRefusal = await cdp.evaluate(`window.__sent`);
     check('« + ajouter à cette vague » sur un bloc multi-tâches → aucun message envoyé (pas de télescopage silencieux)',
       Array.isArray(afterRefusal) && afterRefusal.length === 0, JSON.stringify(afterRefusal));
@@ -1116,7 +1168,7 @@ async function run() {
     // « + nouvelle vague » (ligne fantôme) avec le même bloc → confirmation
     // affichée, RIEN envoyé tant qu'elle n'est pas validée.
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-ghost:not(.wave-add-row)').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
     const afterGhostMulti = await cdp.evaluate(`window.__sent`);
     check('clic ligne fantôme sur bloc multi-tâches → AUCUN message avant confirmation',
       Array.isArray(afterGhostMulti) && afterGhostMulti.length === 0, JSON.stringify(afterGhostMulti));
@@ -1134,7 +1186,7 @@ async function run() {
     // Re-déclenche puis CONFIRME : un seul message addTasksToGroup, vagues
     // RELATIVES (1,2 — le décalage sur la dernière vague du groupe se fait
     // côté extension, sur son état à jour), champ vidé après transfert.
-    await cdp.evaluate(`document.querySelector('#groups .wave-ghost:not(.wave-add-row)').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
     await cdp.evaluate(`document.querySelectorAll('#batchForm .banner.info .btn')[1].click()`);
     const afterConfirm = await cdp.evaluate(`window.__sent`);
     check('Confirmer → un seul addTasksToGroup, groupe cible, 2 tâches, vagues relatives 1 et 2, model/effort de section',
@@ -1156,7 +1208,7 @@ async function run() {
     })()`);
     await sleep(50);
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .wave-ghost:not(.wave-add-row)').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
     const namedConfirmText = await cdp.evaluate(`document.querySelectorAll('#batchForm .banner.info .btn')[1]?.closest('.banner').textContent || ''`);
     check('group: présent dans le bloc → signalé comme ignoré dans la confirmation',
       /ignored/i.test(namedConfirmText) && /Nom du bloc/.test(namedConfirmText), namedConfirmText);
@@ -1190,17 +1242,17 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: justCreated })}, '*')`);
     await sleep(150);
     const fresh = await cdp.evaluate(`(() => {
-      const notes = Array.from(document.querySelectorAll('#groups .m-note')).map(n => n.textContent);
-      const links = Array.from(document.querySelectorAll('#groups .member')).map(m => {
+      const notes = Array.from(document.querySelectorAll('#flow .m-note')).map(n => n.textContent);
+      const links = Array.from(document.querySelectorAll('#flow .member')).map(m => {
         const b = Array.from(m.querySelectorAll('.m-foot button')).find(x => x.textContent.trim() === 'Link…');
         return b ? b.style.display : 'ABSENT';
       });
       return {
         notes: notes,
         links: links,
-        err: !!document.querySelector('#groups .banner.err'),
+        err: !!document.querySelector('#flow .banner.err'),
         count: (document.querySelector('.grp-count') || {}).textContent,
-        pendingTitle: (document.querySelector('#groups .m-pending') || {}).title,
+        pendingTitle: (document.querySelector('#flow .m-pending') || {}).title,
       };
     })()`);
     check('aucune tâche n\'est déclarée terminée (0/3 done)', fresh.count === '0/3 done', JSON.stringify(fresh));
@@ -1434,17 +1486,17 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(150);
     const cap = await cdp.evaluate(`(() => {
-      const masterRow = document.querySelector('#groups .grp-master-head .conv');
+      const masterRow = document.querySelector('#flow .grp-master-head .conv');
       const title = masterRow ? masterRow.querySelector('.title') : null;
-      const homeBtn = Array.from(document.querySelectorAll('#groups .grp-head .gbtn')).find(b => b.textContent === '⌂');
+      const homeBtn = Array.from(document.querySelectorAll('#flow .grp-head .gbtn')).find(b => b.textContent === '⌂');
       return {
         masterPresent: !!masterRow,
         titleText: title ? title.textContent : null,
         modelText: masterRow ? masterRow.querySelector('.model').textContent : null,
         hasCtxBar: !!masterRow && getComputedStyle(masterRow.querySelector('.bar-ctx')).display !== 'none',
         homeBtnVisible: homeBtn ? getComputedStyle(homeBtn).display !== 'none' : null,
-        count: document.querySelector('#groups .grp-count').textContent,
-        notInFlatList: !Array.from(document.querySelectorAll('#convs .conv .title')).some(t => t.textContent === 'Terminée déjà lue'),
+        count: document.querySelector('#flow .grp-count').textContent,
+        notInFlatList: !Array.from(document.querySelectorAll('#flow > .conv .title')).some(t => t.textContent === 'Terminée déjà lue'),
       };
     })()`);
     check('la master est une ligne de conv STANDARD (rowFor), pas un texte d\'en-tête', cap.masterPresent === true);
@@ -1458,10 +1510,10 @@ async function run() {
     // Clic sur la ligne master → focusConv (id RÉEL de la conv, comme n'importe
     // quelle ligne standard) ; ne replie pas le groupe (nœud distinct de la grip).
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .grp-master-head .conv').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-master-head .conv').click()`);
     const afterRowClick = await cdp.evaluate(`({
       sent: window.__sent,
-      collapsed: document.querySelector('#groups .grp-body').classList.contains('collapsed'),
+      collapsed: document.querySelector('#flow .grp-body').classList.contains('collapsed'),
     })`);
     check('clic sur la ligne master → focusConv (id de la conv réelle)',
       Array.isArray(afterRowClick.sent) && afterRowClick.sent.some((m) => m.type === 'focusConv' && m.id === 'c3'),
@@ -1476,7 +1528,7 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: masterClosed })}, '*')`);
     await sleep(120);
     check('onglet fermé → titre barré, exactement comme une ligne plate',
-      await cdp.evaluate(`document.querySelector('#groups .grp-master-head .conv .title').classList.contains('closed')`) === true);
+      await cdp.evaluate(`document.querySelector('#flow .grp-master-head .conv .title').classList.contains('closed')`) === true);
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(120);
 
@@ -1488,7 +1540,7 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: masterBusy })}, '*')`);
     await sleep(150);
     const busyCap = await cdp.evaluate(`(() => {
-      const ico = document.querySelector('#groups .grp-master-head .conv .ico-busy');
+      const ico = document.querySelector('#flow .grp-master-head .conv .ico-busy');
       const anims = ico ? ico.getAnimations({ subtree: true }) : [];
       return { present: !!ico, animCount: anims.length, name: anims[0] ? anims[0].animationName : null };
     })()`);
@@ -1507,7 +1559,7 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: masterGone })}, '*')`);
     await sleep(150);
     const gone = await cdp.evaluate(`(() => {
-      const fb = document.querySelector('#groups .grp-master-fallback');
+      const fb = document.querySelector('#flow .grp-master-fallback');
       return {
         present: !!fb,
         text: fb ? fb.querySelector('.title').textContent : null,
@@ -1525,14 +1577,14 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: noMaster })}, '*')`);
     await sleep(150);
     const afterUnset = await cdp.evaluate(`(() => {
-      const homeBtn = Array.from(document.querySelectorAll('#groups .grp-head .gbtn')).find(b => b.textContent === '⌂');
+      const homeBtn = Array.from(document.querySelectorAll('#flow .grp-head .gbtn')).find(b => b.textContent === '⌂');
       return {
-        masterRowGone: !document.querySelector('#groups .grp-master-head'),
+        masterRowGone: !document.querySelector('#flow .grp-master-head'),
         homeBtnVisible: homeBtn ? getComputedStyle(homeBtn).display !== 'none' : null,
-        backInFlatList: !!Array.from(document.querySelectorAll('#convs .conv .title')).find(t => t.textContent === 'Terminée déjà lue'),
-        members: document.querySelectorAll('#groups .member').length,
-        count: document.querySelector('#groups .grp-count').textContent,
-        gripTooltip: document.querySelector('#groups .grp-head').title,
+        backInFlatList: !!Array.from(document.querySelectorAll('#flow > .conv .title')).find(t => t.textContent === 'Terminée déjà lue'),
+        members: document.querySelectorAll('#flow .member').length,
+        count: document.querySelector('#flow .grp-count').textContent,
+        gripTooltip: document.querySelector('#flow .grp-head').title,
       };
     })()`);
     check('sans master : la ligne master disparaît du DOM (rien qu\'une grip)', afterUnset.masterRowGone === true);
@@ -1546,19 +1598,19 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(150);
     const align = await cdp.evaluate(`(() => {
-      const bodyCs = getComputedStyle(document.querySelector('#groups .grp-body'));
-      const flatConv = document.querySelector('#convs .conv');
+      const bodyCs = getComputedStyle(document.querySelector('#flow .grp-body'));
+      const flatConv = document.querySelector('#flow > .conv');
       const flatIco = flatConv.querySelector('.ico');
       const flatRect = flatConv.getBoundingClientRect();
       const flatIcoRect = flatIco.getBoundingClientRect();
-      const grpConv = document.querySelector('#groups .grp-body .member .conv');
+      const grpConv = document.querySelector('#flow .grp-body .member .conv');
       const grpRect = grpConv.getBoundingClientRect();
       const grpIcoRect = grpConv.querySelector('.ico').getBoundingClientRect();
-      const masterConv = document.querySelector('#groups .grp-master-head .conv');
+      const masterConv = document.querySelector('#flow .grp-master-head .conv');
       const masterRect = masterConv.getBoundingClientRect();
       const masterIcoRect = masterConv.querySelector('.ico').getBoundingClientRect();
-      const railRect = document.querySelector('#groups .grp-rail').getBoundingClientRect();
-      const gripRect = document.querySelector('#groups .grp-head').getBoundingClientRect();
+      const railRect = document.querySelector('#flow .grp-rail').getBoundingClientRect();
+      const gripRect = document.querySelector('#flow .grp-head').getBoundingClientRect();
       return {
         bodyPaddingLeft: bodyCs.paddingLeft, bodyBorderLeft: bodyCs.borderLeftWidth, bodyMarginLeft: bodyCs.marginLeft,
         flatLeft: flatRect.left, grpLeft: grpRect.left, masterLeft: masterRect.left,
@@ -1594,12 +1646,12 @@ async function run() {
     // jusqu'à la ligne fantôme finale (jamais la ligne d'ajout en file
     // « + add to this wave »), jamais plus bas.
     const railSpan = await cdp.evaluate(`(() => {
-      const body = document.querySelector('#groups .grp-body').getBoundingClientRect();
-      const head = document.querySelector('#groups .grp-master-head');
+      const body = document.querySelector('#flow .grp-body').getBoundingClientRect();
+      const head = document.querySelector('#flow .grp-master-head');
       const start = head && head.parentElement.classList.contains('grp-body')
         ? head.getBoundingClientRect().bottom : body.top;
-      const railRect = document.querySelector('#groups .grp-rail').getBoundingClientRect();
-      const ghostRect = document.querySelector('#groups .wave-ghost:not(.wave-add-row)').getBoundingClientRect();
+      const railRect = document.querySelector('#flow .grp-rail').getBoundingClientRect();
+      const ghostRect = document.querySelector('#flow .wave-ghost:not(.wave-add-row)').getBoundingClientRect();
       return { top: Math.abs(railRect.top - start) < 1, bottom: Math.abs(railRect.bottom - ghostRect.top) < 1 };
     })()`);
     check('rail : sommet au bas de la capsule (ou du corps, sans master)', railSpan.top === true, JSON.stringify(railSpan));
@@ -1608,7 +1660,7 @@ async function run() {
     // Anneau troué : le pseudo-élément ::after de l'icône reprend --grp-hue en
     // bordure, jamais une couleur libre.
     const ring = await cdp.evaluate(`(() => {
-      const cs = getComputedStyle(document.querySelector('#groups .grp-body .member .conv .ico'), '::after');
+      const cs = getComputedStyle(document.querySelector('#flow .grp-body .member .conv .ico'), '::after');
       return { borderColor: cs.borderColor, background: cs.backgroundColor };
     })()`);
     check('anneau : bordure = teinte du groupe (--grp-hue), pas une couleur transparente par défaut',
@@ -1616,10 +1668,10 @@ async function run() {
 
     // Ligne « en attente » (m3, pas de conv liée) : même anneau, même axe.
     const pendingRing = await cdp.evaluate(`(() => {
-      const ico = document.querySelector('#groups .grp-body .m-pending .ico-pending');
+      const ico = document.querySelector('#flow .grp-body .m-pending .ico-pending');
       if (!ico) return null;
       const rect = ico.getBoundingClientRect();
-      const flatIco = document.querySelector('#convs .conv .ico').getBoundingClientRect();
+      const flatIco = document.querySelector('#flow > .conv .ico').getBoundingClientRect();
       return { present: true, centerDelta: Math.abs((rect.left + rect.width / 2) - (flatIco.left + flatIco.width / 2)) };
     })()`);
     check('ligne en attente (queued) : anneau présent, même axe',
@@ -1628,8 +1680,8 @@ async function run() {
     // Séparateurs de vague et ligne d'ajout en file : commencent après l'axe
     // du rail, ne le croisent pas (décision 2, dernier paragraphe).
     const sepOffset = await cdp.evaluate(`(() => {
-      const hdr = document.querySelector('#groups .grp-body .wave-hdr:not(.launch)');
-      const addRow = document.querySelector('#groups .wave-ghost.wave-add-row');
+      const hdr = document.querySelector('#flow .grp-body .wave-hdr:not(.launch)');
+      const addRow = document.querySelector('#flow .wave-ghost.wave-add-row');
       return {
         hdrPaddingLeft: hdr ? parseFloat(getComputedStyle(hdr).paddingLeft) : null,
         addRowMarginLeft: addRow ? parseFloat(getComputedStyle(addRow).marginLeft) : null,
@@ -1649,10 +1701,10 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: collapsedWithMaster })}, '*')`);
     await sleep(150);
     const repli = await cdp.evaluate(`(() => {
-      const grip = document.querySelector('#groups .grp-head');
-      const masterHead = document.querySelector('#groups .grp-master-head');
-      const rail = document.querySelector('#groups .grp-rail');
-      const members = document.querySelectorAll('#groups .member');
+      const grip = document.querySelector('#flow .grp-head');
+      const masterHead = document.querySelector('#flow .grp-master-head');
+      const rail = document.querySelector('#flow .grp-rail');
+      const members = document.querySelectorAll('#flow .member');
       const chev = masterHead.querySelector('.grp-master-chev');
       const chip = masterHead.querySelector('.grp-master-chip');
       return {
@@ -1675,7 +1727,7 @@ async function run() {
 
     // Clic sur ce chevron = re-déplier (même message que la grip).
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .grp-master-chev').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-master-chev').click()`);
     const sentChev = await cdp.evaluate(`window.__sent`);
     check('clic sur le chevron de la ligne master → toggleGroupCollapse',
       Array.isArray(sentChev) && sentChev.some((m) => m.type === 'toggleGroupCollapse' && m.id === 'g1'), JSON.stringify(sentChev));
@@ -1689,21 +1741,21 @@ async function run() {
     // même classe m-hover que les mouveurs ◂/▸ d'un membre (opacité 0 au
     // repos, révélée au survol de la ligne master).
     const unlinkBtn = await cdp.evaluate(`(() => {
-      const b = document.querySelector('#groups .grp-master-head .m-hover');
+      const b = document.querySelector('#flow .grp-master-head .m-hover');
       const cs = b ? getComputedStyle(b) : null;
       return { present: !!b, opacity: cs ? cs.opacity : null, hasClass: !!b && b.classList.contains('m-hover') };
     })()`);
     check('bouton « délier » présent sur la ligne master, hover-only (opacité 0 au repos)',
       unlinkBtn.present === true && unlinkBtn.opacity === '0' && unlinkBtn.hasClass === true, JSON.stringify(unlinkBtn));
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .grp-master-head .m-hover').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-master-head .m-hover').click()`);
     const sentUnlink = await cdp.evaluate(`window.__sent`);
     check('clic → unlinkGroupMaster (id du groupe, geste réversible sans confirmation)',
       Array.isArray(sentUnlink) && sentUnlink.some((m) => m.type === 'unlinkGroupMaster' && m.id === 'g1'), JSON.stringify(sentUnlink));
 
     console.log('\n13quinquies. ⨯ de la ligne master — DISSOLUTION seule (plan repli-auto étape 15 : jamais de fermeture d\'onglet ; confirmation existante côté extension, cf. test-group-master-focus.js)');
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#groups .grp-master-head .m-out').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-master-head .m-out').click()`);
     const sentClose = await cdp.evaluate(`window.__sent`);
     check('clic ⨯ → dissolveGroup avec id du groupe seul (aucun identifiant d\'onglet transporté)',
       Array.isArray(sentClose) && sentClose.some((m) => m.type === 'dissolveGroup' && m.id === 'g1' && m.convId === undefined),
@@ -1770,8 +1822,8 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: doneButMasterListed })}, '*')`);
     await sleep(150);
     const vanish = await cdp.evaluate(`(() => ({
-      grpPresent: !!document.querySelector('#groups .grp'),
-      flatHasMaster: !!Array.from(document.querySelectorAll('#convs .conv .title')).find(t => t.textContent === 'Terminée déjà lue'),
+      grpPresent: !!document.querySelector('#flow .grp'),
+      flatHasMaster: !!Array.from(document.querySelectorAll('#flow > .conv .title')).find(t => t.textContent === 'Terminée déjà lue'),
     }))()`);
     check('groupe g.done : plus rendu du tout (inchangé, étape 11)', vanish.grpPresent === false, JSON.stringify(vanish));
     check('… mais sa master (encore listée) ne disparaît PAS des deux vues à la fois : retombe dans la liste plate',
@@ -1787,8 +1839,8 @@ async function run() {
     // exactement la valeur vue en repro) puis un redimensionnement RÉEL et
     // indépendant du contenu du groupe (spacer ajouté/retiré sur body) — le
     // ResizeObserver doit corriger tout seul, sans nouveau postMessage.
-    await cdp.evaluate(`document.querySelector('#groups .grp-rail').style.height = '0px'`);
-    const corrupted = await cdp.evaluate(`document.querySelector('#groups .grp-rail').getBoundingClientRect().height`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-rail').style.height = '0px'`);
+    const corrupted = await cdp.evaluate(`document.querySelector('#flow .grp-rail').getBoundingClientRect().height`);
     check('(mise en place) hauteur du rail corrompue à 0, comme la panne reproduite',
       corrupted === 0, String(corrupted));
     await cdp.evaluate(`(() => { const s = document.createElement('div'); s.id = 'qb-resize-spacer'; s.style.height = '400px'; document.body.appendChild(s); })()`);
@@ -1796,8 +1848,8 @@ async function run() {
     await cdp.evaluate(`document.getElementById('qb-resize-spacer').remove()`);
     await sleep(250);
     const healed = await cdp.evaluate(`(() => {
-      const rail = document.querySelector('#groups .grp-rail');
-      const ghost = document.querySelector('#groups .wave-ghost:not(.wave-add-row)');
+      const rail = document.querySelector('#flow .grp-rail');
+      const ghost = document.querySelector('#flow .wave-ghost:not(.wave-add-row)');
       // Le rail ne part plus du haut du corps mais du bas de la capsule (étape
       // 19) : sa hauteur attendue est l'écart entre les DEUX bouts mesurés,
       // jamais le seul offsetTop de la ligne fantôme.
@@ -1820,7 +1872,7 @@ async function run() {
       await cdp.evaluate(`(() => { ${setVars}; })()`);
       await sleep(80);
       const ringVsBody = await cdp.evaluate(`(() => {
-        const ico = document.querySelector('#groups .grp-body .member .conv .ico');
+        const ico = document.querySelector('#flow .grp-body .member .conv .ico');
         return { ringBg: getComputedStyle(ico, '::after').backgroundColor, bodyBg: getComputedStyle(document.body).backgroundColor };
       })()`);
       check(`thème ${name} : le fond de l'anneau égale EXACTEMENT le fond réel du panneau (même chaîne de variables)`,
@@ -1865,23 +1917,23 @@ async function run() {
     const GEO = `(() => {
       const r = (n) => { const b = n.getBoundingClientRect(); return { l: +b.left.toFixed(2), r: +b.right.toFixed(2), t: +b.top.toFixed(2), b: +b.bottom.toFixed(2), w: +b.width.toFixed(2) }; };
       const q = (s) => document.querySelector(s);
-      const master = q('#groups .grp-master-head .conv');
-      const member = q('#groups .member .conv');
+      const master = q('#flow .grp-master-head .conv');
+      const member = q('#flow .member .conv');
       // Référence plate : la première qui porte une barre de contexte VISIBLE —
       // une conv sans ctx la rend display:none, son rect vaut 0 et ne compare
       // plus rien (piège du premier passage de ce banc).
-      const flat = Array.from(document.querySelectorAll('#convs .conv')).find(function (c) {
+      const flat = Array.from(document.querySelectorAll('#flow > .conv')).find(function (c) {
         const b = c.querySelector('.bar-ctx');
         return b && getComputedStyle(b).display !== 'none';
-      }) || q('#convs .conv');
-      const grip = q('#groups .grp-head');
-      const head = q('#groups .grp-master-head');
+      }) || q('#flow > .conv');
+      const grip = q('#flow .grp-head');
+      const head = q('#flow .grp-master-head');
       const ctr = (n) => { const b = n.getBoundingClientRect(); return +(b.left + b.width / 2).toFixed(2); };
       return {
         masterL: r(master).l, memberL: r(member).l, flatL: r(flat).l,
         masterIco: ctr(master.querySelector('.ico')), memberIco: ctr(member.querySelector('.ico')), flatIco: ctr(flat.querySelector('.ico')),
         masterCtx: r(master.querySelector('.bar-ctx')), memberCtx: r(member.querySelector('.bar-ctx')), flatCtx: r(flat.querySelector('.bar-ctx')),
-        masterOut: r(q('#groups .grp-master-head .m-out')), memberOut: r(q('#groups .member .m-out')),
+        masterOut: r(q('#flow .grp-master-head .m-out')), memberOut: r(q('#flow .member .m-out')),
         grip: r(grip), head: r(head), masterRow: r(master),
         gripBorderBottom: parseFloat(getComputedStyle(grip).borderBottomWidth),
         // Étape 19 : le cadre est peint par le pseudo-élément (calque au-dessus
@@ -1891,7 +1943,7 @@ async function run() {
         headShadowPos: getComputedStyle(head, '::after').position,
         headBg: getComputedStyle(head).backgroundColor,
         gripBg: getComputedStyle(grip).backgroundColor,
-        unlinkPos: getComputedStyle(q('#groups .grp-master-head .m-hover')).position,
+        unlinkPos: getComputedStyle(q('#flow .grp-master-head .m-hover')).position,
       };
     })()`;
     // Invariants vérifiés à l'identique dans plusieurs états du monde : une
@@ -1903,13 +1955,17 @@ async function run() {
         Math.abs(g.masterL - g.memberL) < 0.5 && Math.abs(g.masterL - g.flatL) < 0.5, JSON.stringify(g));
       check(`${label} — axe de la colonne d'icône : master == membre == ligne plate`,
         Math.abs(g.masterIco - g.memberIco) < 0.5 && Math.abs(g.masterIco - g.flatIco) < 0.5, JSON.stringify(g));
-      // La largeur se compare à la ligne STANDARD D'UN GROUPE : une ligne plate
-      // n'a pas de croix du tout, sa barre est donc plus large par construction
-      // (seul son bord GAUCHE est comparable). C'est bien l'écart master/membre
-      // que l'user voit côte à côte.
-      check(`${label} — barre de contexte : master == membre (x ET largeur), même x que la ligne plate`,
-        Math.abs(g.masterCtx.l - g.memberCtx.l) < 0.5 && Math.abs(g.masterCtx.w - g.memberCtx.w) < 0.5
-        && Math.abs(g.masterCtx.l - g.flatCtx.l) < 0.5, JSON.stringify(g));
+      // 2026-08-07 — l'égalité porte désormais sur les DEUX bords, ligne plate
+      // comprise. Avant, la barre d'une ligne de groupe était plus courte :
+      // le bouton de sortie, enfant du flux, lui volait sa largeur. C'était
+      // « par construction », donc jamais mesuré — et c'est très exactement ce
+      // que l'user voyait. La construction a changé (overlay), l'invariant est
+      // maintenant le même pour les trois lignes.
+      check(`${label} — barre de contexte : master == membre == ligne plate (x, largeur ET bord droit)`,
+        Math.abs(g.masterCtx.l - g.memberCtx.l) < 0.5 && Math.abs(g.masterCtx.l - g.flatCtx.l) < 0.5
+        && Math.abs(g.masterCtx.w - g.memberCtx.w) < 0.5 && Math.abs(g.masterCtx.w - g.flatCtx.w) < 0.5
+        && Math.abs(g.masterCtx.r - g.memberCtx.r) < 0.5 && Math.abs(g.masterCtx.r - g.flatCtx.r) < 0.5,
+        JSON.stringify(g));
       check(`${label} — croix de droite : master == membre (x et largeur)`,
         Math.abs(g.masterOut.l - g.memberOut.l) < 0.5 && Math.abs(g.masterOut.w - g.memberOut.w) < 0.5, JSON.stringify(g));
       // Cadre teinté = grip + ligne master, sans interstice : la master est
@@ -1941,7 +1997,34 @@ async function run() {
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(200);
-    await checkMasterGeometry('rendu nominal');
+    const geoRest = await checkMasterGeometry('rendu nominal');
+
+    // 2026-08-07 — l'overlay ne doit RIEN pousser quand il apparaît : la
+    // géométrie au survol est la même qu'au repos, sinon la ligne « bougerait »
+    // sous le curseur et l'égalité avec une ligne plate ne tiendrait que dans
+    // l'état où personne ne regarde. Survol de la ligne d'un membre, mesure
+    // identique, puis retour.
+    const hoverAt = async (sel) => {
+      const c = await cdp.evaluate(`(() => { const b = document.querySelector('${sel}').getBoundingClientRect();
+        return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: c[0], y: c[1], buttons: 0 });
+      await sleep(150);
+    };
+    await hoverAt('#flow .member .conv');
+    const geoHover = await cdp.evaluate(GEO);
+    check('survol d\'une ligne de membre : le bouton de retrait apparaît…',
+      await cdp.evaluate(`getComputedStyle(document.querySelector('#flow .member .m-out')).opacity`) === '1');
+    check('… sans déplacer un seul pixel (barre de contexte et icône identiques au repos)',
+      Math.abs(geoHover.memberCtx.l - geoRest.memberCtx.l) < 0.5
+      && Math.abs(geoHover.memberCtx.r - geoRest.memberCtx.r) < 0.5
+      && Math.abs(geoHover.memberIco - geoRest.memberIco) < 0.5,
+      JSON.stringify({ rest: geoRest.memberCtx, hover: geoHover.memberCtx }));
+    check('… et la barre reste alignée sur celle d\'une ligne plate pendant le survol',
+      Math.abs(geoHover.memberCtx.r - geoHover.flatCtx.r) < 0.5
+      && Math.abs(geoHover.memberCtx.l - geoHover.flatCtx.l) < 0.5,
+      JSON.stringify(geoHover));
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, buttons: 0 });
+    await sleep(120);
 
     // Reload de fenêtre simulé : le panneau se vide (aucune source) puis se
     // repeuple — chemin de rendu qui avait produit la régression du lot 12.
@@ -1977,17 +2060,17 @@ async function run() {
       // Chromium (constaté flaky, thème tantôt dark tantôt light). Le membre
       // "done" (m2, jamais animé) porte exactement le même invariant d'anneau
       // opaque sans dépendre du minutage d'une pause d'animation.
-      const sels = { membre: '#groups .member .conv .ico-done', master: '#groups .grp-master-head .conv .ico' };
+      const sels = { membre: '#flow .member .conv .ico-done', master: '#flow .grp-master-head .conv .ico' };
       const withRail = {};
       for (const [who, sel] of Object.entries(sels)) withRail[who] = await ringDisc(sel);
-      await cdp.evaluate(`document.querySelector('#groups .grp-rail').style.display = 'none'`);
+      await cdp.evaluate(`document.querySelector('#flow .grp-rail').style.display = 'none'`);
       await sleep(80);
       for (const [who, sel] of Object.entries(sels)) {
         const bare = await ringDisc(sel);
         check(`thème ${name} — anneau ${who} STRICTEMENT opaque : le rail ne transparaît pas (image identique avec et sans rail)`,
           withRail[who] === bare);
       }
-      await cdp.evaluate(`document.querySelector('#groups .grp-rail').style.display = ''`);
+      await cdp.evaluate(`document.querySelector('#flow .grp-rail').style.display = ''`);
       await sleep(80);
     }
     for (const k of Object.keys(THEMES.dark)) await cdp.evaluate(`document.documentElement.style.removeProperty('${k}')`);
@@ -1999,13 +2082,13 @@ async function run() {
     await sleep(200);
     const fb = await cdp.evaluate(`(() => {
       const r = (n) => { const b = n.getBoundingClientRect(); return { l: +b.left.toFixed(2), r: +b.right.toFixed(2), t: +b.top.toFixed(2), b: +b.bottom.toFixed(2) }; };
-      const row = document.querySelector('#groups .grp-master-fallback');
-      const grip = document.querySelector('#groups .grp-head');
-      const head = document.querySelector('#groups .grp-master-head');
-      const member = document.querySelector('#groups .member .conv');
+      const row = document.querySelector('#flow .grp-master-fallback');
+      const grip = document.querySelector('#flow .grp-head');
+      const head = document.querySelector('#flow .grp-master-head');
+      const member = document.querySelector('#flow .member .conv');
       return { row: r(row), grip: r(grip), head: r(head), member: r(member),
-               out: r(document.querySelector('#groups .grp-master-head .m-out')),
-               memberOut: r(document.querySelector('#groups .member .m-out')) };
+               out: r(document.querySelector('#flow .grp-master-head .m-out')),
+               memberOut: r(document.querySelector('#flow .member .m-out')) };
     })()`);
     check('master hors de vue (fallback) — bord gauche aligné sur les lignes du groupe',
       Math.abs(fb.row.l - fb.member.l) < 0.5, JSON.stringify(fb));
@@ -2020,8 +2103,8 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: collapsedWithMaster })}, '*')`);
     await sleep(200);
     const col = await cdp.evaluate(`(() => {
-      const head = document.querySelector('#groups .grp-master-head');
-      return { gripHidden: getComputedStyle(document.querySelector('#groups .grp-head')).display === 'none',
+      const head = document.querySelector('#flow .grp-master-head');
+      return { gripHidden: getComputedStyle(document.querySelector('#flow .grp-head')).display === 'none',
                shadow: getComputedStyle(head, '::after').boxShadow, radius: getComputedStyle(head).borderTopLeftRadius };
     })()`);
     check('replié + master : la grip est masquée…', col.gripHidden === true, JSON.stringify(col));
@@ -2032,10 +2115,10 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: noMaster })}, '*')`);
     await sleep(200);
     const solo = await cdp.evaluate(`(() => {
-      const grip = document.querySelector('#groups .grp-head');
+      const grip = document.querySelector('#flow .grp-head');
       return { borderBottom: parseFloat(getComputedStyle(grip).borderBottomWidth),
-               hasMasterClass: document.querySelector('#groups .grp').classList.contains('has-master'),
-               masterRow: !!document.querySelector('#groups .grp-master-head') };
+               hasMasterClass: document.querySelector('#flow .grp').classList.contains('has-master'),
+               masterRow: !!document.querySelector('#flow .grp-master-head') };
     })()`);
     check('sans master : la grip redevient un cadre complet (bordure basse rétablie)',
       solo.borderBottom > 1 && solo.hasMasterClass === false && solo.masterRow === false, JSON.stringify(solo));
@@ -2056,8 +2139,8 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(200);
     const bandClip = await cdp.evaluate(`(() => {
-      const grip = document.querySelector('#groups .grp-head').getBoundingClientRect();
-      const head = document.querySelector('#groups .grp-master-head').getBoundingClientRect();
+      const grip = document.querySelector('#flow .grp-head').getBoundingClientRect();
+      const head = document.querySelector('#flow .grp-master-head').getBoundingClientRect();
       // Ruban pris au MILIEU de la hauteur : aux coins, la boîte est arrondie
       // (radius 6px) et le pixel du bord tombe HORS d'elle — on y verrait ce
       // qui passe derrière, ce qui n'est pas ce qu'on teste.
@@ -2071,7 +2154,7 @@ async function run() {
       clip: { x: side === 'left' ? bandClip.l : bandClip.r - 1, y: bandClip.t, width: 1, height: bandClip.h, scale: 1 },
     })).data;
     const moveMouse = (x, y) => cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 });
-    const masterCenter = await cdp.evaluate(`(() => { const b = document.querySelector('#groups .grp-master-head .conv').getBoundingClientRect();
+    const masterCenter = await cdp.evaluate(`(() => { const b = document.querySelector('#flow .grp-master-head .conv').getBoundingClientRect();
       return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
 
     // Fonds de sélection/survol : absents des THEMES ci-dessus (qui ne servaient
@@ -2093,7 +2176,7 @@ async function run() {
       await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: activeMaster })}, '*')`);
       await sleep(180);
       check(`thème ${name} — ligne master sélectionnée : le fond de sélection est bien peint (sinon le test ne prouve rien)`,
-        await cdp.evaluate(`getComputedStyle(document.querySelector('#groups .grp-master-head .conv')).backgroundColor`)
+        await cdp.evaluate(`getComputedStyle(document.querySelector('#flow .grp-master-head .conv')).backgroundColor`)
           !== 'rgba(0, 0, 0, 0)');
       for (const side of ['left', 'right'])
         check(`thème ${name} — … et la bande ${side === 'left' ? 'gauche' : 'droite'} du cadre est INTACTE (pixels identiques au repos)`,
@@ -2111,13 +2194,13 @@ async function run() {
       // (c) La propriété STRUCTURELLE, pas seulement le cas du jour : même un
       // enfant qui déborderait de toute la capsule avec un fond opaque ne peut
       // plus effacer le cadre (il est peint sur un calque au-dessus).
-      await cdp.evaluate(`(() => { const c = document.querySelector('#groups .grp-master-head .conv');
+      await cdp.evaluate(`(() => { const c = document.querySelector('#flow .grp-master-head .conv');
         c.style.background = '#ff00ff'; c.style.margin = '0 -40px'; })()`);
       await sleep(120);
       for (const side of ['left', 'right'])
         check(`thème ${name} — un fond d'enfant débordant NE PEUT PAS recouvrir le cadre (bande ${side === 'left' ? 'gauche' : 'droite'})`,
           await band(side) === ref[side]);
-      await cdp.evaluate(`(() => { const c = document.querySelector('#groups .grp-master-head .conv');
+      await cdp.evaluate(`(() => { const c = document.querySelector('#flow .grp-master-head .conv');
         c.style.background = ''; c.style.margin = ''; })()`);
       await sleep(120);
       for (const k of Object.keys(vars)) await cdp.evaluate(`document.documentElement.style.removeProperty('${k}')`);
@@ -2130,11 +2213,11 @@ async function run() {
     await sleep(200);
     const cross = await cdp.evaluate(`(() => {
       const r = (n) => { const b = n.getBoundingClientRect(); return { l: +b.left.toFixed(2), r: +b.right.toFixed(2) }; };
-      const grip = document.querySelector('#groups .grp-head').getBoundingClientRect();
-      const head = document.querySelector('#groups .grp-master-head').getBoundingClientRect();
-      const band = parseFloat(getComputedStyle(document.querySelector('#groups .grp-master-head'), '::after').boxShadow) || 1.5;
-      return { master: r(document.querySelector('#groups .grp-master-head .m-out')),
-               member: r(document.querySelector('#groups .member .m-out')),
+      const grip = document.querySelector('#flow .grp-head').getBoundingClientRect();
+      const head = document.querySelector('#flow .grp-master-head').getBoundingClientRect();
+      const band = parseFloat(getComputedStyle(document.querySelector('#flow .grp-master-head'), '::after').boxShadow) || 1.5;
+      return { master: r(document.querySelector('#flow .grp-master-head .m-out')),
+               member: r(document.querySelector('#flow .member .m-out')),
                frameR: Math.max(grip.right, head.right), frameL: Math.min(grip.left, head.left), band: 1.5 };
     })()`);
     check('croix de la master : strictement À L\'INTÉRIEUR de la bande droite du cadre',
@@ -2144,9 +2227,9 @@ async function run() {
 
     // (e) Le rail ne se dessine JAMAIS dans le cadre : intersection vide.
     const railVsFrame = await cdp.evaluate(`(() => {
-      const rail = document.querySelector('#groups .grp-rail').getBoundingClientRect();
-      const grip = document.querySelector('#groups .grp-head').getBoundingClientRect();
-      const head = document.querySelector('#groups .grp-master-head').getBoundingClientRect();
+      const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
+      const grip = document.querySelector('#flow .grp-head').getBoundingClientRect();
+      const head = document.querySelector('#flow .grp-master-head').getBoundingClientRect();
       const frame = { t: Math.min(grip.top, head.top), b: Math.max(grip.bottom, head.bottom) };
       return { overlap: +(Math.min(rail.bottom, frame.b) - Math.max(rail.top, frame.t)).toFixed(2),
                railTop: +rail.top.toFixed(2), frameBottom: +frame.b.toFixed(2) };
@@ -2161,10 +2244,10 @@ async function run() {
     // de l'étape 19 reste en ceinture : si les boîtes se recroisent un jour,
     // la pill doit repasser devant — vérifié aussi, sans dépendre du rendu.
     const pillVsRail = await cdp.evaluate(`(() => {
-      const pill = document.querySelector('#groups .wave-hdr.launch');
+      const pill = document.querySelector('#flow .wave-hdr.launch');
       if (!pill) return null;
       const b = pill.getBoundingClientRect();
-      const rail = document.querySelector('#groups .grp-rail').getBoundingClientRect();
+      const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
       return { railRight: rail.left + rail.width, pillLeft: b.left,
                z: getComputedStyle(pill).zIndex, pos: getComputedStyle(pill).position };
     })()`);
@@ -2229,11 +2312,113 @@ async function run() {
     warnState.groups[0].members.push({ key: 'm4', prompt: 'Coupée au clavier', wave: 2, asked: { model: 'opus', effort: 'high' }, convId: 'c6', status: 'interrupted', waveStatus: 'launched', canLink: false, canClose: false, note: '', hint: '' });
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: warnState })}, '*')`);
     await sleep(250);
-    const warnInk = await inkOffset('#groups .grp-body .conv .ico-interrupted');
+    const warnInk = await inkOffset('#flow .grp-body .conv .ico-interrupted');
     check('glyphe ⚠ : son ENCRE est centrée dans l\'anneau (≤ 0,75 px, le reste tient dans le tramage)',
       !!warnInk && !warnInk.empty && Math.abs(warnInk.dx) < 0.75 && Math.abs(warnInk.dy) < 0.75, JSON.stringify(warnInk));
     check('… et le centrage vient de la boîte (flex), pas d\'un décalage chiffré : aucune transform sur le glyphe',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('#groups .grp-body .conv .ico-interrupted'), '::before').transform`) === 'none');
+      await cdp.evaluate(`getComputedStyle(document.querySelector('#flow .grp-body .conv .ico-interrupted'), '::before').transform`) === 'none');
+
+    console.log('\n18. Tri « ordre des onglets » — le bloc de groupe s\'INTERCALE dans le flux (2026-08-07)');
+    // Avant ce lot, l'ordre était STRUCTUREL : deux conteneurs (#groups puis
+    // #convs), donc un groupe passait toujours avant la moindre conversation
+    // hors groupe, même si tous ses onglets étaient à l'extrême droite. Le
+    // rang d'un bloc vaut désormais celui du plus à gauche de ses onglets —
+    // maîtresse comprise. L'ordre du tableau `conversations` EST le rang :
+    // c'est state.js qui l'a trié par onglets, le webview ne re-dérive rien.
+    const fconv = (id, title, extra) => Object.assign({
+      id, title, model: 'Opus 4.8', ctx: { pct: 20 }, state: 'idle',
+      acked: true, active: false, tabOpen: true,
+    }, extra || {});
+    // Onglet 2 = la conv du groupe : elle a une conv plate à sa gauche ET une
+    // à sa droite, le seul agencement où « groupes en tête » et « ordre des
+    // onglets » ne peuvent pas se confondre.
+    const flowConvs = [
+      fconv('f1', 'Onglet 1 plate'),
+      fconv('gm', 'Onglet 2 membre', { groupId: 'gf', state: 'busy' }),
+      fconv('f3', 'Onglet 3 plate'),
+    ];
+    const flowGroup = {
+      id: 'gf', name: 'Groupe intercalé', hue: 200, collapsed: false, autoAdvance: true,
+      launchedWave: 1, nextWave: null, waveNotice: null, master: null,
+      members: [{
+        key: 'k1', prompt: 'Membre du groupe', wave: 1, asked: { model: 'opus', effort: 'high' },
+        convId: 'gm', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, note: '', hint: '',
+      }],
+    };
+    const flowState = (order, convs, groups) => ({
+      conversations: convs, groups, quota: STATE.quota, ui: { sortOrder: order },
+    });
+    // Lecture de l'ordre RÉEL du DOM : un bloc de groupe et une ligne plate
+    // sont des frères, c'est tout l'objet du lot.
+    const FLOW_ORDER = `Array.from(document.getElementById('flow').children).map(function (n) {
+      if (n.classList.contains('grp')) return 'GROUPE';
+      if (n.classList.contains('conv')) return (n.querySelector('.title') || {}).textContent;
+      return '(' + n.className + ')';
+    })`;
+    const flowOrderOf = async (order, convs, groups) => {
+      const msg = JSON.stringify({ type: 'state', state: flowState(order, convs, groups) });
+      await cdp.evaluate(`window.postMessage(${msg}, '*')`);
+      await sleep(180);
+      return (await cdp.evaluate(FLOW_ORDER)).join(' | ');
+    };
+
+    check('ordre des onglets : la conv de gauche passe AVANT le groupe, celle de droite APRÈS',
+      await flowOrderOf('tabOrder', flowConvs, [flowGroup])
+        === 'Onglet 1 plate | GROUPE | Onglet 3 plate',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+
+    // Un seul nœud par conversation, où qu'il tombe dans le flux (invariant
+    // historique : jamais deux endroits du DOM pour la même conv).
+    check('… et la conv du groupe n\'apparaît pas AUSSI en ligne plate',
+      await cdp.evaluate(`document.querySelectorAll('#flow > .conv').length`) === 2
+      && await cdp.evaluate(`document.querySelectorAll('.conv .title').length`) === 3);
+
+    check('les autres modes de tri sont INCHANGÉS : « dernière activité » garde les groupes en tête',
+      await flowOrderOf('lastActivity', flowConvs, [flowGroup])
+        === 'GROUPE | Onglet 1 plate | Onglet 3 plate',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+    check('… idem « état d\'abord »',
+      await flowOrderOf('statusFirst', flowConvs, [flowGroup])
+        === 'GROUPE | Onglet 1 plate | Onglet 3 plate',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+
+    // La MAÎTRESSE compte comme n'importe quel onglet du bloc : c'est une conv
+    // du groupe, simplement pas un membre. Master = l'onglet le plus à droite,
+    // aucun membre lié → le bloc tombe à ce rang, pas en tête.
+    const masterLast = JSON.parse(JSON.stringify(flowGroup));
+    masterLast.master = { convId: 'f3', title: 'Onglet 3 plate', listed: true, tabTitle: null, hint: '', status: 'idle' };
+    masterLast.members[0].convId = null;
+    masterLast.members[0].status = 'not-linked';
+    masterLast.members[0].canLink = true;
+    check('rang du bloc = son onglet le plus à GAUCHE, maîtresse comprise (ici la maîtresse est la plus à droite)',
+      await flowOrderOf('tabOrder', [flowConvs[0], flowConvs[2]], [masterLast])
+        === 'Onglet 1 plate | GROUPE',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+
+    const masterFirst = JSON.parse(JSON.stringify(masterLast));
+    masterFirst.master = { convId: 'f1', title: 'Onglet 1 plate', listed: true, tabTitle: null, hint: '', status: 'idle' };
+    check('… et le bloc repasse en tête dès que sa maîtresse est l\'onglet le plus à gauche',
+      await flowOrderOf('tabOrder', [flowConvs[0], flowConvs[2]], [masterFirst])
+        === 'GROUPE | Onglet 3 plate',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+
+    // Aucun onglet matché du tout (tâches jamais lancées) : rang Infinity, donc
+    // fin de flux — même convention qu'une conversation sans onglet dans
+    // state.js, et surtout jamais un NaN qui rendrait le tri instable.
+    const noTabGroup = JSON.parse(JSON.stringify(flowGroup));
+    noTabGroup.members[0].convId = null;
+    noTabGroup.members[0].status = 'not-linked';
+    noTabGroup.members[0].canLink = true;
+    check('groupe sans aucun onglet matché : rang Infinity → fin de flux, jamais un tri cassé',
+      await flowOrderOf('tabOrder', [flowConvs[0], flowConvs[2]], [noTabGroup])
+        === 'Onglet 1 plate | Onglet 3 plate | GROUPE',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+
+    // Le message « aucune conversation » descend en fin de flux : un groupe de
+    // tâches jamais lancées doit rester visible AU-DESSUS de lui.
+    check('aucune conversation mais un groupe en attente : le groupe se rend, le message vient après',
+      await flowOrderOf('tabOrder', [], [noTabGroup]) === 'GROUPE | (empty)',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
   } finally {
     if (cdp) cdp.close();
     try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore', timeout: 5000 }); } catch {}

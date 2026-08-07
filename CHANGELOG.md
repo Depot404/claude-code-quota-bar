@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.28.0] - 2026-08-07
+
+### Changed
+- **A row inside a group is now pixel-for-pixel the same row as one outside it.** Same context bar, same offsets, same right edge. Until now every group row was ~19 px shorter than a flat one: the permanent red cross on the right was a flow child, so it ate that width whether you looked at it or not — the same defect the master line had already been cured of (its "Unlink" chip was pulled out of the flow for exactly this reason). The removal button follows the same pattern now: an overlay, revealed on hover, with zero footprint at rest *and* on hover. Proven by measurement, in both themes, at rest, on hover and after a window reload.
+- **That red cross is an arrow, and it is no longer red.** Nothing about it closes anything: it takes the conversation *out of its group* — the row reappears in the flat list, the tab is untouched. A cross said "close", which the panel simply never does: the only way to make a row disappear is still to close its tab in VS Code. The master's ✕ (dissolve the group, keep every conversation) keeps its shape but loses the error colour too, and is likewise revealed on hover.
+- **In "Tab order", a group now takes its place in the flow** instead of always sitting on top. Its rank is that of its leftmost tab, master included — so a conversation whose tab is to the left of the group's shows *above* it, and one to the right shows below. Inside a group, order stays by wave (never by tabs). "Last activity" and "Status first" are unchanged: groups on top. Technically the panel used to render two separate containers, which made that ordering structural rather than a choice; it is now a single flow.
+
+### Fixed
+- **`~/.claude/panel-tabs/` no longer collects orphan `.json.tmp` files** (17 had piled up here). Each window publishes its tab list by writing `<pid>.json.tmp` then renaming it; when the rename lost a race with a neighbour reading the target — routine on Windows — the temporary file stayed behind forever, since the sweep only knew about `<pid>.json`. Two locks now: a failed publish deletes its own leftover immediately, and the sweep collects the ones left by dead instances. A `.tmp` belonging to a live instance is never touched, and never read — it is not a publication.
+
+### Removed
+- **The `closeConvTab` message handler.** No button had emitted it for several releases (the panel stopped acting on VS Code tabs when group crosses became metadata-only); leaving it wired kept the door open for the next button that assumed it could close a tab. The relay's responder side stays, so a neighbouring window still running an older version keeps working.
+
 ## [2.27.15] - 2026-08-07
 
 ### Fixed

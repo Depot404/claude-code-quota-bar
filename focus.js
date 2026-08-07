@@ -128,10 +128,10 @@ function raiseWindow(tabLabel) {
   }
 }
 
-// Fermeture de l'onglet d'une conversation (badge ⨯ des membres de groupe,
-// lot 2). Même problème d'identité que le focus, donc même chemin exactement :
-// findTab par libellé, et relais fichier si l'onglet vit dans une autre fenêtre.
-// `tabGroups.close` est, lui, une API PUBLIQUE (contrairement à
+// Fermeture de l'onglet d'une conversation. Plus AUCUN bouton du panneau ne la
+// demande (cf. bas de fichier) : seule la branche action:'close' du relais y
+// mène encore, pour répondre à une fenêtre voisine restée sur une version
+// antérieure. `tabGroups.close` est une API PUBLIQUE (contrairement à
 // openEditorAtIndex qui n'agit que sur le groupe actif) : pas de focus à voler
 // pour fermer.
 async function closeTab(match) {
@@ -206,30 +206,17 @@ async function focusConversation(msg) {
   });
 }
 
-// Point d'entrée du badge ⨯ (message `closeConvTab` du webview). Ne ferme QUE
-// l'onglet : la conversation, elle, est terminée et son transcript reste. Rien
-// n'est deviné — sans correspondance de libellé ici, on relaie, et si personne
-// ne répond il ne se passe rien (l'onglet reste ouvert, l'utilisateur le voit).
-async function closeConversationTab(msg) {
-  const title = msg && msg.title;
-  const tabTitle = (msg && msg.tabTitle) || null;
-  if (!norm(title) && !norm(tabTitle)) return;
-  const match = findTab(title, tabTitle);
-  if (match) {
-    try { await closeTab(match); } catch (e) { log('close failed: %s', e && e.message); }
-    return;
-  }
-  writeRequest({
-    action: 'close',
-    title,
-    tab_title: tabTitle,
-    session_id: (msg && msg.id) || null,
-    ts: Date.now(),
-    origin_pid: process.pid,
-  });
-}
+// PLUS AUCUN ÉMETTEUR DE FERMETURE ICI (2026-08-07). Le panneau n'agit que sur
+// les métadonnées depuis le plan repli-auto étape 15, et il ne supprime jamais
+// une ligne : fermer un onglet est un geste que seul VS Code offre désormais.
+// L'ancien `closeConversationTab` (badge ⨯ du webview) est donc parti avec son
+// message `closeConvTab` et son câblage.
+// Le RÉPONDEUR du relais, lui, reste (closeTab + la branche action:'close' de
+// createFocusRelay) : une fenêtre voisine restée sur une version antérieure
+// peut encore écrire une telle requête, et l'ignorer laisserait son ⨯ sans
+// effet visible. Il disparaîtra quand plus aucune version émettrice ne circule.
 
 module.exports = {
-  focusConversation, closeConversationTab, createFocusRelay, findTab,
+  focusConversation, createFocusRelay, findTab,
   REQUEST_PATH, REQUEST_TTL_MS,
 };

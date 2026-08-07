@@ -8,7 +8,7 @@ const { spawn, execSync, execFile } = require('child_process');
 const WebSocket = require('ws');
 const { ClaudePanelProvider } = require('./panel');
 const { createStateEngine, DEFAULTS: STATE_DEFAULTS, projectDirFor, readSessionsState } = require('./state');
-const { focusConversation, closeConversationTab, createFocusRelay } = require('./focus');
+const { focusConversation, createFocusRelay } = require('./focus');
 const { createTabTracker, localActiveLabel } = require('./tabs');
 const { createAckTracker } = require('./ack');
 // Journal d'instrumentation du chemin d'ack (étape 18 phase 1, 5e récidive des
@@ -317,7 +317,12 @@ function activate(context) {
     // vague ») : le handler reste câblé, inoffensif, aucun bouton ne l'appelle
     // plus (convention du projet, cf. CLAUDE.md de ce dossier).
     addToGroup: (msg) => addToGroup(msg && msg.id),
-    closeConvTab: (msg) => closeConversationTab(msg),
+    // PAS de `closeConvTab` ici, et c'est structurel (2026-08-07) : le panneau
+    // ne ferme plus aucun onglet depuis le plan repli-auto étape 15, et il ne
+    // supprime jamais une ligne — le seul moyen de faire disparaître une
+    // conversation de la liste reste de fermer son onglet dans VS Code. Un
+    // handler resté câblé aurait rouvert cette porte au premier bouton qui
+    // aurait cru pouvoir s'en servir.
     // Porte de sortie d'un ⌂ posé par erreur (survol de la ligne master,
     // hover-only) : dissocier sans confirmation, geste réversible (on peut
     // relier tout de suite après) — même esprit que `unsetMaster` côté store.

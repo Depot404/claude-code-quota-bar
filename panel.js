@@ -617,9 +617,10 @@ function renderHtml(webview) {
   }
   .gbtn:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
   /* Ligne master (plan repli-auto étape 9) : même wrapping que .m-head/.m-slot
-     (défini plus bas) pour un membre — ✕ et « délier » restent des enfants
-     FIXES du même flux flex, jamais en position: absolute : le titre tronqué
-     de la master (ellipsis, dans .conv) s'arrête avant eux par construction.
+     (défini plus bas) pour un membre — et, depuis 2026-08-07, même sortie de
+     flux pour ses deux boutons (✕ de dissolution, chip « délier ») : aucun
+     n'a plus d'emprise sur la largeur de la ligne, qui vaut donc celle d'une
+     ligne plate au pixel, au repos comme au survol.
      Premier enfant DE FLUX du corps (avant les vagues/membres) : mêmes
      offsets horizontaux que .m-head (décision 2, alignement unifié), donc que
      la liste plate — rien à ajouter ici, .grp-master-head ne pose aucun
@@ -849,12 +850,13 @@ function renderHtml(webview) {
   .wave-ctrl { margin: 2px 0 10px; }
   .wave-ctrl:empty { display: none; margin: 0; }
   .wave-ctrl .btn { margin-top: 3px; }
-  /* Ligne + croix rouge dans le MÊME flux flex (lot 5 §2bis) : .m-slot
-     rétrécit (min-width: 0, comme tout maillon de la chaîne de troncature
-     du lot 4 §3), la croix reste fixe — l'ellipsis du titre s'arrête avant
-     elle, plus de recouvrement possible par construction (contraste avec
-     l'ancien .m-out en position: absolute). */
-  .m-head { display: flex; align-items: flex-start; gap: 4px; min-width: 0; }
+  /* 2026-08-07 — la ligne d'un membre n'a plus QU'un enfant de flux : sa
+     conversation. Le bouton de retrait est sorti du flux (cf. .m-out plus
+     bas), .m-slot occupe donc toute la largeur, exactement comme une ligne
+     plate. position:relative fait de .m-head le repère de cet overlay :
+     son bord droit vaut celui de la colonne de contenu, donc celui d'une
+     ligne plate — le bouton ne peut pas se caler ailleurs. */
+  .m-head { position: relative; display: flex; align-items: flex-start; gap: 4px; min-width: 0; }
   .m-slot { flex: 1; min-width: 0; }
   /* Titre d'un MEMBRE : un cran sous tout le reste (2026-08-06). Le rang se lit
      alors dans la typo autant que dans le rail — la maîtresse et les convs hors
@@ -889,8 +891,8 @@ function renderHtml(webview) {
     font-size: 10px; font-style: italic; color: var(--muted); opacity: .75;
   }
   /* Actions d'un membre : sous sa ligne, alignées sur le titre (16 px d'icône +
-     8 px de gouttière). Le retrait (croix rouge cerclée, lot 4 §1, devenue
-     l'unique sortie au lot 5) est passé inline sur la ligne elle-même — le
+     8 px de gouttière). Le retrait (lot 4 §1, devenu l'unique sortie au lot 5)
+     vit sur la ligne elle-même, en overlay au survol depuis 2026-08-07 — le
      pied ne garde plus que « Link… » et ◂/▸ ; vide, il ne réserve plus de
      hauteur. ◂/▸ (déplacer une tâche en file vers une vague voisine) restent
      au survol : action d'édition ponctuelle du formulaire de vagues, hors
@@ -902,6 +904,15 @@ function renderHtml(webview) {
   /* .grp-master-head : même porte de sortie « au survol » que .member
      (plan repli-auto étape 9 — le bouton « délier » de la ligne master). */
   .member:hover .m-hover, .grp-master-head:hover .m-hover, .m-hover:focus-visible { opacity: 1; }
+  /* Le bouton de retrait est un OVERLAY (cf. .m-out) : le pointeur qui le vise
+     SORT de .conv — il n'en est pas un enfant — et éteindrait son fond de
+     survol, si bien que le fond du bouton (calé sur celui d'une ligne
+     survolée) se détacherait en pastille au moment précis où on le vise. Le
+     survol de la ligne ENTIÈRE le rallume. .active garde la main : une ligne
+     sélectionnée ne repasse jamais en teinte de survol. */
+  .member:hover .conv:not(.active), .grp-master-head:hover .conv:not(.active) {
+    background: var(--vscode-list-hoverBackground);
+  }
   /* « Délier » : hors du flux (étape 13). Dans le flux flex de la ligne
      master, ce chip invisible au repos COÛTAIT quand même sa largeur : il
      rétrécissait la ligne de ~42px (mesuré en CDP) — d'où la croix et la barre
@@ -912,25 +923,51 @@ function renderHtml(webview) {
      top = margin-top de la croix (4px), même ligne de base qu'elle (le corps
      n'a plus de padding-top sous une capsule englobante) ; right = croix
      (15px) + gouttière (4px) + 4px. */
-  .grp-master-head .m-hover { position: absolute; top: 4px; right: 23px; }
-  /* Croix rouge cerclée = seule action de sortie d'un membre (lot 5), inline
-     à droite de sa ligne — élément du flux flex de .m-head (flex: none),
-     JAMAIS en position: absolute (lot 5 §2bis, fix de la superposition avec
-     le texte) : le titre tronqué (ellipsis, .m-slot) s'arrête avant elle par
-     construction. Distincte du badge ⨯ de fermeture d'onglet de la liste
-     générale (celui-ci ferme un onglet ; celle-ci ne touche QUE les
-     métadonnées du groupe — plan repli-auto étape 15, le panneau n'agit
-     plus jamais sur les onglets VS Code depuis les croix de groupe). */
+  /* Décalage du chip « délier » : la largeur du bouton de retrait (15px) plus
+     sa gouttière (4px), à partir du bord de la colonne de contenu — jamais un
+     nombre recopié : la même valeur --grp-bleed que le bouton lui-même. */
+  .grp-master-head .m-hover { position: absolute; top: 4px; right: calc(var(--grp-bleed) + 19px); }
+  /* Sortie d'une conversation de son groupe (2026-08-07) — DEUX exigences que
+     seul un overlay satisfait ensemble :
+       1. « une ligne de groupe et une ligne plate sont strictement
+          identiques » : même barre de contexte, mêmes offsets. Le moindre
+          enfant de flux à droite (l'ancienne croix rouge, flex: none) rognait
+          la ligne de ~19px — c'est très exactement ce que l'étape 13 avait
+          déjà corrigé sur la ligne master en sortant son chip « délier » du
+          flux. Ici, on applique le MÊME patron à toutes les lignes.
+       2. « le panneau ne supprime jamais une ligne » : ce bouton ne touche
+          QUE les métadonnées du groupe (removeMember) — la conversation et
+          son onglet restent, elle repart simplement en liste plate. D'où la
+          flèche et non plus une croix : plus aucune croix rouge sur une
+          ligne, une croix se lit « fermer », ce que ce geste ne fait pas.
+     Zéro emprise au repos (opacity 0, hors flux) et zéro emprise au survol :
+     l'overlay ne pousse rien, la géométrie est la même dans les deux états.
+     Le fond opaque masque la fin du titre qu'il recouvre au survol ; il est
+     calé sur le fond de la ligne survolée, jamais sur celui du panneau. */
   .m-out {
-    flex: none; margin-top: 4px;
+    position: absolute; top: 4px; right: 0; z-index: 3;
     width: 15px; height: 15px; box-sizing: border-box; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
-    border-radius: 50%; border: 1px solid var(--vscode-errorForeground, #f14c4c);
-    background: var(--vscode-sideBar-background, var(--vscode-editor-background, transparent));
-    color: var(--vscode-errorForeground, #f14c4c);
-    font-size: 9px; line-height: 1; cursor: pointer;
+    border-radius: 50%; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
+    background: var(--vscode-list-hoverBackground, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+    color: var(--muted);
+    font-size: 10px; line-height: 1; cursor: pointer;
+    opacity: 0; transition: opacity .1s;
   }
-  .m-out:hover { background: var(--vscode-errorForeground, #f14c4c); color: var(--vscode-editor-background, #fff); }
+  /* La ligne master vit dans une boîte qui DÉBORDE de la colonne de contenu
+     (padding = --grp-bleed, pour que le cadre teinté sorte sans décaler quoi
+     que ce soit) : sans ce rappel, right:0 collerait le bouton sur la bande
+     du cadre au lieu du bord de la colonne — donc à un autre x que celui d'un
+     membre, l'égalité même que ce lot doit tenir. */
+  .grp-master-head .m-out { right: var(--grp-bleed); }
+  .member:hover .m-out, .grp-master-head:hover .m-out, .m-out:focus-visible { opacity: 1; }
+  .m-out:hover { color: var(--vscode-foreground); border-color: var(--muted); }
+  /* Ligne SÉLECTIONNÉE : son fond n'est pas celui du survol — le bouton suit,
+     sinon il se détache en pastille sur la seule ligne active. :has() n'est
+     pas indispensable (sans lui la règle saute et le repli reste correct). */
+  .m-head:has(.conv.active) .m-out, .grp-master-head:has(.conv.active) .m-out {
+    background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground));
+  }
   .chip {
     font-size: 10px; padding: 0 5px; border-radius: 8px; border: 0; cursor: default;
     background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
@@ -957,8 +994,11 @@ function renderHtml(webview) {
     </div>
     <div class="sec-body" id="convBody">
       <div class="canary" id="canary">${vscode.l10n.t('⚠ Claude tabs not detected — viewType changed?')}</div>
-      <div id="groups"></div>
-      <div id="convs"></div>
+      <!-- Conteneur UNIQUE (2026-08-07) : blocs de groupe et lignes plates
+           sont frères. Deux conteneurs (#groups puis #convs) rendaient l'ordre
+           STRUCTUREL — un groupe passait forcément avant toute conversation
+           hors groupe, quel que soit le rang de ses onglets. -->
+      <div id="flow"></div>
       <div class="batch" id="batch">
         <div class="sec-head sub" id="newConvHead" title="${vscode.l10n.t('Open several conversations at once, each with its own prompt, model and effort.')}">
           <span class="chevron" id="newConvChevron">▾</span>
@@ -995,8 +1035,7 @@ function renderHtml(webview) {
     const s = (L10N_BUNDLE && L10N_BUNDLE[message]) || message;
     return args.length ? s.replace(/\\{(\\d+)\\}/g, function (_, i) { return args[Number(i)] !== undefined ? args[Number(i)] : ''; }) : s;
   }
-  const convsEl = document.getElementById('convs');
-  const groupsEl = document.getElementById('groups');
+  const flowEl = document.getElementById('flow');
   const quotaEl = document.getElementById('quota');
   const countEl = document.getElementById('convCount');
   const soundsToggleEl = document.getElementById('soundsToggle');
@@ -1187,23 +1226,65 @@ function renderHtml(webview) {
     if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null);
   }
 
+  // ── Flux unique : blocs de groupe et lignes plates, dans le MÊME ordre ────
+  //
   // « total » compte TOUTES les conversations (groupées comprises) : le compteur
   // de l'en-tête et le message « aucune conversation » parlent de la section
   // entière, pas seulement de ce qui reste hors des groupes.
-  function renderConvs(list, total, seen) {
-    countEl.textContent = total ? String(total) : '';
+  //
+  // MODE « ordre des onglets » (2026-08-07) : un bloc de groupe s'INTERCALE
+  // dans le flux au rang du plus à gauche de ses onglets (maîtresse comprise) —
+  // une conversation hors groupe dont l'onglet est plus à gauche s'affiche donc
+  // AU-DESSUS du groupe. Le rang ne se re-dérive pas ici : c'est la position
+  // dans la liste que l'extension a déjà triée par onglets (state.js, tabOrder),
+  // seule source. Un groupe dont aucun membre listé n'a d'onglet matché →
+  // Infinity, comme une conversation sans onglet : il retombe en fin de flux
+  // sans bousculer l'ordre relatif de ses pareils (tri stable, via seq).
+  //
+  // AUTRES MODES (lastActivity / statusFirst) : inchangé — les groupes en tête,
+  // puis les lignes plates. Le classement d'un bloc par « dernière activité »
+  // ou par « état » demanderait de choisir laquelle de ses conversations parle
+  // pour lui ; ce n'est pas ce lot.
+  function layoutFlow(blocks, flat, convs, order, seen) {
+    countEl.textContent = convs.length ? String(convs.length) : '';
 
-    let empty = convsEl.querySelector('.empty');
-    if (!total) {
-      if (!empty) convsEl.appendChild(el('div', 'empty', t('No recent conversation here.')));
-      return;
+    const items = [];
+    if (order === 'tabOrder') {
+      const rankOf = new Map();
+      convs.forEach(function (c, i) { rankOf.set(c.id, i); });
+      const rankOfId = function (id) { return rankOf.has(id) ? rankOf.get(id) : Infinity; };
+      blocks.forEach(function (b, i) {
+        let r = Infinity;
+        b.convIds.forEach(function (id) { const v = rankOfId(id); if (v < r) r = v; });
+        items.push({ rank: r, seq: i, node: b.root });
+      });
+      flat.forEach(function (c, i) {
+        seen.add(c.id);
+        items.push({ rank: rankOfId(c.id), seq: blocks.length + i, node: rowFor(c).root });
+      });
+      // Infinity - Infinity vaut NaN : le rang se compare d'abord à l'identique
+      // (l'ordre d'origine tranche alors), jamais par soustraction seule.
+      items.sort(function (a, b) { return a.rank === b.rank ? a.seq - b.seq : a.rank - b.rank; });
+    } else {
+      blocks.forEach(function (b) { items.push({ node: b.root }); });
+      flat.forEach(function (c) {
+        seen.add(c.id);
+        items.push({ node: rowFor(c).root });
+      });
     }
-    if (empty) empty.remove();
 
-    list.forEach(function (c, i) {
-      if (seen) seen.add(c.id);
-      place(convsEl, i, rowFor(c).root);
-    });
+    items.forEach(function (it, i) { place(flowEl, i, it.node); });
+
+    // « Aucune conversation » : en FIN de flux, jamais à la place d'un groupe —
+    // un groupe dont aucune tâche n'est encore lancée n'a aucune conversation
+    // à montrer et doit quand même se rendre.
+    let empty = flowEl.querySelector('.empty');
+    if (!convs.length) {
+      if (!empty) empty = el('div', 'empty', t('No recent conversation here.'));
+      place(flowEl, items.length, empty);
+    } else if (empty) {
+      empty.remove();
+    }
   }
 
   // Une ligne par conversation, créée une fois et réutilisée — c'est ce qui
@@ -1436,13 +1517,16 @@ function renderHtml(webview) {
     const relaunchChip = el('button', 'chip act', t('Relaunch'));
     relaunchChip.type = 'button';
     relaunchChip.title = t('Reopen a conversation for this task, with the same prompt, model and effort');
-    // Croix rouge cerclée = SEULE action de sortie d'un membre (lot 5, révisée
+    // Flèche de RETRAIT = SEULE action de sortie d'un membre (lot 5, révisée
     // par le plan repli-auto étape 15 : le panneau agit sur les métadonnées,
     // jamais sur les onglets VS Code) — retrait du groupe SEUL, l'onglet n'est
     // plus touché ; la conv redevient une ligne plate si elle a transcript+
     // onglet. Aucun garde-fou busy/waiting : retirer des métadonnées est
     // inoffensif, la conversation elle-même continue sans interruption.
-    const outChip = el('button', 'm-out', '✕');
+    // 2026-08-07 — c'était une croix rouge : elle disait « fermer », alors que
+    // rien ne se ferme et qu'aucune ligne ne disparaît jamais par le panneau.
+    // La flèche dit ce qui se passe vraiment : elle SORT du groupe.
+    const outChip = el('button', 'm-out', '⤴');
     outChip.type = 'button';
     outChip.title = t('Remove from this group (the conversation and its tab are kept)');
     // Édition en cours de route (lot 4, décision 5) : déplacer une tâche PAS
@@ -1534,15 +1618,23 @@ function renderHtml(webview) {
 
   // « Ce qui reste à faire » (étape 11) : un groupe ENTIER terminé (membres ET
   // maîtresse, si désignée — g.done, group-done.js) n'a plus rien à montrer,
-  // pas même une capsule. Filtré ICI, en amont de la boucle, pour que gi
-  // (index de placement DOM) retombe sur la même suite que ce qui reste
-  // effectivement rendu — même principe que le filtre !c.groupId appliqué
-  // à la liste plate avant renderConvs. Le store, lui, GARDE le groupe :
-  // rien n'est muté, prune() le nettoiera plus tard (cf. CLAUDE.md).
+  // pas même une capsule. Filtré ICI, en amont de la boucle — même principe
+  // que le filtre !c.groupId appliqué à la liste plate. Le store, lui, GARDE
+  // le groupe : rien n'est muté, prune() le nettoiera plus tard (cf. CLAUDE.md).
+  //
+  // NE PLACE PLUS RIEN dans le DOM (2026-08-07) : la fonction construit et met
+  // à jour les nœuds, puis rend la liste des BLOCS (dans l'ordre du store) avec
+  // les conversations que chacun affiche. C'est layoutFlow() qui décide où ils
+  // tombent — sans quoi les groupes seraient toujours au-dessus, par structure.
   function renderGroups(groups, convById, seen) {
     const live = new Set();
-    groups.filter(function (g) { return !g.done; }).forEach(function (g, gi) {
+    const blocks = [];
+    groups.filter(function (g) { return !g.done; }).forEach(function (g) {
       live.add(g.id);
+      // Conversations RÉELLEMENT affichées par ce bloc (maîtresse listée +
+      // membres liés encore rendus) : c'est sur elles, et rien d'autre, que se
+      // calcule son rang d'onglet.
+      const convIds = [];
       let node = groupNodes.get(g.id);
       if (!node) { node = createGroupNode(g); groupNodes.set(g.id, node); }
       node.id = g.id;
@@ -1595,6 +1687,7 @@ function renderHtml(webview) {
         const conv = (ms.listed && ms.convId) ? convById[ms.convId] : null;
         if (conv) {
           seen.add(conv.id);
+          convIds.push(conv.id);
           place(node.masterSlot, 0, rowFor(conv).root);
           while (node.masterSlot.children.length > 1) node.masterSlot.lastChild.remove();
         } else {
@@ -1728,6 +1821,7 @@ function renderHtml(webview) {
           mn.conv = c || null;
           if (c) {
             seen.add(c.id);
+            convIds.push(c.id);
             place(mn.slot, 0, rowFor(c).root);
             // La ligne de conv occupe la place : tout ce qui traîne d'un rendu
             // précédent (ligne « en attente ») doit partir.
@@ -1810,13 +1904,14 @@ function renderHtml(webview) {
       // bougent SANS nouveau postMessage (cf. commentaire à sa définition).
       measureRail(node);
 
-      place(groupsEl, gi, node.root);
+      blocks.push({ id: g.id, root: node.root, convIds: convIds });
     });
     groupNodes.forEach(function (node, id) {
       if (live.has(id)) return;
       node.root.remove();
       groupNodes.delete(id);
     });
+    return blocks;
   }
 
   // ── Création groupée : formulaire (lot 1, toujours visible depuis le lot 12) ─
@@ -2620,13 +2715,18 @@ function renderHtml(webview) {
     const masterIds = new Set();
     groups.forEach(function (g) { if (!g.done && g.master && g.master.listed && g.master.convId) masterIds.add(g.master.convId); });
     const seen = new Set();
-    renderGroups(groups, convById, seen);
-    renderConvs(convs.filter(function (c) { return !c.groupId && !masterIds.has(c.id); }), convs.length, seen);
+    // renderUi AVANT le flux : le mode de tri qu'il reflète est celui que
+    // layoutFlow applique — une seule lecture de ui.sortOrder pour les deux,
+    // jamais un select qui dit un ordre et un DOM qui en rend un autre.
+    renderUi(msg.state && msg.state.ui);
+    const order = (msg.state && msg.state.ui && msg.state.ui.sortOrder) || 'tabOrder';
+    const blocks = renderGroups(groups, convById, seen);
+    const flat = convs.filter(function (c) { return !c.groupId && !masterIds.has(c.id); });
+    layoutFlow(blocks, flat, convs, order, seen);
     pruneRows(seen);
     lastQuota = (msg.state && msg.state.quota) || {};
     renderQuota(lastQuota);
     renderSoundsToggle(!!(msg.state && msg.state.sounds && msg.state.sounds.enabled));
-    renderUi(msg.state && msg.state.ui);
     canaryEl.classList.toggle('show', !!(msg.state && msg.state.canary));
     renderBatch(msg.state && msg.state.batch);
   });

@@ -89,18 +89,30 @@ function publish(labels) {
     fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, ts: Date.now(), labels }));
     fs.renameSync(tmp, OWN_FILE);
   } catch (e) {
+    // Le rename ÉCHOUE parfois sous Windows (le fichier cible est ouvert en
+    // lecture par une voisine à l'instant même) — et le .tmp restait alors sur
+    // le disque pour toujours : personne ne le relisait, personne ne le
+    // nettoyait (otherLabels ne connaissait que les <pid>.json). 17 orphelins
+    // constatés le 2026-08-07. On repart donc propre, quitte à republier au
+    // prochain événement d'onglet : le sens de l'échec ne change pas, une
+    // publication manquée ne masque jamais une conversation (l'union se lit
+    // sur les fichiers présents, et l'ancien <pid>.json reste valable).
+    try { fs.unlinkSync(tmp); } catch {}
     log('tabs publish failed: %s', e && e.message);
   }
 }
 
 // Libellés publiés par les AUTRES fenêtres, en nettoyant au passage les fichiers
-// d'instances mortes (VS Code fermé brutalement : dispose() n'a pas tourné).
+// d'instances mortes (VS Code fermé brutalement : dispose() n'a pas tourné) —
+// y compris leurs .tmp restés d'un rename raté (cf. publish ci-dessus). Un .tmp
+// d'instance VIVANTE, lui, ne se touche pas : elle est peut-être en train de
+// l'écrire.
 function otherLabels() {
   let files;
   try { files = fs.readdirSync(TABS_DIR); } catch { return []; }
   const out = [];
   for (const f of files) {
-    const m = /^(\d+)\.json$/.exec(f);
+    const m = /^(\d+)\.json(\.tmp)?$/.exec(f);
     if (!m) continue;
     const pid = Number(m[1]);
     if (pid === process.pid) continue;
@@ -109,6 +121,10 @@ function otherLabels() {
       try { fs.unlinkSync(file); } catch {}
       continue;
     }
+    // Un .tmp d'instance vivante n'est pas une publication : c'est un fichier
+    // à moitié écrit ou le résidu d'un rename raté. On ne le lit jamais — son
+    // <pid>.json, lui, porte la dernière union valable.
+    if (m[2]) continue;
     try {
       const data = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (Array.isArray(data.labels)) out.push(...data.labels.filter((l) => typeof l === 'string'));

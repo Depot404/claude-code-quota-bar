@@ -142,6 +142,48 @@ async function run() {
     !labels.includes('Onglet de la fenêtre B'), JSON.stringify(labels));
   check('son fichier résiduel est supprimé', !fs.existsSync(childFile));
 
+  console.log('\n5bis. Fichiers .json.tmp orphelins (2026-08-07 : 17 constatés sur le poste)');
+  // publish() écrit <pid>.json.tmp puis renomme. Quand le rename échoue (le
+  // fichier cible est ouvert en lecture par une voisine — courant sous
+  // Windows), le .tmp restait pour toujours : otherLabels() ne connaissait que
+  // les <pid>.json. Deux verrous : le producteur nettoie son propre résidu, et
+  // le balayage ramasse ceux des instances mortes.
+  const deadPid = 999999;                       // hors plage de pid Windows
+  const deadTmp = path.join(tabsMod.TABS_DIR, `${deadPid}.json.tmp`);
+  const deadJson = path.join(tabsMod.TABS_DIR, `${deadPid}.json`);
+  fs.writeFileSync(deadTmp, JSON.stringify({ pid: deadPid, ts: Date.now(), labels: ['Fantôme'] }));
+  fs.writeFileSync(deadJson, JSON.stringify({ pid: deadPid, ts: Date.now(), labels: ['Fantôme'] }));
+  let sweep = tracker.getTabs().labels;
+  check('le .tmp d\'une instance MORTE est supprimé au balayage', !fs.existsSync(deadTmp));
+  check('… son .json l\'est aussi (comportement historique inchangé)', !fs.existsSync(deadJson));
+  check('… et rien de ce fichier n\'entre dans l\'union',
+    !sweep.includes('Fantôme'), JSON.stringify(sweep));
+
+  // Instance VIVANTE : son .tmp peut être en cours d'écriture — on n'y touche
+  // pas, et on ne le lit pas non plus (un .tmp n'est pas une publication).
+  const livePid = process.ppid || process.pid;   // un pid réellement vivant, autre que le nôtre si possible
+  const liveTmp = path.join(tabsMod.TABS_DIR, `${livePid}.json.tmp`);
+  if (livePid !== process.pid) {
+    fs.writeFileSync(liveTmp, JSON.stringify({ pid: livePid, ts: Date.now(), labels: ['Moitié écrit'] }));
+    sweep = tracker.getTabs().labels;
+    check('le .tmp d\'une instance VIVANTE est laissé en place', fs.existsSync(liveTmp));
+    check('… mais jamais lu (un .tmp n\'est pas une publication)',
+      !sweep.includes('Moitié écrit'), JSON.stringify(sweep));
+    try { fs.unlinkSync(liveTmp); } catch {}
+  }
+
+  // Rename impossible → publish() ne doit RIEN laisser derrière lui.
+  const realRename = fs.renameSync;
+  fs.renameSync = () => { throw new Error('EBUSY simulé'); };
+  try {
+    GROUPS = [group([claude('Publication qui échoue')])];
+    onDidChangeTabs({ closed: [], opened: [], changed: [] });
+  } finally {
+    fs.renameSync = realRename;
+  }
+  check('rename raté → le .tmp est nettoyé sur-le-champ (plus d\'orphelin par construction)',
+    !fs.existsSync(`${tabsMod.OWN_FILE}.tmp`));
+
   console.log('\n6. Onglet actif → activeLabel (surlignage du panneau)');
   check('aucun onglet Claude jamais sélectionné → activeLabel null',
     tracker.getTabs().activeLabel === null, String(tracker.getTabs().activeLabel));

@@ -217,8 +217,11 @@ const SCENES = [
   {
     file: 'screenshot-group.png',
     // Group zoom: master capsule, wave running, wave queued, counters.
+    // Only grouped conversations in this scene: #flow holds the group block
+    // alone, so clipping it frames exactly the capsule (since 2026-08-07 the
+    // panel renders groups and flat rows as siblings in a single container).
     state: state({ conversations: GROUP_CONVS, groups: GROUPS }),
-    clip: '#groups',
+    clip: '#flow',
   },
   {
     file: 'screenshot-quota.png',
