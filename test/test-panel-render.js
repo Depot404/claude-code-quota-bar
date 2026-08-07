@@ -1692,44 +1692,69 @@ async function run() {
     check('ligne d\'ajout en file : margin-left après l\'axe du rail (sa bordure pointillée ne le croise pas)',
       sepOffset.addRowMarginLeft !== null && sepOffset.addRowMarginLeft >= 20, JSON.stringify(sepOffset));
 
-    console.log('\n13ter. Groupe replié + master désignée → UNE seule ligne visible (plan repli-auto étape 9)');
-    // L'acquis « 1 ligne » du repli (étape 2) est conservé même avec une
-    // master : la grip disparaît, la ligne master récupère seule le chevron
-    // et le chip de statut du groupe.
+    console.log('\n13ter. Repli = les CONVERSATIONS du groupe disparaissent, la ligne master ne bouge PAS d\'un pixel (2026-08-07)');
+    // Signalement user : replier « changeait l'apparence de la master » (elle
+    // héritait du chevron, du chip et d'un cadre refermé en haut parce que la
+    // grip s'effaçait). Invariant désormais mesuré : grip toujours là, ligne
+    // master strictement identique dépliée/repliée — seuls membres, vagues et
+    // rail sont masqués.
+    const masterShape = `(() => {
+      const head = document.querySelector('#flow .grp-master-head');
+      const conv = head.querySelector('.conv');
+      const r = conv.getBoundingClientRect();
+      const ctx = conv.querySelector('.bar-ctx');
+      const ctxRect = ctx ? ctx.getBoundingClientRect() : null;
+      const cs = getComputedStyle(head);
+      const after = getComputedStyle(head, '::after');
+      return {
+        left: r.left, right: r.right, width: r.width, height: r.height,
+        ctxRight: ctxRect ? ctxRect.right : null, ctxWidth: ctxRect ? ctxRect.width : null,
+        radius: cs.borderTopLeftRadius + '/' + cs.borderTopRightRadius + '/' + cs.borderBottomRightRadius + '/' + cs.borderBottomLeftRadius,
+        shadow: after.boxShadow,
+        children: Array.from(head.children).filter((c) => getComputedStyle(c).display !== 'none').map((c) => c.className).join(','),
+      };
+    })()`;
+    const shapeOpen = await cdp.evaluate(masterShape);
     const collapsedWithMaster = JSON.parse(JSON.stringify(withMaster));
     collapsedWithMaster.groups[0].collapsed = true;
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: collapsedWithMaster })}, '*')`);
     await sleep(150);
+    const shapeCollapsed = await cdp.evaluate(masterShape);
     const repli = await cdp.evaluate(`(() => {
       const grip = document.querySelector('#flow .grp-head');
       const masterHead = document.querySelector('#flow .grp-master-head');
       const rail = document.querySelector('#flow .grp-rail');
       const members = document.querySelectorAll('#flow .member');
-      const chev = masterHead.querySelector('.grp-master-chev');
-      const chip = masterHead.querySelector('.grp-master-chip');
       return {
-        gripHidden: getComputedStyle(grip).display === 'none',
+        gripVisible: getComputedStyle(grip).display !== 'none',
+        gripChev: grip.querySelector('.chevron').textContent,
+        gripCount: document.querySelector('#flow .grp-count').textContent,
         masterHeadVisible: getComputedStyle(masterHead).display !== 'none',
         railHidden: getComputedStyle(rail).display === 'none',
         membersHidden: Array.from(members).every((m) => getComputedStyle(m).display === 'none'),
-        chevText: chev.textContent,
-        chevVisible: getComputedStyle(chev).display !== 'none',
-        chipText: chip.textContent,
-        chipVisible: getComputedStyle(chip).display !== 'none',
       };
     })()`);
-    check('la grip disparaît (repli, master désignée)', repli.gripHidden === true, JSON.stringify(repli));
-    check('… la ligne master reste seule visible', repli.masterHeadVisible === true, JSON.stringify(repli));
-    check('… le rail et les membres du corps sont masqués avec elle (pas de rail flottant)',
+    check('la grip RESTE visible au repli (c\'est elle qui porte le chevron/compteur, jamais la master)',
+      repli.gripVisible === true && repli.gripChev === '▸' && repli.gripCount === '1/3 done', JSON.stringify(repli));
+    check('… la ligne master reste visible', repli.masterHeadVisible === true, JSON.stringify(repli));
+    check('… seuls le rail et les membres du corps sont masqués',
       repli.railHidden === true && repli.membersHidden === true, JSON.stringify(repli));
-    check('… elle récupère le chevron replié (▸)', repli.chevVisible === true && repli.chevText === '▸', JSON.stringify(repli));
-    check('… et le chip de statut du groupe (N/M done)', repli.chipVisible === true && repli.chipText === '1/3', JSON.stringify(repli));
+    const sameShape = ['left', 'right', 'width', 'height', 'ctxRight', 'ctxWidth']
+      .every((k) => shapeOpen[k] !== null && Math.abs(shapeOpen[k] - shapeCollapsed[k]) < 0.5);
+    check('ligne master : géométrie IDENTIQUE dépliée/repliée (bords, largeur, hauteur, barre ctx)',
+      sameShape === true, JSON.stringify({ open: shapeOpen, collapsed: shapeCollapsed }));
+    check('… mêmes coins et même cadre (aucune bande refermée en haut au repli)',
+      shapeOpen.radius === shapeCollapsed.radius && shapeOpen.shadow === shapeCollapsed.shadow,
+      JSON.stringify({ open: shapeOpen, collapsed: shapeCollapsed }));
+    check('… mêmes enfants visibles (aucun chevron/chip qui apparaît au repli)',
+      shapeOpen.children === shapeCollapsed.children,
+      JSON.stringify({ open: shapeOpen.children, collapsed: shapeCollapsed.children }));
 
-    // Clic sur ce chevron = re-déplier (même message que la grip).
+    // Le chevron de la grip re-déplie (seul déclencheur, master ou pas).
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .grp-master-chev').click()`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-head .chevron').click()`);
     const sentChev = await cdp.evaluate(`window.__sent`);
-    check('clic sur le chevron de la ligne master → toggleGroupCollapse',
+    check('clic sur le chevron de la grip → toggleGroupCollapse',
       Array.isArray(sentChev) && sentChev.some((m) => m.type === 'toggleGroupCollapse' && m.id === 'g1'), JSON.stringify(sentChev));
 
     // Retour à l'état déplié pour la suite du banc.
@@ -2097,19 +2122,25 @@ async function run() {
     check('master hors de vue (fallback) — toujours contenue dans le cadre (grip collée, mêmes bords)',
       Math.abs(fb.head.t - fb.grip.b) < 0.5 && fb.row.b <= fb.head.b + 0.5, JSON.stringify(fb));
 
-    // Groupe REPLIÉ avec master : la grip disparaît, la ligne master devient à
-    // elle seule toute la capsule — le cadre doit alors se refermer EN HAUT
-    // aussi (4 bandes), sinon il reste ouvert.
+    // Groupe REPLIÉ avec master (révisé 2026-08-07) : la grip RESTE en place et
+    // continue de fermer le cadre en haut — la capsule repliée est donc la même
+    // qu'ouverte, en plus court. La ligne master garde ses trois bandes
+    // (gauche/droite/bas) : elle n'a jamais à se déguiser en cadre complet.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: collapsedWithMaster })}, '*')`);
     await sleep(200);
     const col = await cdp.evaluate(`(() => {
       const head = document.querySelector('#flow .grp-master-head');
-      return { gripHidden: getComputedStyle(document.querySelector('#flow .grp-head')).display === 'none',
-               shadow: getComputedStyle(head, '::after').boxShadow, radius: getComputedStyle(head).borderTopLeftRadius };
+      const grip = document.querySelector('#flow .grp-head');
+      const gb = grip.getBoundingClientRect(); const hb = head.getBoundingClientRect();
+      return { gripVisible: getComputedStyle(grip).display !== 'none',
+               gripBorderTop: parseFloat(getComputedStyle(grip).borderTopWidth),
+               joined: Math.abs(hb.top - gb.bottom) < 0.5,
+               shadow: getComputedStyle(head, '::after').boxShadow, radiusTop: getComputedStyle(head).borderTopLeftRadius };
     })()`);
-    check('replié + master : la grip est masquée…', col.gripHidden === true, JSON.stringify(col));
-    check('… et la ligne master referme le cadre sur ses QUATRE côtés',
-      (col.shadow.match(/inset/g) || []).length === 4 && parseFloat(col.radius) > 0, col.shadow);
+    check('replié + master : la grip reste visible et ferme le cadre en haut…',
+      col.gripVisible === true && col.gripBorderTop > 1 && col.joined === true, JSON.stringify(col));
+    check('… la ligne master garde ses TROIS bandes (gauche/droite/bas), coins hauts non arrondis',
+      (col.shadow.match(/inset/g) || []).length === 3 && parseFloat(col.radiusTop) === 0, JSON.stringify(col));
 
     // Sans master : la grip EST le cadre entier, elle reprend sa bordure basse.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: noMaster })}, '*')`);

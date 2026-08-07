@@ -592,9 +592,9 @@ function renderHtml(webview) {
        anneaux — UNE seule source, elles ne peuvent plus diverger (même
        principe que le fond anneau/panneau unifié à l'étape 12). Coin
        bas-gauche à 0 pour que le rail (même teinte) parte de la grip sans
-       couture. Masquée (display none, posé en JS) quand une master est
-       désignée ET le groupe replié : c'est alors la ligne master qui porte
-       seule le chevron/chip (cf. .grp-master-chev/-chip ci-dessous). */
+       couture. TOUJOURS visible (2026-08-07) : c'est elle, et elle seule, qui
+       porte le chevron et le compteur du groupe — replier ne doit RIEN changer
+       à l'apparence de la ligne master (cf. .grp-body.collapsed ci-dessous). */
   }
   /* Capsule ENGLOBANTE (étape 13) : avec une master, la grip n'est plus que la
      rangée HAUTE du cadre — elle perd sa bordure basse, la ligne master
@@ -659,32 +659,6 @@ function renderHtml(webview) {
       inset 0 -1.5px 0 0 var(--grp-hue, transparent);
   }
   .grp-master-slot { flex: 1; min-width: 0; }
-  /* Décoration visible SEULEMENT groupe replié + master désignée : la ligne
-     master récupère alors le chevron et le chip de statut que la grip
-     (masquée dans ce cas) portait — l'acquis « 1 ligne » du repli (étape 2)
-     est conservé même avec une master. Affichage posé en JS (renderGroups),
-     jamais par une règle CSS d'état — ni l'un ni l'autre n'a de sens tant
-     qu'une master n'est pas désignée (pas de ligne pour les porter). */
-  /* Boîte CALQUÉE sur celle de l'icône d'état (étape 19) : mêmes 10px de haut
-     et même retrait de 4px que .ico, donc le glyphe se centre exactement sur
-     l'axe de l'anneau qui le suit — au lieu de flotter au-dessus, comme le
-     faisait une ligne de 13px alignée par le haut. Affichage posé en JS
-     (renderGroups) : « flex », jamais '' ni 'inline-block' — la boîte doit
-     rester une boîte de centrage. */
-  .grp-master-chev {
-    display: none; flex: none; margin-top: 4px;
-    width: 14px; height: 10px; align-items: center; justify-content: center;
-    font-size: 13px; line-height: 1;
-    color: var(--muted); cursor: pointer;
-  }
-  /* margin-top 4px, pas align-self:center (étape 19) : la ligne master fait
-     deux lignes de haut, un chip centré verticalement tombait SOUS la croix,
-     en porte-à-faux. Même retrait que .m-out et le chevron — les trois
-     décorations de droite/gauche s'alignent sur la première ligne du titre. */
-  .grp-master-chip {
-    display: none; flex: none; margin-top: 4px; margin-left: 2px;
-    font-size: 10px; color: var(--done); font-weight: 600; white-space: nowrap;
-  }
   /* Fallback dégradé (master hors de la fenêtre du panneau — ni transcript ni
      onglet suivis) : réutilise le gabarit .conv/.ico/.title existants (grille
      16px+1fr déjà stylée plus bas) plutôt que d'inventer une mise en page —
@@ -706,24 +680,16 @@ function renderHtml(webview) {
      qui n'a pas de marge à faire fusionner (le cas visé était le 1er
      séparateur de vague). */
   .grp.has-master > .grp-body { padding-top: 0; }
-  /* Repli (plan repli-auto étape 2, révisé étape 9) : SANS master, cache
-     TOUT le corps (rien à faire survivre — la grip, elle, reste visible,
-     c'est elle qui porte alors seule le chevron/compteur). AVEC master,
-     .grp-master-head est l'exception : elle reste affichée seule, devenant
-     la ligne unique du groupe replié (rail/vagues/membres masqués avec le
-     reste — un rail tout seul sous une ligne collapsée n'aurait aucun sens). */
+  /* Repli (plan repli-auto étape 2, révisé étape 9, RÉVISÉ 2026-08-07) : le
+     repli masque les CONVERSATIONS DU GROUPE (membres, vagues, rail), rien
+     d'autre. La grip reste la grip — chevron, compteur, cadre — et la ligne
+     master reste STRICTEMENT identique à elle-même, dépliée comme repliée :
+     mêmes coins, même cadre, aucune décoration qui apparaît ou disparaît.
+     Constat user : replier « changeait l'apparence de la master » (elle
+     héritait alors du chevron, du chip et d'un cadre refermé en haut parce que
+     la grip s'effaçait) — c'était la grip qu'il fallait garder, pas déguiser
+     la master en grip. */
   .grp-body.collapsed > *:not(.grp-master-head) { display: none; }
-  /* Replié AVEC master : la grip est masquée, la ligne master devient à elle
-     seule TOUTE la capsule — elle referme donc le cadre en haut aussi (étape
-     13 : sans cette règle, le cadre resterait ouvert par le haut). */
-  .grp-body.collapsed > .grp-master-head { border-radius: 6px; }
-  .grp-body.collapsed > .grp-master-head::after {
-    box-shadow:
-      inset 1.5px 0 0 0 var(--grp-hue, transparent),
-      inset -1.5px 0 0 0 var(--grp-hue, transparent),
-      inset 0 -1.5px 0 0 var(--grp-hue, transparent),
-      inset 0 1.5px 0 0 var(--grp-hue, transparent);
-  }
   /* Rail P1 (« nœuds sur l'axe ») : trait vertical teinté du groupe, centré
      au pixel sur l'axe de la colonne des symboles d'état — le MÊME axe que
      les conversations plates (colonne grille 16px + padding gauche 6px de
@@ -1431,9 +1397,7 @@ function renderHtml(webview) {
     // d'état soit le premier nœud du rail. slot = rowFor(conv réelle) si
     // listée, sinon createMasterFallback() (paresseux, ci-dessous).
     const masterHead = el('div', 'grp-master-head');
-    const masterChev = el('span', 'chevron grp-master-chev', '▸');
     const masterSlot = el('div', 'grp-master-slot');
-    const masterChip = el('span', 'grp-master-chip');
     // ⨯ = DISSOLUTION seule (plan repli-auto étape 15 : le panneau agit sur
     // les métadonnées, jamais sur les onglets) — même dissolveGroup que
     // l'historique, sa confirmation existante comprise ; l'onglet master
@@ -1446,9 +1410,7 @@ function renderHtml(webview) {
     const masterUnlink = el('button', 'chip act m-hover', t('Unlink'));
     masterUnlink.type = 'button';
     masterUnlink.title = t('Unlink (forget where this batch came from)');
-    masterHead.appendChild(masterChev);
     masterHead.appendChild(masterSlot);
-    masterHead.appendChild(masterChip);
     masterHead.appendChild(masterOut);
     masterHead.appendChild(masterUnlink);
 
@@ -1468,16 +1430,10 @@ function renderHtml(webview) {
       root, head, chev, count, done, body, members: new Map(), id: g.id,
       advA, advM, mas, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
       rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow,
-      masterHead, masterChev, masterSlot, masterChip, masterOut, masterUnlink, masterFallback: null,
+      masterHead, masterSlot, masterOut, masterUnlink, masterFallback: null,
     };
     head.addEventListener('click', function (e) {
       if (e.target !== head && head.contains(e.target) && (e.target.classList.contains('gbtn') || e.target.closest('.grp-adv'))) return;
-      vscode.postMessage({ type: 'toggleGroupCollapse', id: node.id });
-    });
-    // Chevron de la ligne master (groupe replié + master désignée, seul cas
-    // où il est visible) : même action que le chevron de la grip.
-    masterChev.addEventListener('click', function (e) {
-      e.stopPropagation();
       vscode.postMessage({ type: 'toggleGroupCollapse', id: node.id });
     });
     mas.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'setGroupMaster', id: node.id }); });
@@ -1702,28 +1658,16 @@ function renderHtml(webview) {
           fb.title.classList.toggle('closed', ms.status === 'done-closed');
           fb.root.title = node.masterTitle + (ms.hint ? ' — ' + ms.hint : '');
         }
-        // Décoration « groupe replié » : la ligne master récupère alors seule
-        // le chevron et le chip de statut que la grip (masquée dans ce cas)
-        // portait — 1 ligne visible, comme un groupe sans master repose sur
-        // sa seule grip (cf. .grp-body.collapsed CSS ci-dessus).
-        node.head.style.display = g.collapsed ? 'none' : '';
-        // Pas '' : .grp-master-chev/-chip sont display:none par défaut (CSS,
-        // masqués tant que le groupe n'est pas replié) — une chaîne vide
-        // EFFACE l'override inline au lieu de le poser et retombe sur la
-        // règle de base (invisible), même piège que masterIco au lot 11.
-        node.masterChev.style.display = g.collapsed ? 'flex' : 'none';
-        node.masterChip.style.display = g.collapsed ? 'inline-block' : 'none';
-        // g.done (maîtresse comprise) ne peut plus être vrai ici : un tel
-        // groupe est filtré avant même d'atteindre ce corps de boucle (étape
-        // 11) — allMembersDone est le bon repli : maîtresse encore vivante,
-        // repliée à la main, plus rien à faire côté membres.
-        setText(node.masterChip, allMembersDone ? t('✓ done') : (doneCount + '/' + g.members.length));
+        // Rien à faire de plus au repli (2026-08-07) : la ligne master est la
+        // MÊME ligne, repliée ou dépliée — la grip reste au-dessus et garde le
+        // chevron, le compteur et le chip « ✓ done » du groupe. Le repli
+        // n'agit que sur les conversations du groupe, via la classe CSS
+        // .collapsed posée plus haut sur le corps.
       } else {
         node.masterConvId = null;
         node.masterTitle = null;
         node.masterTabTitle = null;
         if (node.masterHead.parentElement) node.masterHead.remove();
-        node.head.style.display = '';
       }
 
       // Vagues à RENDRE (étape 11) : un membre fini (onglet fermé) n'a plus de

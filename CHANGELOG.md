@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.28.1] - 2026-08-07
+
+### Fixed
+- **Collapsing a group no longer changes how its master conversation looks.** Collapsing hides the group's conversations — nothing else. Until now the group header vanished on collapse and the master row had to impersonate it: it grew a chevron, a "N/M done" chip and a frame closed on all four sides, so the one row that was supposed to stay put was the one that moved. The header stays where it is, keeps the chevron and the counter, and the master row is now identical to itself whether the group is open or closed — same edges, same width, same corners, same context bar, measured in both themes.
+
 ## [2.28.0] - 2026-08-07
 
 ### Changed
