@@ -276,17 +276,22 @@ const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 // répondu) ? Ne pas confondre avec un outil normal en cours (Bash qui tourne) :
 // la règle ne s'applique qu'aux outils de INTERACTIVE_TOOLS, tout le reste
 // d'un tool_use sans result reste l'état `busy` normal.
-function hasPendingInteractiveTool(filePath) {
+// Rend l'INSTANT (ms epoch) du tool_use interactif resté sans réponse, `0` s'il
+// est là mais non datable, `null` s'il n'y en a pas. Le timestamp sert à dater
+// la preuve : state.js compare cette date à celle du dernier événement hooks
+// pour savoir laquelle des deux sources est la plus fraîche (cf. la fonction
+// applyTranscriptTruth, qui remplace l'ancien test « l'entrée hooks dit busy »).
+function pendingInteractiveAt(filePath) {
   const entries = parseSlice(readSlice(filePath, TAIL_BYTES, 'tail'));
   let lastAssistantIdx = -1;
   for (let i = entries.length - 1; i >= 0; i--) {
     if (entries[i].type === 'assistant') { lastAssistantIdx = i; break; }
   }
-  if (lastAssistantIdx === -1) return false;
+  if (lastAssistantIdx === -1) return null;
   const content = entries[lastAssistantIdx].message && entries[lastAssistantIdx].message.content;
-  if (!Array.isArray(content) || !content.length) return false;
+  if (!Array.isArray(content) || !content.length) return null;
   const lastBlock = content[content.length - 1];
-  if (!lastBlock || lastBlock.type !== 'tool_use' || !INTERACTIVE_TOOLS.has(lastBlock.name)) return false;
+  if (!lastBlock || lastBlock.type !== 'tool_use' || !INTERACTIVE_TOOLS.has(lastBlock.name)) return null;
 
   // Un tool_result correspondant (même id) plus loin dans le transcript = déjà
   // répondu — tout événement postérieur au tool_use fait foi, pas seulement le
@@ -295,11 +300,16 @@ function hasPendingInteractiveTool(filePath) {
     const c = entries[i].message && entries[i].message.content;
     if (Array.isArray(c)) {
       for (const b of c) {
-        if (b && b.type === 'tool_result' && b.tool_use_id === lastBlock.id) return false;
+        if (b && b.type === 'tool_result' && b.tool_use_id === lastBlock.id) return null;
       }
     }
   }
-  return true;
+  const ts = Date.parse(entries[lastAssistantIdx].timestamp || '');
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function hasPendingInteractiveTool(filePath) {
+  return pendingInteractiveAt(filePath) !== null;
 }
 
 // Interruption manuelle (bouton Stop / Échap) : Claude Code écrit un message
@@ -320,16 +330,30 @@ const INTERRUPT_RE = /^\s*\[Request interrupted by user/;
 // tranche. Un assistant plus récent = le travail a repris → pas interrompu. Un
 // message user isMeta (contexte injecté par un hook) n'est pas une reprise → on
 // continue de remonter vers le dernier message user réel.
-function wasInterrupted(filePath) {
+// Rend l'INSTANT (ms epoch) de cette interruption, `0` si le marqueur est là
+// mais non datable (message sans timestamp), `null` s'il n'y a pas
+// d'interruption à vif. Même raison que pendingInteractiveAt ci-dessus : sans
+// date, impossible de savoir si le transcript en sait plus que les hooks ou le
+// contraire — et c'est précisément ce que l'ancienne condition « l'entrée hooks
+// dit busy » tentait d'approcher, en se trompant dès qu'un Stop à feedback
+// avait posé `done` en cours de tour (incident 2026-08-08 : conv interrompue,
+// spinner qui tourne, puis faux ✓ et son de fin 5 min plus tard).
+function interruptedAt(filePath) {
   const entries = parseSlice(readSlice(filePath, TAIL_BYTES, 'tail'));
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
     if (e.type !== 'user' && e.type !== 'assistant') continue;
-    if (e.type === 'assistant') return false;
+    if (e.type === 'assistant') return null;
     if (e.isMeta) continue;
-    return INTERRUPT_RE.test(firstTextBlock(e.message && e.message.content) || '');
+    if (!INTERRUPT_RE.test(firstTextBlock(e.message && e.message.content) || '')) return null;
+    const ts = Date.parse(e.timestamp || '');
+    return Number.isFinite(ts) ? ts : 0;
   }
-  return false;
+  return null;
+}
+
+function wasInterrupted(filePath) {
+  return interruptedAt(filePath) !== null;
 }
 
 // Écriture de reprise ≠ travail (incident 2026-08-07) : au reload de la
@@ -358,4 +382,5 @@ module.exports = {
   readSlice, parseSlice, usageTokens, extractLastAssistant, extractTitleInfo,
   scanAiTitleIncremental, cleanTitle, firstUserText, TITLE_MAX,
   hasPendingInteractiveTool, wasInterrupted, lastActivityTs, INTERACTIVE_TOOLS,
+  pendingInteractiveAt, interruptedAt,
 };

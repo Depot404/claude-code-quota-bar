@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.28.4] - 2026-08-08
+
+### Changed
+- **Housekeeping only, no behaviour change.** A code comment in `state.js` illustrated a bug with names taken from the machine it was diagnosed on; it now describes the mechanism generically, which is also what a reader of this repo needs. Same code, same tests.
+
+## [2.28.3] - 2026-08-08
+
+### Fixed
+- **A conversation you interrupted now shows the stop square immediately, instead of spinning forever.** The panel only acted on the transcript's interrupt marker when the hook state literally said `busy` — a test on the *source*, when what needed correcting was the *result*. The displayed state is often derived rather than reported: a Stop hook that returns feedback marks the turn `done` and restarts Claude, so from then on the spinner comes from "the transcript is still being written", not from the hooks. Interrupting during that stretch changed nothing: the spinner ran on, then five minutes later the row flipped to a bright "finished" check **and played the end-of-turn sound**, on work you had just cut short yourself. The two facts only the transcript knows — a manual interrupt, and a pending `AskUserQuestion`/`ExitPlanMode` — are now timestamped and weighed against the last hook event, and the fresher evidence wins. Five situations that were wrong are fixed: interrupting while a turn was resuming after hook feedback, interrupting a permission prompt (a stale "?"), an interrupt that survives a window reload (a pale "nothing to do here" check), a question asked after hook feedback (no "?" at all), and the split-second stop square that used to flash when you relaunched.
+
+### Changed
+- **The "busy" spinner is now blue, thicker, and its arc breathes.** Following up on 2.28.2: the orange didn't stand out enough and the arc was a fixed length. It's now a brighter blue with a bolder ring, and the arc continuously grows and shrinks as it spins — the same "breathing" motion as Material Design's circular spinner — instead of staying a fixed length. Same footprint, same position in a group's rail.
+
+## [2.28.2] - 2026-08-07
+
+### Changed
+- **The "busy" spinner is now orange, and thicker.** It used to be a faint purple ring that was easy to miss in a list of small status icons. It's the same shape and size — no layout shift — just a brighter, more legible color and a bolder stroke.
+
 ## [2.28.1] - 2026-08-07
 
 ### Fixed

@@ -166,7 +166,12 @@ function renderHtml(webview) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
   :root {
-    --busy: var(--vscode-charts-purple, #b180d7);
+    --busy: var(--vscode-charts-blue, #03a9f4);
+    --busy-width: 3.5px;
+    --busy-alpha: 30%;
+    --busy-outset: 2.5px;
+    --busy-length-min: 60deg;
+    --busy-length-max: 260deg;
     --waiting: var(--vscode-charts-yellow, #cca700);
     --done: var(--vscode-charts-green, #89d185);
     --stale: var(--vscode-charts-yellow, #cca700);
@@ -174,6 +179,14 @@ function renderHtml(webview) {
     --pace-green: var(--vscode-charts-green, #89d185);
     --pace-yellow: var(--vscode-charts-yellow, #cca700);
     --pace-red: var(--vscode-charts-red, #f14c4c);
+  }
+  /* Enregistrée = le moteur interpole un <angle> en douceur (la longueur du
+     serpentin croît/décroît au lieu de sauter) — condition pour l'animation
+     "breathe" ci-dessous. */
+  @property --busy-length {
+    syntax: '<angle>';
+    inherits: true;
+    initial-value: 90deg;
   }
   body {
     padding: 6px 8px 10px;
@@ -297,21 +310,35 @@ function renderHtml(webview) {
      pour voir l'animation du pseudo. */
   .ico-busy { position: relative; }
   .ico-busy::before {
-    /* inset négatif = la bordure déborde de la boîte 10px, exactement comme
-       l'ancienne bordure content-box de l'hôte (arc extérieur ~13px inchangé). */
-    content: ''; position: absolute; inset: -1.5px;
-    border: 1.5px solid color-mix(in srgb, var(--busy) 25%, transparent);
-    border-top-color: var(--busy);
+    /* inset négatif = le disque déborde de la boîte 10px (arc extérieur
+       ~15px). Piste (disque translucide, calque du dessous) + serpentin
+       (secteur plein, calque du dessus, longueur animée en degrés) — un
+       masque radial ronge le centre pour ne garder qu'un anneau de
+       --busy-width. Remplace l'ancienne technique à la bordure (2.28.2) :
+       elle ne pouvait pas faire varier la longueur du secteur dans le temps. */
+    content: ''; position: absolute; inset: calc(-1 * var(--busy-outset));
     border-radius: 50%;
-    animation: spin .8s linear infinite;
+    background:
+      conic-gradient(from 0deg, var(--busy) 0deg, var(--busy) var(--busy-length), transparent var(--busy-length) 360deg),
+      color-mix(in srgb, var(--busy) var(--busy-alpha), transparent);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--busy-width)), #000 calc(100% - var(--busy-width)));
+            mask: radial-gradient(farthest-side, transparent calc(100% - var(--busy-width)), #000 calc(100% - var(--busy-width)));
+    animation: spin .8s linear infinite, breathe 1.6s ease-in-out infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* Respiration : le serpentin s'allonge puis se rétracte pendant qu'il
+     tourne (même principe que le spinner circulaire de Material Design),
+     indépendamment de la rotation — deux animations sur le même pseudo. */
+  @keyframes breathe {
+    0%, 100% { --busy-length: var(--busy-length-min); }
+    50% { --busy-length: var(--busy-length-max); }
+  }
   /* PAS de @media (prefers-reduced-motion: reduce) ici, et c'est délibéré.
      Chromium — donc ce webview — dérive cette préférence de
      SPI_GETCLIENTAREAANIMATION, l'option Windows « Effets d'animation », que ce
      poste a sur OFF (mesuré le 2026-07-15 : reduce = true dans le moteur de
      rendu). La règle qui coupait l'animation ici était donc TOUJOURS active :
-     c'est elle qui figeait l'arc violet. Ces deux animations ne sont pas
+     c'est elle qui figeait l'arc busy. Ces deux animations ne sont pas
      décoratives, elles PORTENT l'état de la conversation — les couper, c'est
      supprimer l'information, pas la tempérer. Aucun risque vestibulaire non
      plus : rotation et fondu d'une pastille de 10 px, sans déplacement. */

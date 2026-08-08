@@ -47,7 +47,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
-const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, hasPendingInteractiveTool, wasInterrupted, lastActivityTs, firstUserText } = require('./hooks/transcript.js');
+const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, pendingInteractiveAt, interruptedAt, lastActivityTs, firstUserText } = require('./hooks/transcript.js');
 const { labelMatches, convMatchesLabel } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 const { liveSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
@@ -148,7 +148,7 @@ function isResuming(since, activity, now) {
 //    mais AUCUN hook ne le signale (pas d'événement « permission accordée »).
 //    Une écriture transcript postérieure au passage en waiting = reprise.
 //  - `done` : le hook Stop tire AUSSI quand le tour continue — Stop hook à
-//    feedback (un exit 2 qui relance Claude, ex. doc-commit-reminder), message
+//    feedback (un exit 2 qui relance Claude avec une consigne), message
 //    envoyé en cours de tour. La conv affichait alors ✓ en pleine bosse. Même
 //    remède : l'écriture postérieure fait foi. Mais le repli est `done`, JAMAIS
 //    `stale` : quand les écritures cessent, le tour est bel et bien terminé —
@@ -179,6 +179,55 @@ function effectiveState(entry, mtime, now, isLive, activityTs) {
     default:
       return 'idle';
   }
+}
+
+// Instant où les hooks ont posé l'état de cette entrée. `since` (réarmé aux
+// SEULS changements d'état, cf. sessions-state.js) et jamais `updated_at`, qui
+// avance aussi sur une écriture sans rapport — un accusé de lecture, par
+// exemple — et rendrait les hooks artificiellement « plus frais » que le
+// transcript.
+function hookStamp(entry) {
+  if (!entry || !entry.state) return 0;
+  return entry.since || entry.updated_at || 0;
+}
+
+// ── Le transcript corrige l'état AFFICHÉ, jamais l'état brut de l'entrée ──────
+//
+// Deux faits n'émettent AUCUN hook et ne se lisent que dans le transcript :
+// l'interruption manuelle (anthropics/claude-code#45289) et la question
+// interactive en attente (AskUserQuestion/ExitPlanMode). Jusqu'au 2026-08-08,
+// on ne les appliquait que si l'entrée hooks disait littéralement `busy` — un
+// test sur la SOURCE, alors que ce qu'on corrige est le RÉSULTAT.
+//
+// CE QUI SE PASSAIT (prouvé sur un transcript réel, 2026-08-08) : un hook Stop
+// à FEEDBACK (exit 2 — un hook qui rend la main avec une consigne au lieu de
+// laisser le tour finir ; sur un poste qui en a un, c'est à presque CHAQUE fin
+// de tour) pose `done` et RELANCE Claude. Le tour continue, et c'est `isResuming` — donc
+// une DÉDUCTION de state.js, pas les hooks — qui réaffiche `busy`. L'entrée,
+// elle, dit toujours `done`. Interrompre pendant cette reprise ne déclenchait
+// donc plus rien : le spinner tournait, puis, 5 min plus tard, la conv basculait
+// en `done` — faux ✓ vif « va voir » ET son de fin de tour, sur un travail que
+// l'utilisateur venait de couper lui-même. Même trou pour une question posée
+// après un Stop à feedback : aucun « ? », spinner puis faux ✓.
+//
+// La règle est donc : ces preuves s'appliquent quel que soit l'état affiché,
+// et c'est leur DATE qui arbitre. Une preuve du transcript postérieure au
+// dernier événement hooks est la plus fraîche des deux et gagne ; un événement
+// hooks postérieur (l'utilisateur a relancé, UserPromptSubmit a reposé `busy`
+// avant même que le CLI n'écrive le nouveau prompt) gagne à son tour — ce qui
+// supprime au passage le clignotement d'un carré « interrompu » d'une fraction
+// de seconde au redémarrage. Preuve non datable (`0`, message sans timestamp) :
+// appliquée sans comparaison, c'est-à-dire le comportement d'avant la datation.
+function applyTranscriptTruth(state, entry, t) {
+  if (!t) return state;
+  const hook = hookStamp(entry);
+  const fresher = (ts) => ts != null && (ts === 0 || ts >= hook);
+  // L'interruption prime sur tout le reste, y compris sur le vieillissement
+  // busy→stale et sur une attente en cours : le dernier mot du transcript est
+  // « l'utilisateur a coupé », il n'y a plus ni travail ni question en vol.
+  if (fresher(t.interruptedAt)) return 'interrupted';
+  if (state !== 'waiting' && fresher(t.pendingInteractiveAt)) return 'waiting';
+  return state;
 }
 
 // « Lu » : l'onglet a été consulté après la fin du tour (ack_ts posé par ack.js,
@@ -333,10 +382,16 @@ function createTranscriptReader() {
     const hit = cache.get(filePath);
     if (hit && hit.key === key) return hit.value;
 
-    let value = { title: null, titleSource: null, modelId: null, model: null, effort: null, ctx: null, mtime: stat.mtimeMs, activityTs: stat.mtimeMs, pendingInteractive: false, interrupted: false };
+    let value = { title: null, titleSource: null, modelId: null, model: null, effort: null, ctx: null, mtime: stat.mtimeMs, activityTs: stat.mtimeMs, pendingInteractive: false, interrupted: false, pendingInteractiveAt: null, interruptedAt: null };
     try {
-      value.pendingInteractive = hasPendingInteractiveTool(filePath);
-      value.interrupted = wasInterrupted(filePath);
+      // Les deux faits sont DATÉS (ms epoch, `0` = présent mais non datable,
+      // `null` = absent) : applyTranscriptTruth compare cette date à celle du
+      // dernier événement hooks. Les booléens restent publiés pour les
+      // consommateurs qui ne demandent qu'une présence.
+      value.pendingInteractiveAt = pendingInteractiveAt(filePath);
+      value.interruptedAt = interruptedAt(filePath);
+      value.pendingInteractive = value.pendingInteractiveAt !== null;
+      value.interrupted = value.interruptedAt !== null;
       // Reprise ≠ comptabilité (2026-08-07) : cf. effectiveState/isResuming.
       value.activityTs = lastActivityTs(filePath) || stat.mtimeMs;
       const last = extractLastAssistant(filePath);
@@ -515,16 +570,9 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     // `live.has` : process CLI vivant ⇒ un `busy` muet reste `busy` (travail en
     // cours), jamais `stale` par simple vieillissement du mtime.
     let state = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId), t && t.activityTs);
-    // Interruption manuelle (bouton Stop / Échap) : aucun hook ne tire (by
-    // design, anthropics/claude-code#45289), donc l'entrée reste `busy` — le
-    // transcript est seul à savoir (wasInterrupted). Prioritaire sur le détour
-    // interactif ci-dessous (le dernier message n'est plus un tool_use en
-    // attente mais l'interruption elle-même) ET sur le vieillissement
-    // busy→stale : on retombe tout de suite dans un état de repos, fin du
-    // spinner qui tournait jusqu'à STALE_MS (5 min) dans le vide. Surtout pas
-    // `done` : l'user vient de couper lui-même, il regarde déjà la conv — aucun
-    // ✓ vif « va voir » à armer, et aucun son (onTransition n'émet que sur
-    // done/waiting).
+    // Interruption manuelle (bouton Stop / Échap) et question interactive en
+    // attente : deux faits qu'AUCUN hook ne signale, donc que seul le transcript
+    // connaît — cf. applyTranscriptTruth, qui arbitre par la DATE des preuves.
     //
     // ÉTAT PROPRE `interrupted` (2026-07-22) — c'était `idle` jusque-là, donc
     // rendu par le même ✓ vert pâle que « rien en cours ». Or les deux disent
@@ -534,16 +582,12 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     // consommateur de `state` ne teste `idle` (sons, ack, canari, isGone ne
     // regardent que busy/waiting/done), donc un état à part se comporte
     // exactement comme `idle` partout ailleurs et ne change QUE le rendu.
-    // Il s'efface tout seul à la reprise : `wasInterrupted` redevient faux dès
-    // qu'un vrai prompt ou une réponse assistant suit le marqueur.
-    //
-    // Lot 11 : AskUserQuestion/ExitPlanMode ne déclenchent AUCUN hook non plus —
-    // sans ce détour, la conv reste `busy` (voire `stale` après STALE_MS) jusqu'au
-    // hook Notification `idle_prompt`, qui ne tire qu'après 60 s fixes. Ne
-    // s'applique qu'aux sessions posées `busy` par les hooks — un `waiting`
-    // (permission) ou `done` (déjà fini) ne doit pas être perturbé.
-    if (c.entry && c.entry.state === 'busy' && t && t.interrupted) state = 'interrupted';
-    else if (c.entry && c.entry.state === 'busy' && t && t.pendingInteractive) state = 'waiting';
+    // Surtout pas `done` : l'user vient de couper lui-même, il regarde déjà la
+    // conv — aucun ✓ vif « va voir » à armer, et aucun son (onTransition
+    // n'émet que sur done/waiting). Il s'efface tout seul à la reprise :
+    // le marqueur cesse d'être le dernier mot dès qu'un vrai prompt ou une
+    // réponse assistant le suit.
+    state = applyTranscriptTruth(state, c.entry, t);
     // `tabTitle` = libellé BRUT du store (matching), `title` = ce qui s'affiche.
     const tabTitle = titles.get(c.sessionId) || null;
     const picked = pickTitle((t && t.title) || 'Conversation', t && t.titleSource, tabTitle, tabs);
@@ -855,6 +899,7 @@ module.exports = {
   buildSnapshot,
   projectDirFor,
   effectiveState,
+  applyTranscriptTruth,
   isAcked,
   isGone,
   resolveTabOpen,

@@ -110,6 +110,8 @@ const THEME_DARK = {
   '--vscode-charts-yellow': '#cca700',
   '--vscode-charts-red': '#f14c4c',
   '--vscode-charts-purple': '#b180d7',
+  '--vscode-charts-orange': '#ff9800',
+  '--vscode-charts-blue': '#03a9f4',
   '--vscode-list-inactiveSelectionBackground': '#37373d',
   '--vscode-list-hoverBackground': '#2a2d2e',
 };

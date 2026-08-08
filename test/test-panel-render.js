@@ -307,7 +307,9 @@ async function run() {
       const a = document.querySelector('.ico-busy').getAnimations({ subtree: true });
       return { count: a.length, name: a[0] && a[0].animationName, state: a[0] && a[0].playState };
     })()`);
-    check('une animation CSS est bien attachée à l\'arc', anim.count === 1, JSON.stringify(anim));
+    // Deux animations depuis 2.28.3 (respiration du serpentin) : spin
+    // (rotation) + breathe (longueur du secteur) sur le même pseudo.
+    check('les deux animations CSS sont bien attachées à l\'arc (spin + breathe)', anim.count === 2, JSON.stringify(anim));
     check('… elle est en cours d\'exécution (et non « none » comme avant)',
       anim.state === 'running', JSON.stringify(anim));
 
@@ -445,7 +447,7 @@ async function run() {
       return { count: anims.length, name: anims[0] ? anims[0].animationName : null };
     })()`);
     check('… son arc tourne dans le rail du groupe, comme une ligne plate (étape 16)',
-      grpBusyAnim.count === 1, JSON.stringify(grpBusyAnim));
+      grpBusyAnim.count === 2, JSON.stringify(grpBusyAnim));
     // 2026-08-06 (4e signalement « pas de loading », cause prouvée en CDP) :
     // l'animation ne suffit PAS — le disque opaque de l'anneau (::after
     // z-index:-1) se peignait PAR-DESSUS la bordure-arc de l'hôte (ordre de
@@ -463,8 +465,11 @@ async function run() {
     // Preuve par les PIXELS (même motif createImageBitmap que le §17g — la CSP
     // interdit img.src data: mais pas une image construite en mémoire) : on
     // échantillonne 24×24 autour de l'icône busy du groupe et on compte les
-    // pixels de teinte violette (l'arc, --busy #b180d7). Avant le fix : 0 —
-    // l'arc était peint puis ENTIÈREMENT recouvert par le disque opaque.
+    // pixels de teinte bleue (l'arc, --busy #03a9f4). Avant le fix (2026-08-06):
+    // 0 — l'arc était peint puis ENTIÈREMENT recouvert par le disque opaque.
+    // Seuils SERRÉS (R<50, B>220) : le rail de CE groupe de test est LUI AUSSI
+    // bleuté (hsl(210,45%,55%) ≈ 89,140,192, cf. hueBorder en JS) — un seuil
+    // large confondrait l'encre de l'arc avec celle du rail voisin.
     const busyPng = (await cdp.send('Page.captureScreenshot', {
       format: 'png', captureBeyondViewport: false,
       clip: await cdp.evaluate(`(() => { const b = document.querySelector('#flow .ico-busy').getBoundingClientRect();
@@ -479,17 +484,17 @@ async function run() {
         const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
         const g = cv.getContext('2d'); g.drawImage(img, 0, 0);
         const d = g.getImageData(0, 0, cv.width, cv.height).data;
-        let purple = 0;
+        let blue = 0;
         for (let i = 0; i < d.length; i += 4) {
-          if (d[i] > 120 && d[i + 2] > 150 && d[i] - d[i + 1] > 25 && d[i + 2] - d[i + 1] > 45) purple++;
+          if (d[i] < 50 && d[i + 2] > 220 && d[i + 1] > 100) blue++;
         }
-        window.__busyInk = { purple };
+        window.__busyInk = { blue };
       });
     })()`);
     let busyInk = null;
     for (let i = 0; i < 20 && !busyInk; i++) { await sleep(100); busyInk = await cdp.evaluate(`window.__busyInk`); }
-    check('… et l\'arc violet est VISIBLE dans l\'anneau du groupe (pixels, pas style calculé)',
-      !!busyInk && busyInk.purple > 50, JSON.stringify(busyInk));
+    check('… et l\'arc bleu est VISIBLE dans l\'anneau du groupe (pixels, pas style calculé)',
+      !!busyInk && busyInk.blue > 50, JSON.stringify(busyInk));
     // `anim.name` capturé section 3 sur une ligne PLATE (.ico-busy hors groupe) :
     // même nom d'animation ici ⇒ une seule définition CSS, aucune divergence.
     check('… même nom d\'animation que .ico-busy des lignes plates (une seule définition)',
@@ -1546,7 +1551,7 @@ async function run() {
     })()`);
     check('statut busy → glyphe présent dans l\'anneau', busyCap.present === true, JSON.stringify(busyCap));
     check('… animé, même animation que les lignes plates (étape 16)',
-      busyCap.animCount === 1 && busyCap.name === anim.name, JSON.stringify({ busyCap, flat: anim.name }));
+      busyCap.animCount === 2 && busyCap.name === anim.name, JSON.stringify({ busyCap, flat: anim.name }));
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(120);
 
