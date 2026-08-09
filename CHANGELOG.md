@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.34.1] - 2026-08-09
+
+### Fixed
+- **The listing described two controls that no longer exist.** The README still explained the `auto` / `manual` wave-advance toggle removed in 2.30.0, and still placed the "dissolve this batch" ✕ on the master row, where 2.33.0 replaced it with the same ⤴ every other row carries. Documentation only — no code change.
+
 ## [2.34.0] - 2026-08-09
 
 ### Fixed
