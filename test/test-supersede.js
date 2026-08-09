@@ -29,8 +29,8 @@ console.log('1. Règle pure (computeSupersededBy)');
 // Le cas de l'incident : husk mort (02:01) + successeur resumé plus frais dont
 // l'onglet porte encore le titre.
 let map = computeSupersededBy([
-  c({ sessionId: 'husk', title: 'Implémenter lot 1', mtime: 100, live: false, tabOpen: false }),
-  c({ sessionId: 'succ', title: 'Implémenter lot 1', mtime: 200, live: false, tabOpen: true }),
+  c({ sessionId: 'husk', title: 'Implement batch 1', mtime: 100, live: false, tabOpen: false }),
+  c({ sessionId: 'succ', title: 'Implement batch 1', mtime: 200, live: false, tabOpen: true }),
 ]);
 check('husk mort + successeur plus frais à onglet ouvert → husk supplanté',
   map.husk === 'succ' && Object.keys(map).length === 1, JSON.stringify(map));
@@ -87,23 +87,24 @@ check('liste vide / null → objet vide, jamais d\'exception',
 
 console.log('\n1bis. Second signal (durci 2026-08-05) : premier message user rejoué');
 
-// L'incident réel du 2026-08-05 : titres qui divergent d'UN mot (« groupes » vs
-// « des groupes »), husk mort proprement (`done`, jamais un reload), successeur
+// L'incident réel du 2026-08-05 : titres qui divergent d'UN mot (ici « of »,
+// présent d'un côté, absent de l'autre — les fixtures sont anonymisées, la
+// forme du cas ne l'est pas), husk mort proprement (`done`, jamais un reload), successeur
 // né sans qu'aucune fenêtre ne recharge. Le titre seul ne fold rien (vérifié
 // ci-dessus, cas « titres différents ») — le premier message, lui, est rejoué
 // à l'identique par le resume : c'est ce second signal qui doit trancher.
-const PROMPT = 'Implémente le lot 1 (repli auto des groupes terminés) du plan Tools/ClaudeCodeQuotaBar/PLAN_repli_auto_groupe_done_2026-08-04.md';
+const PROMPT = 'Implement batch 1 (auto-collapse of finished groups) from Tools/X/PLAN.md';
 map = computeSupersededBy([
-  c({ sessionId: 'husk', title: 'Implémenter lot 1 (repli auto groupes terminés)', mtime: 100, firstUser: PROMPT }),
-  c({ sessionId: 'succ', title: 'Implémenter lot 1 (repli auto des groupes terminés)', mtime: 200, tabOpen: true, firstUser: PROMPT }),
+  c({ sessionId: 'husk', title: 'Implement batch 1 (auto-collapse finished groups)', mtime: 100, firstUser: PROMPT }),
+  c({ sessionId: 'succ', title: 'Implement batch 1 (auto-collapse of finished groups)', mtime: 200, tabOpen: true, firstUser: PROMPT }),
 ]);
 check('ai-titles divergents d\'un mot + même premier message → husk supplanté par prompt',
   map.husk === 'succ' && Object.keys(map).length === 1, JSON.stringify(map));
 
 // Même scénario mais successeur VIVANT (pas d'onglet à consulter) : même verdict.
 map = computeSupersededBy([
-  c({ sessionId: 'husk', title: 'Implémenter lot 1 (repli auto groupes terminés)', mtime: 100, firstUser: PROMPT }),
-  c({ sessionId: 'succ', title: 'Implémenter lot 1 (repli auto des groupes terminés)', mtime: 300, live: true, firstUser: PROMPT }),
+  c({ sessionId: 'husk', title: 'Implement batch 1 (auto-collapse finished groups)', mtime: 100, firstUser: PROMPT }),
+  c({ sessionId: 'succ', title: 'Implement batch 1 (auto-collapse of finished groups)', mtime: 300, live: true, firstUser: PROMPT }),
 ]);
 check('… successeur vivant sans onglet matché → husk supplanté quand même',
   map.husk === 'succ', JSON.stringify(map));
@@ -151,8 +152,8 @@ check('titres et premiers messages différents → aucune supplantation',
 // on le revérifie explicitement avec des titres divergents pour marquer la
 // non-régression : sans le second signal, on ne fold RIEN.
 map = computeSupersededBy([
-  c({ sessionId: 'husk', title: 'Implémenter lot 1 (repli auto groupes terminés)', mtime: 100 }),
-  c({ sessionId: 'succ', title: 'Implémenter lot 1 (repli auto des groupes terminés)', mtime: 200, tabOpen: true }),
+  c({ sessionId: 'husk', title: 'Implement batch 1 (auto-collapse finished groups)', mtime: 100 }),
+  c({ sessionId: 'succ', title: 'Implement batch 1 (auto-collapse of finished groups)', mtime: 200, tabOpen: true }),
 ]);
 check('titres divergents SANS firstUser fourni → aucune supplantation (dégradation silencieuse)',
   Object.keys(map).length === 0, JSON.stringify(map));
@@ -176,8 +177,8 @@ function writeTranscript(sessionId, aiTitle, mtimeMs) {
 // husk = plus ancien, successeur = plus récent, MÊME ai-title. Une seule conv
 // « seule » à titre distinct pour le témoin.
 const now = Date.now();
-writeTranscript('husk', 'Implémenter lot 1 allègement panneau vagues', now - 90 * 60 * 1000);
-writeTranscript('succ', 'Implémenter lot 1 allègement panneau vagues', now - 60 * 1000);
+writeTranscript('husk', 'Implement batch 1 slimmer wave panel', now - 90 * 60 * 1000);
+writeTranscript('succ', 'Implement batch 1 slimmer wave panel', now - 60 * 1000);
 writeTranscript('solo', 'Une conversation unique', now - 30 * 1000);
 
 const tabs = (...labels) => ({ known: true, labels });
@@ -191,7 +192,7 @@ function snapshot(tabProvider, live = new Set()) {
 
 // L'onglet « allègement panneau vagues » est ouvert (il matche husk ET succ) :
 // le successeur (plus frais) reste, le husk sort, la redirection est publiée.
-let snap = snapshot(() => tabs('Implémenter lot 1 allègement panneau vagues', 'Une conversation unique'));
+let snap = snapshot(() => tabs('Implement batch 1 slimmer wave panel', 'Une conversation unique'));
 let ids = snap.conversations.map((c2) => c2.sessionId);
 check('le successeur reste dans la liste', ids.includes('succ'), ids.join(' | '));
 check('le husk (doublon) sort de la liste', !ids.includes('husk'), ids.join(' | '));
@@ -227,16 +228,16 @@ function writeTranscriptWithPrompt(dir, sessionId, aiTitle, promptText, mtimeMs)
 
 // Premier prompt réel du batch (repris du plan) : c'est lui, pas l'ai-title
 // dérivé, que le resume rejoue à l'identique.
-const REAL_PROMPT = 'Implémente le lot 1 (repli auto des groupes terminés) du plan Tools/ClaudeCodeQuotaBar/PLAN_repli_auto_groupe_done_2026-08-04.md — lis le plan en entier avant de commencer.';
+const REAL_PROMPT = 'Implement batch 1 (auto-collapse of finished groups) from Tools/X/PLAN.md — read the whole plan before you start.';
 const now2 = Date.now();
 // Husk : tour fini proprement en `done` (jamais un reload), ai-title SANS « des ».
-writeTranscriptWithPrompt(projectDir2, 'husk2', 'Implémenter lot 1 (repli auto groupes terminés)', REAL_PROMPT, now2 - 60 * 60 * 1000);
+writeTranscriptWithPrompt(projectDir2, 'husk2', 'Implement batch 1 (auto-collapse finished groups)', REAL_PROMPT, now2 - 60 * 60 * 1000);
 // Successeur : né sans reload, ai-title divergent d'un mot, MÊME premier message.
-writeTranscriptWithPrompt(projectDir2, 'succ2', 'Implémenter lot 1 (repli auto des groupes terminés)', REAL_PROMPT, now2 - 60 * 1000);
+writeTranscriptWithPrompt(projectDir2, 'succ2', 'Implement batch 1 (auto-collapse of finished groups)', REAL_PROMPT, now2 - 60 * 1000);
 
 // Seul l'onglet du successeur est ouvert — comme dans l'incident réel, le husk
 // n'a plus aucun onglet à son nom (titre différent).
-const openSuccTab = () => tabs('Implémenter lot 1 (repli auto des groupes terminés)');
+const openSuccTab = () => tabs('Implement batch 1 (auto-collapse of finished groups)');
 
 function snapshot2(withSecondSignal) {
   const reader = state.createTranscriptReader();

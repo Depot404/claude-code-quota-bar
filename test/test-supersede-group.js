@@ -119,14 +119,14 @@ function writeTranscript(id, title, promptText, mtimeMs) {
 
 // Premier prompt réel du batch (repris du plan) : c'est lui, pas l'ai-title
 // dérivé, que le resume rejoue à l'identique.
-const REAL_PROMPT = 'Implémente le lot 1 (repli auto des groupes terminés) du plan Tools/ClaudeCodeQuotaBar/PLAN_repli_auto_groupe_done_2026-08-04.md — lis le plan en entier avant de commencer.';
+const REAL_PROMPT = 'Implement batch 1 (auto-collapse of finished groups) from Tools/X/PLAN.md — read the whole plan before you start.';
 const now = Date.now();
 // Husk : tour fini proprement (`done`), 90 min avant le successeur, jamais un
 // reload. Ai-title SANS « des ».
-writeTranscript('husk', 'Implémenter lot 1 (repli auto groupes terminés)', REAL_PROMPT, now - 90 * 60 * 1000);
+writeTranscript('husk', 'Implement batch 1 (auto-collapse finished groups)', REAL_PROMPT, now - 90 * 60 * 1000);
 // Successeur : né SANS reload (aucun événement de fenêtre avant son écriture),
 // ai-title divergent d'un mot, MÊME premier message, sous LE MÊME onglet.
-writeTranscript('succ', 'Implémenter lot 1 (repli auto des groupes terminés)', REAL_PROMPT, now - 60 * 1000);
+writeTranscript('succ', 'Implement batch 1 (auto-collapse of finished groups)', REAL_PROMPT, now - 60 * 1000);
 
 const STATE_FILE = path.join(SANDBOX, '.claude', 'sessions-state.json');
 function writeSessionsState(obj) { fs.writeFileSync(STATE_FILE, JSON.stringify({ version: 1, sessions: obj })); }
@@ -162,7 +162,7 @@ async function run() {
   // (« même onglet pour les deux lignes »). Aucun tab ne porte plus le titre
   // du husk : c'est exactement ce qui, via isGone (state.js), le masque de la
   // vue AVANT même que la supplantation ait pu jouer sur le seul titre.
-  GROUPS = [group([claude('Implémenter lot 1 (repli auto des groupes terminés)')])];
+  GROUPS = [group([claude('Implement batch 1 (auto-collapse of finished groups)')])];
 
   const context = { subscriptions: [], workspaceState, globalState };
   ext.activate(context);
@@ -180,7 +180,7 @@ async function run() {
   // n'a rien pu envoyer (`this._view` pas encore posé) : un événement d'onglet
   // bénin force un recompute → onChange → pushPanelState, comme dans
   // test-wave-advance.js.
-  emitTabs({ closed: [], opened: [], changed: [claude('Implémenter lot 1 (repli auto des groupes terminés)')] });
+  emitTabs({ closed: [], opened: [], changed: [claude('Implement batch 1 (auto-collapse of finished groups)')] });
 
   let state = null;
   for (let i = 0; i < 100 && !state; i++) {

@@ -102,8 +102,8 @@ writeTranscript('keep-me', 'Conversation qui doit rester');
 // PROPRE onglet ouvert, avec un libellé différent (donc jamais « gone » côté
 // tabs.js). C'est exactement le bug : fermer amb-a devait faire disparaître
 // AMB-A, pas retirer le chip d'amb-b.
-writeTranscript('amb-a', "Implémente le lot unique du bug de fermeture d'onglet manuel");
-writeTranscript('amb-b', "Implémente le lot unique de l'ajout de tâche au groupe existant");
+writeTranscript('amb-a', "Implement the single batch for the manual tab-close bug");
+writeTranscript('amb-b', "Implement the single batch for adding a task to an existing group");
 
 const STATE_FILE = path.join(SANDBOX, '.claude', 'sessions-state.json');
 const now = Date.now();
@@ -182,25 +182,25 @@ async function run() {
   // avant le fix.
   GROUPS = [group([
     claude('Conversation qui doit …'),
-    claude("Implémente le lot uniq…"),
-    claude("Implémente le lot unique de l'ajout de t…"),
+    claude("Implement the single batch f…"),
+    claude("Implement the single batch for adding a…"),
   ])];
   await sleep(50);
   const beforeAmb = titlesOf();
   check('amb-a et amb-b affichées avant fermeture',
-    beforeAmb.some((t) => t.startsWith("Implémente le lot unique du bug"))
-    && beforeAmb.some((t) => t.startsWith("Implémente le lot unique de l'ajout")),
+    beforeAmb.some((t) => t.startsWith("Implement the single batch for the manual"))
+    && beforeAmb.some((t) => t.startsWith("Implement the single batch for adding")),
     beforeAmb.join(' | '));
 
   GROUPS = [group([
     claude('Conversation qui doit …'),
-    claude("Implémente le lot unique de l'ajout de t…"),
+    claude("Implement the single batch for adding a…"),
   ])];
-  emitTabs({ closed: [claude("Implémente le lot uniq…")], opened: [], changed: [] });
+  emitTabs({ closed: [claude("Implement the single batch f…")], opened: [], changed: [] });
   await sleep(300);
   const afterAmb = titlesOf();
   check('amb-b (onglet toujours ouvert, titre voisin) n\'est JAMAIS retirée par la fermeture d\'amb-a',
-    afterAmb.some((t) => t.startsWith("Implémente le lot unique de l'ajout")), afterAmb.join(' | '));
+    afterAmb.some((t) => t.startsWith("Implement the single batch for adding")), afterAmb.join(' | '));
   const sessionsAmb = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).sessions;
   check('l\'entrée sessions-state.json d\'amb-b n\'est pas purgée',
     sessionsAmb['amb-b'] && sessionsAmb['amb-b'].state === 'busy', JSON.stringify(sessionsAmb['amb-b']));
