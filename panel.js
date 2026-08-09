@@ -179,6 +179,24 @@ function renderHtml(webview) {
     --pace-green: var(--vscode-charts-green, #89d185);
     --pace-yellow: var(--vscode-charts-yellow, #cca700);
     --pace-red: var(--vscode-charts-red, #f14c4c);
+    /* ── Densité verticale (2026-08-09) : UN seul point de réglage ────────────
+       Le panneau vit dans une sidebar haute et étroite : la ressource rare est
+       la HAUTEUR, et elle partait en blancs de séparation — mesuré au banc, un
+       séparateur de vague ou une ligne fantôme portait 14px de vide (10 au-
+       dessus, 4 en dessous) pour une boîte de 13 à 22px, et un groupe complet
+       dépensait ~40% de sa hauteur en séparateurs. Ces trois variables
+       remplacent toutes les valeurs d'espacement vertical écrites en dur : un
+       réglage de densité se fait ICI, jamais règle par règle (sinon elles
+       divergent, c'est ce qui s'était produit). Elles ne touchent QUE le vide —
+       aucune boîte porteuse d'information (ligne de conversation, barre de
+       contexte, glyphe) n'est rétrécie : leur géométrie est prouvée au pixel
+       par test-panel-render.js §16 et ne doit pas bouger.
+         --sp-block : blanc AVANT un bloc de haut niveau (section, quota, form)
+         --sp-sep   : blanc autour d'un séparateur interne (vague, fantôme)
+         --sp-tight : blanc APRÈS un en-tête, ou entre deux éléments serrés */
+    --sp-block: 6px;
+    --sp-sep: 4px;
+    --sp-tight: 2px;
   }
   /* Enregistrée = le moteur interpole un <angle> en douceur (la longueur du
      serpentin croît/décroît au lieu de sauter) — condition pour l'animation
@@ -189,7 +207,7 @@ function renderHtml(webview) {
     initial-value: 90deg;
   }
   body {
-    padding: 6px 8px 10px;
+    padding: var(--sp-sep) 8px var(--sp-block);
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size, 13px);
     color: var(--vscode-foreground);
@@ -204,7 +222,7 @@ function renderHtml(webview) {
   }
   h2 {
     display: flex; align-items: center; gap: 6px;
-    margin: 10px 0 4px;
+    margin: var(--sp-block) 0 var(--sp-tight);
     font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
     color: var(--muted);
   }
@@ -213,12 +231,12 @@ function renderHtml(webview) {
     padding: 0 5px; border-radius: 8px;
     background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
   }
-  .empty { padding: 6px 2px; color: var(--muted); font-style: italic; }
+  .empty { padding: var(--sp-sep) 2px; color: var(--muted); font-style: italic; }
   /* Canari viewType (lot 13 §1) : signal discret, jamais de popup. Réutilise
      la teinte "attention" déjà en place, pas une couleur dédiée. */
   .canary {
     display: none;
-    margin: 2px 2px 6px; padding: 4px 6px; border-radius: 4px;
+    margin: 2px 2px var(--sp-sep); padding: 3px 6px; border-radius: 4px;
     font-size: 11px; color: var(--waiting);
     background: color-mix(in srgb, var(--waiting) 12%, transparent);
   }
@@ -227,7 +245,11 @@ function renderHtml(webview) {
   /* ── Conversations ── */
   .conv {
     display: grid; grid-template-columns: 16px 1fr; gap: 8px;
-    padding: 5px 6px; border-radius: 4px;
+    /* Vertical seul en --sp-tight (lot A, 2026-08-09) : la ligne est le poste
+       dominant du panneau (une par conversation), c'est elle qui doit porter
+       le gros de l'économie de densité. Horizontal inchangé — la gouttière ne
+       fait pas partie du chantier vertical. */
+    padding: var(--sp-tight) 6px; border-radius: 4px;
     cursor: pointer;
     /* Repère du bouton « rattacher » (.link-master, lot B 2026-08-09) — une
        ligne plate n'a AUCUN wrapper (rowFor() la place directement dans le
@@ -254,9 +276,25 @@ function renderHtml(webview) {
   .conv .meta .ctx { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
 
   /* Pastilles d'état : la forme porte l'info autant que la couleur
-     (daltonisme + thèmes à contraste élevé). */
+     (daltonisme + thèmes à contraste élevé).
+     UN SEUL JEU DE SYMBOLES, quel que soit le contexte (2026-08-09) : une
+     conversation interrompue montre le même carré dans un lot et hors lot.
+     Ce qui l'interdisait était une TECHNIQUE de dessin, pas un besoin : une
+     forme portée par la BORDURE de l'icône est avalée par l'anneau du rail
+     (pseudo z-index:-1 à fond opaque, peint au-dessus de la bordure de son
+     hôte). Toute forme d'état se dessine donc dans un pseudo POSITIONNÉ —
+     il se peint après les z-négatifs (motif prouvé en CDP pour l'arc busy en
+     2.28.2) — jamais dans la bordure de l'hôte. C'est ce qui permet de
+     supprimer le jeu de symboles parallèle du groupe (⚠ commun à stale et
+     interrupted, deux états rendus indiscernables). */
   .ico { margin-top: 4px; width: 10px; height: 10px; justify-self: center; }
-  .ico-stale { border-radius: 50%; background: transparent; border: 1.5px dashed var(--stale); }
+  /* « En sommeil » : cercle pointillé. Le pseudo remplit la boîte (inset 0),
+     donc le centrage suit la boîte icône sans compensation chiffrée. */
+  .ico-stale { position: relative; }
+  .ico-stale::before {
+    content: ''; position: absolute; inset: 0; box-sizing: border-box;
+    border-radius: 50%; background: transparent; border: 1.5px dashed var(--stale);
+  }
   /* « ? » : un seul état visuel pour TOUTE attente user (question posée,
      permission, idle_prompt) — le lot 11 unifie ces trois signaux hooks/
      transcript derrière le même symbole. Pas d'animation : contrairement au
@@ -297,12 +335,11 @@ function renderHtml(webview) {
      est resté en plan. Muted et non coloré : c'est un fait à retrouver dans la
      liste, pas une alerte qui réclame quelque chose. Distinct du cercle pointillé
      de l'état stale par la forme comme par le trait. */
-  .ico-interrupted {
+  .ico-interrupted { position: relative; }
+  .ico-interrupted::before {
+    content: ''; position: absolute; inset: 0.5px; box-sizing: border-box;
     border: 1.5px solid var(--muted);
     border-radius: 1px;
-    box-sizing: border-box;
-    width: 9px; height: 9px;
-    margin-top: 4.5px;
   }
   /* L'arc busy vit dans un ::before POSITIONNÉ, jamais dans la bordure de
      l'élément (2026-08-06, 4e signalement « pas de loading » — cause prouvée
@@ -382,16 +419,16 @@ function renderHtml(webview) {
   }
 
   /* ── Quota ── */
-  .q { margin: 8px 0 10px; }
+  .q { margin: var(--sp-sep) 0 var(--sp-block); }
   .q-head { display: flex; align-items: baseline; }
   .q-label { font-size: 11px; color: var(--muted); }
   .q-pct { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
-  .q-sub { margin-top: 3px; font-size: 11px; color: var(--muted); }
+  .q-sub { margin-top: var(--sp-tight); font-size: 11px; color: var(--muted); }
 
   /* ── Pied ── */
   .foot {
     display: flex; align-items: center; gap: 10px;
-    margin-top: 12px; padding-top: 8px;
+    margin-top: var(--sp-block); padding-top: var(--sp-block);
     border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
     font-size: 11px; color: var(--muted);
   }
@@ -415,7 +452,7 @@ function renderHtml(webview) {
   /* ── En-têtes de section repliables ── */
   .sec-head {
     display: flex; align-items: center; gap: 6px;
-    margin: 10px 0 4px; padding: 2px 2px;
+    margin: var(--sp-block) 0 var(--sp-tight); padding: 1px 2px;
     border-radius: 3px; cursor: pointer; user-select: none;
   }
   .sec-head:hover { background: var(--vscode-list-hoverBackground); }
@@ -438,7 +475,7 @@ function renderHtml(webview) {
      que .sec-head (chevron + repli), gabarit plus discret — ce n'est pas une
      section de haut niveau comme Conversations/Quota, c'est une extension du
      lanceur, toujours dépliée par défaut. */
-  .sec-head.sub { margin: 8px 0 4px; }
+  .sec-head.sub { margin: var(--sp-block) 0 var(--sp-tight); }
   .sec-head.sub h3 {
     margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .06em;
     text-transform: uppercase; color: var(--muted);
@@ -449,7 +486,7 @@ function renderHtml(webview) {
      lisible en clair, en sombre et en contraste élevé, sans une seule couleur
      en dur. Les boutons segmentés remplacent tout dropdown (décision 4 du
      plan) : le choix courant est visible sans ouvrir quoi que ce soit. */
-  .batch { margin-top: 10px; }
+  .batch { margin-top: var(--sp-block); }
   .btn {
     font: inherit; font-size: 11px;
     padding: 3px 8px; border-radius: 3px; cursor: pointer;
@@ -472,7 +509,7 @@ function renderHtml(webview) {
     color: var(--muted); border-color: var(--vscode-panel-border, rgba(128,128,128,.35));
   }
   .btn.pri.dim:hover { background: var(--vscode-list-hoverBackground); }
-  .hint { margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .hint { margin-top: var(--sp-sep); font-size: 11px; color: var(--muted); }
   .tip-restore {
     margin-left: 6px; cursor: pointer; opacity: .5; font-size: 10px;
     display: inline-flex; align-items: center; justify-content: center;
@@ -482,18 +519,18 @@ function renderHtml(webview) {
   .tip-restore:hover { opacity: 1; }
   .notice {
     display: none;
-    margin: 6px 0; padding: 4px 6px; border-radius: 4px; font-size: 11px;
+    margin: var(--sp-sep) 0; padding: 3px 6px; border-radius: 4px; font-size: 11px;
     background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
   }
   .notice.show { display: block; }
   .banner {
-    margin: 6px 0; padding: 4px 6px; border-radius: 4px; font-size: 11px;
+    margin: var(--sp-sep) 0; padding: 3px 6px; border-radius: 4px; font-size: 11px;
     background: color-mix(in srgb, var(--waiting) 12%, transparent); color: var(--waiting);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .banner.info { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); color: var(--muted); }
   .banner.err { background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 14%, transparent); color: var(--vscode-errorForeground, #f14c4c); }
-  .fld-label { display: block; margin: 8px 0 3px; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .fld-label { display: block; margin: var(--sp-block) 0 var(--sp-tight); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
   textarea.inp {
     width: 100%; box-sizing: border-box; resize: vertical;
     font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45;
@@ -516,7 +553,7 @@ function renderHtml(webview) {
   }
   .wave-hdr {
     display: flex; align-items: center; gap: 6px;
-    margin: 10px 0 4px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+    margin: var(--sp-sep) 0 var(--sp-tight); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
   }
   .wave-hdr::before, .wave-hdr::after { content: ''; flex: 1; height: 1px; background: var(--vscode-panel-border, rgba(128,128,128,.35)); }
   .wave-hdr-label {
@@ -539,7 +576,7 @@ function renderHtml(webview) {
     position: relative; z-index: 1;
     cursor: pointer; justify-content: center;
     border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
-    border-radius: 12px; padding: 3px 10px;
+    border-radius: 12px; padding: var(--sp-tight) 10px;
   }
   .wave-hdr.launch::before, .wave-hdr.launch::after { content: none; }
   .wave-hdr.launch:hover { background: var(--vscode-list-hoverBackground); }
@@ -551,18 +588,35 @@ function renderHtml(webview) {
   /* Ligne fantôme « + nouvelle vague » : toujours présente en fin de groupe. */
   .wave-ghost {
     display: flex; align-items: center; justify-content: center;
-    margin: 10px 0 4px; padding: 3px 4px; border-radius: 3px; cursor: pointer;
+    margin: var(--sp-sep) 0 var(--sp-tight); padding: var(--sp-tight) 4px; border-radius: 3px; cursor: pointer;
     font-size: 10px; letter-spacing: .06em; color: var(--muted);
     border-top: 1px dashed var(--vscode-panel-border, rgba(128,128,128,.35));
+    overflow: hidden; white-space: nowrap;
   }
   .wave-ghost:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+  /* Ligne fantôme FINALE : UNE ligne, DEUX cibles (lot B densité, 2026-08-09).
+     Un groupe se terminait par deux lignes pleine largeur empilées — « + add to
+     this wave » (la dernière vague en file) puis « + new wave » — soit ~52 px
+     de hauteur pour deux actions voisines, dans une sidebar où le pixel
+     vertical est la ressource rare. Elles partagent maintenant la même rangée,
+     chacune sur sa moitié : deux boîtes distinctes, deux bordures pointillées
+     séparées par le gap, deux survols indépendants — donc deux cibles qu'on ne
+     confond pas, alors qu'un seul bouton à deux zones se serait payé en clics
+     ratés. Ce sont les MÊMES nœuds qu'avant (mêmes classes, mêmes écouteurs,
+     mêmes garde-fous) : seule leur boîte parente change, aucune règle métier
+     ne se rejoue ici. La cellule d'ajout n'est présente QUE lorsque la
+     dernière vague est en file ; sinon elle n'existe pas dans le DOM (jamais
+     masquée par un style — un enfant de flux coûte sa place même invisible),
+     et « + new wave » occupe seule toute la ligne, exactement comme avant. */
+  .ghost-line { display: flex; align-items: stretch; gap: 6px; margin: var(--sp-sep) 0 var(--sp-tight); }
+  .ghost-line > .wave-ghost { flex: 1 1 0; min-width: 0; margin: 0; }
   .task {
-    margin-bottom: 6px; padding: 6px; border-radius: 4px;
+    margin-bottom: var(--sp-sep); padding: 5px; border-radius: 4px;
     border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
   }
   .task-top { display: flex; gap: 4px; align-items: flex-start; }
   .task-top textarea { flex: 1; min-width: 0; }
-  .task-row { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 5px; }
+  .task-row { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: var(--sp-sep); }
   .task-row .lbl { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
   /* Un libellé ne doit JAMAIS se retrouver seul en fin de ligne, séparé des
      boutons qu'il nomme : la sidebar est étroite, le retour à la ligne est la
@@ -586,7 +640,7 @@ function renderHtml(webview) {
   .seg button:hover { background: var(--vscode-list-hoverBackground); }
   .seg button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .seg.off button { opacity: .4; cursor: default; }
-  .form-foot { display: flex; gap: 6px; align-items: center; margin-top: 10px; }
+  .form-foot { display: flex; gap: 6px; align-items: center; margin-top: var(--sp-block); }
   .form-foot .spacer { flex: 1; }
   /* Badge d'écart intention/réel : le seul endroit du panneau qui parle de ce
      qui a été DEMANDÉ. Discret et non cliquable — c'est un constat, pas une
@@ -612,7 +666,7 @@ function renderHtml(webview) {
      par un padding égal, si bien que la boîte de contenu ne bouge pas d'un
      pixel — seules les bandes sortent. Une seule valeur, partagée par la grip
      et la ligne master : elles ne peuvent pas diverger. */
-  .grp { margin: 2px 0 8px; --grp-bleed: 5px; }
+  .grp { margin: 2px 0 var(--sp-block); --grp-bleed: 5px; }
   .grp-head {
     display: flex; align-items: center; gap: 5px;
     margin: 0 calc(-1 * var(--grp-bleed));
@@ -647,6 +701,17 @@ function renderHtml(webview) {
     border-radius: 3px; font-size: 11px; line-height: 1.2; color: var(--muted);
   }
   .gbtn:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+  /* Dissoudre le lot (2026-08-09) : révélé au survol de la grip, invisible au
+     repos — la rangée nominale reste chevron + compteur. Contrairement aux
+     boutons des LIGNES, il peut rester dans le flux : la grip ne porte aucune
+     barre de contexte et son seul voisin élastique est le spacer, donc sa
+     largeur ne rogne rien (l'invariant « au pixel » du dossier porte sur les
+     lignes de conversation, jamais sur cette rangée). Aucune couleur d'alerte :
+     le rouge a été banni des gestes du panneau, et la modale de dissolution
+     porte déjà l'avertissement. Séparé du ⌂ par une gouttière propre — les
+     deux peuvent s'afficher ensemble sur un lot sans maîtresse. */
+  .g-kill { margin-left: 3px; opacity: 0; transition: opacity .1s; }
+  .grp-head:hover .g-kill, .g-kill:focus-visible { opacity: 1; }
   /* Ligne master (plan repli-auto étape 9) : même wrapping que .m-head/.m-slot
      (défini plus bas) pour un membre — et, depuis 2026-08-07, même sortie de
      flux pour ses deux boutons (✕ de dissolution, chip « délier ») : aucun
@@ -811,26 +876,19 @@ function renderHtml(webview) {
      ici : la classe ico-busy de groupe retombe donc sur LA MÊME classe et
      les mêmes keyframes spin que les lignes plates — une seule définition,
      aucune divergence de teinte ni de cadence possible entre les contextes. */
-  /* ÉTAPE 19 — le glyphe ⚠ était rendu en ligne de texte (line-height + text-
-     align) : sa BOÎTE tombait au centre de l'anneau, pas son ENCRE. Le
-     centrage passe donc par une boîte flex (le glyphe est un item, centré sur
-     les deux axes quelle que soit sa chasse) avec une interligne ramenée à 1 —
-     la boîte du glyphe se réduit alors à son cadratin, et le jambage que ce
-     caractère n'utilise pas ne le pousse plus vers le bas. Aucune compensation
-     chiffrée : mesuré à la boucle CDP (encre du glyphe échantillonnée sur les
-     PIXELS de la capture, comparée au centre de l'anneau), l'écart restant
-     tient dans le demi-pixel de tramage — un décalage en em, lui, aurait été
-     un nombre magique dépendant de la police du thème. */
-  .grp-body .conv .ico-interrupted, .grp-body .conv .ico-stale {
-    border: none; background: none;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 10px; font-weight: 700; line-height: 1;
-  }
-  .grp-body .conv .ico-interrupted { color: var(--muted); }
-  .grp-body .conv .ico-stale { color: var(--stale); }
-  .grp-body .conv .ico-interrupted::before, .grp-body .conv .ico-stale::before {
-    content: '⚠'; display: block;
-  }
+  /* SUPPRIMÉ 2026-08-09 — le jeu de symboles parallèle du groupe.
+     Il vivait ici : « interrupted » et « stale » perdaient leur forme propre
+     (carré / cercle pointillé) pour un « ⚠ » commun, distingué par la seule
+     teinte. Deux vocabulaires selon le contexte, et deux états rendus
+     indiscernables l'un de l'autre dans un lot — signalé par l'user (« je ne
+     veux pas deux listes de symboles »). La cause n'était pas un besoin de
+     lisibilité mais la technique de dessin : ces deux formes-là étaient les
+     seules portées par la BORDURE de l'icône, donc les seules avalées par
+     l'anneau. Corrigé à la source (pseudos positionnés, cf. le bloc des
+     pastilles) : il n'y a plus rien à redéfinir ici, et il ne doit plus jamais
+     rien y avoir. Toute forme d'état ajoutée plus tard se dessine en pseudo
+     positionné et vaut pour les DEUX contextes ; si elle disparaît dans un
+     anneau, c'est le dessin qu'on corrige, pas le symbole qu'on remplace. */
   /* Séparateurs de vague, ligne fantôme, bannières (waveCtrl) ET pill de
      lancement : tout commence APRÈS l'axe du rail (14px + marge) pour ne pas
      le croiser. Étape 16 : waveCtrl ajouté à ce groupe de sélecteurs (pas de
@@ -841,10 +899,16 @@ function renderHtml(webview) {
   .grp-body .wave-hdr:not(.launch), .grp-body .wave-ctrl { padding-left: 20px; }
   .grp-body .wave-hdr.launch { margin-left: 20px; }
   .grp-body .wave-ghost { margin-left: 20px; }
+  /* La ligne fantôme finale porte l'écart pour ses DEUX cellules : c'est elle
+     la boîte qui longe le rail, elles ne s'en écartent pas une seconde fois
+     (sélecteur à trois classes = il prime sur la règle ci-dessus, quel que
+     soit l'ordre des déclarations). */
+  .grp-body .ghost-line { margin-left: 20px; }
+  .grp-body .ghost-line > .wave-ghost { margin-left: 0; }
   /* Moteur de vagues (lot 4) : en-tête de vague identique à celui du formulaire,
      toggle auto/manuel dans l'en-tête de groupe, contrôle de vague suivante en
      bas de la vague courante. */
-  .wave-ctrl { margin: 2px 0 10px; }
+  .wave-ctrl { margin: 2px 0 var(--sp-block); }
   .wave-ctrl:empty { display: none; margin: 0; }
   .wave-ctrl .btn { margin-top: 3px; }
   /* 2026-08-07 — la ligne d'un membre n'a plus QU'un enfant de flux : sa
@@ -869,7 +933,10 @@ function renderHtml(webview) {
      emprunté à une autre — un membre non lié n'a pas d'état. */
   .m-pending {
     display: grid; grid-template-columns: 16px 1fr; gap: 8px;
-    padding: 5px 6px; border-radius: 4px;
+    /* Même resserrement que .conv (lot A) : une ligne en attente et une ligne
+       lancée sont la même ligne à deux états (cf. .m-slot .conv .title
+       ci-dessus), leur gabarit vertical ne peut pas diverger. */
+    padding: var(--sp-tight) 6px; border-radius: 4px;
   }
   .m-pending .ico-pending {
     margin-top: 4px; width: 9px; height: 9px; justify-self: center; box-sizing: border-box;
@@ -907,16 +974,14 @@ function renderHtml(webview) {
      au repos, sinon cette bande invisible avalerait les clics destinés à la
      ligne (le ⤴, lui, ne fait que 15 px et précède cette règle). */
   .m-move {
-    position: absolute; top: 4px; right: 19px; z-index: 3;
+    /* Même calc que .m-out (lot A) : aligné sur l'axe de l'icône, suit
+       --sp-tight tout seul. */
+    position: absolute; top: calc(var(--sp-tight) - 1px); right: 19px; z-index: 3;
     display: flex; gap: 4px;
     opacity: 0; pointer-events: none; transition: opacity .1s;
   }
   .member:hover .m-move, .m-move:focus-within { opacity: 1; pointer-events: auto; }
   .m-note { font-size: 10px; color: var(--muted); }
-  .m-hover { opacity: 0; transition: opacity .1s; }
-  /* .grp-master-head : même porte de sortie « au survol » que .member
-     (plan repli-auto étape 9 — le bouton « délier » de la ligne master). */
-  .member:hover .m-hover, .grp-master-head:hover .m-hover, .m-hover:focus-visible { opacity: 1; }
   /* Le bouton de retrait est un OVERLAY (cf. .m-out) : le pointeur qui le vise
      SORT de .conv — il n'en est pas un enfant — et éteindrait son fond de
      survol, si bien que le fond du bouton (calé sur celui d'une ligne
@@ -926,20 +991,14 @@ function renderHtml(webview) {
   .member:hover .conv:not(.active), .grp-master-head:hover .conv:not(.active) {
     background: var(--vscode-list-hoverBackground);
   }
-  /* « Délier » : hors du flux (étape 13). Dans le flux flex de la ligne
-     master, ce chip invisible au repos COÛTAIT quand même sa largeur : il
-     rétrécissait la ligne de ~42px (mesuré en CDP) — d'où la croix et la barre
-     de contexte de la master décalées par rapport aux autres convs. « Zéro
-     pixel permanent » vaut aussi pour le GABARIT, pas seulement pour l'encre.
-     Ancré sur .grp-body (seul ancêtre positionné, la ligne master n'est pas
-     positionnée pour laisser le rail passer par-dessus son fond teinté) :
-     top = margin-top de la croix (4px), même ligne de base qu'elle (le corps
-     n'a plus de padding-top sous une capsule englobante) ; right = croix
-     (15px) + gouttière (4px) + 4px. */
-  /* Décalage du chip « délier » : la largeur du bouton de retrait (15px) plus
-     sa gouttière (4px), à partir du bord de la colonne de contenu — jamais un
-     nombre recopié : la même valeur --grp-bleed que le bouton lui-même. */
-  .grp-master-head .m-hover { position: absolute; top: 4px; right: calc(var(--grp-bleed) + 19px); }
+  /* Le chip texte « Délier » de la ligne maîtresse a disparu (2026-08-09) :
+     son geste est devenu le ⤴ ci-dessous, celui-là même que porte tout membre.
+     Avec lui s'en vont la classe .m-hover et sa règle de position — plus aucun
+     élément ne les portait. L'acquis de l'étape 13 reste, lui, entièrement
+     valable et vaut pour son remplaçant : un bouton de la ligne maîtresse
+     n'est JAMAIS un enfant du flux flex (invisible, il coûterait quand même sa
+     largeur — ~42px mesurés en CDP à l'époque, d'où la barre de contexte de la
+     master plus courte que celle des autres lignes). */
   /* Sortie d'une conversation de son groupe (2026-08-07) — DEUX exigences que
      seul un overlay satisfait ensemble :
        1. « une ligne de groupe et une ligne plate sont strictement
@@ -970,7 +1029,13 @@ function renderHtml(webview) {
     font-size: 10px; line-height: 1; cursor: pointer;
   }
   .m-out {
-    position: absolute; top: 4px; right: 0; z-index: 3;
+    /* top calé sur l'axe de l'icône (lot A, 2026-08-09) : le 4px d'origine
+       était réglé à l'œil pour un padding-top de .conv fixé à 5px en dur.
+       .conv est passé à var(--sp-tight) — l'icône remonte d'autant, cet
+       overlay doit suivre exactement le même déplacement : (4 - (5 -
+       --sp-tight)) = --sp-tight - 1. Si --sp-tight rebouge, ce calc suit tout
+       seul plutôt que de redevenir un nombre à réajuster à l'œil. */
+    position: absolute; top: calc(var(--sp-tight) - 1px); right: 0; z-index: 3;
     opacity: 0; transition: opacity .1s;
   }
   /* La ligne master vit dans une boîte qui DÉBORDE de la colonne de contenu
@@ -993,11 +1058,14 @@ function renderHtml(webview) {
      actif tranche. Overlay DANS .conv (.conv est déjà position:relative,
      ci-dessus) — jamais un enfant du flux flex, même invisible (l'invariant
      du dossier, cf. CLAUDE.md : un enfant de flux coûte sa largeur et
-     raccourcit la barre de contexte de la ligne). Opacité/transition PROPRES
-     (pas la classe .m-hover, cf. panel.js createRow) : la ligne .conv vit
-     SOUS .grp-master-head/.member selon le contexte, un sélecteur générique
-     .grp-master-head .m-hover matcherait sinon aussi ce bouton. */
-  .link-master { position: absolute; top: 4px; right: 0; opacity: 0; transition: opacity .1s; }
+     raccourcit la barre de contexte de la ligne). Opacité/transition PROPRES,
+     jamais une classe de survol partagée (cf. panel.js createRow) : la ligne
+     .conv vit SOUS .grp-master-head/.member selon le contexte, si bien qu'un
+     sélecteur générique descendant de l'un des deux matcherait aussi ce
+     bouton — c'est ce qui avait déjà piégé l'ancien chip « délier ». */
+  /* top : même calc que .m-out (lot A) — aligné sur l'axe de l'icône, suit
+     --sp-tight tout seul. */
+  .link-master { position: absolute; top: calc(var(--sp-tight) - 1px); right: 0; opacity: 0; transition: opacity .1s; }
   .conv:hover .link-master, .link-master:focus-visible { opacity: 1; }
   /* Visible SEULEMENT sur une ligne plate vraie : le même gabarit .conv sert
      aussi la ligne master (.grp-master-slot) et chaque membre (.m-slot) —
@@ -1219,12 +1287,12 @@ function renderHtml(webview) {
     // aussi bien les lignes plates que la ligne master ou un membre de groupe
     // (rowFor() est LA même fabrique partout), donc le bouton existe toujours
     // dans le DOM ; c'est la structure d'accueil (.m-slot/.grp-master-slot)
-    // qui le masque là où il n'a pas de sens — jamais un état JS ici. PAS la
-    // classe .m-hover (son opacité/transition sont redéfinies sur .link-master
-    // directement, ci-dessous) : la ligne .conv étant nichée SOUS
+    // qui le masque là où il n'a pas de sens — jamais un état JS ici. Son
+    // opacité et sa transition lui sont PROPRES (règle .link-master), jamais
+    // une classe de survol partagée : la ligne .conv étant nichée SOUS
     // .grp-master-head (via .grp-master-slot), un sélecteur générique
-    // .grp-master-head .m-hover matcherait aussi ce bouton — c'est très
-    // exactement ce qui cassait le clic « Unlink » de la ligne master
+    // descendant de .grp-master-head matcherait aussi ce bouton — c'est très
+    // exactement ce qui cassait le clic « délier » de la ligne master
     // (querySelector prend le premier match dans
     // l'ordre du DOM), constaté par test-panel-render.js.
     const linkMaster = el('button', 'chip act link-master', '⌂');
@@ -1456,11 +1524,24 @@ function renderHtml(webview) {
     const mas = el('button', 'gbtn', '⌂');
     mas.type = 'button';
     mas.title = t('Link the active VS Code tab as this batch’s master conversation');
+    // ✕ = DISSOLUTION du lot, portée par la GRIP et non plus par la ligne
+    // maîtresse (2026-08-09) : un bouton agit sur l'objet qui le porte. Posé
+    // sur une ligne de conversation, il disait « détruis tout le bloc » à
+    // l'emplacement exact où le même geste, sur un membre, ne retire QUE cette
+    // ligne — deux sens opposés au même endroit, d'où l'hésitation signalée à
+    // chaque usage. Révélé au survol de la grip seulement : la rangée nominale
+    // reste chevron + compteur (décision maquette v5), zéro encre au repos.
+    // Classe .gbtn : le handler de repli ci-dessous ignore déjà les clics qui
+    // la portent, rien à ajouter pour que le clic ne replie pas le groupe.
+    const kill = el('button', 'gbtn g-kill', '✕');
+    kill.type = 'button';
+    kill.title = t('Dissolve this group (conversations are kept, nothing is closed)');
     head.appendChild(chev);
     head.appendChild(count);
     head.appendChild(done);
     head.appendChild(spacer);
     head.appendChild(mas);
+    head.appendChild(kill);
     const body = el('div', 'grp-body');
     // Rail P1 : un seul nœud par groupe, jamais recréé — sa position CSS est
     // absolute (le désordre DOM que place() peut lui infliger en replaçant
@@ -1476,21 +1557,21 @@ function renderHtml(webview) {
     // listée, sinon createMasterFallback() (paresseux, ci-dessous).
     const masterHead = el('div', 'grp-master-head');
     const masterSlot = el('div', 'grp-master-slot');
-    // ⨯ = DISSOLUTION seule (plan repli-auto étape 15 : le panneau agit sur
-    // les métadonnées, jamais sur les onglets) — même dissolveGroup que
-    // l'historique, sa confirmation existante comprise ; l'onglet master
-    // n'est plus touché.
-    const masterOut = el('button', 'm-out', '✕');
+    // ⤴ = RETRAIT de la ligne maîtresse — exactement le glyphe, le gabarit et
+    // le sens du bouton des membres (2026-08-09) : « cette ligne sort du
+    // bloc », partout pareil. C'est l'ancien chip texte « Dissocier » : même
+    // unlinkGroupMaster, toujours sans confirmation (geste réversible, le ⌂
+    // réapparaît aussitôt pour relier la bonne conversation), et il produit
+    // bien le même effet visible qu'un retrait de membre — la maîtresse quitte
+    // le bloc et redevient une ligne plate. Sa seule utilité réelle reste de
+    // réparer un ⌂ posé sur le mauvais onglet ; il ne méritait pas pour autant
+    // un bouton à lui, juxtaposé au ✕ (parti sur la grip) avec qui il partage,
+    // dans un lot terminé, jusqu'au résultat à l'écran.
+    const masterOut = el('button', 'm-out', '⤴');
     masterOut.type = 'button';
-    masterOut.title = t('Dissolve this group (conversations are kept, nothing is closed)');
-    // Porte de sortie d'un ⌂ posé par erreur : hover-only (m-hover), zéro
-    // pixel permanent — sans elle, un mauvais ⌂ serait irréversible.
-    const masterUnlink = el('button', 'chip act m-hover', t('Unlink'));
-    masterUnlink.type = 'button';
-    masterUnlink.title = t('Unlink (forget where this batch came from)');
+    masterOut.title = t('Remove from this batch (the batch keeps its tasks — it just forgets where it came from)');
     masterHead.appendChild(masterSlot);
     masterHead.appendChild(masterOut);
-    masterHead.appendChild(masterUnlink);
 
     root.appendChild(head);
     root.appendChild(body);
@@ -1502,27 +1583,35 @@ function renderHtml(webview) {
     // Ligne fantôme « + nouvelle vague » (plan ajout-tache 2026-07-24) :
     // TOUJOURS présente en fin de groupe, groupe fini compris (décision 2
     // du design) — un clic crée la vague max+1, jamais une vague existante.
-    const ghostRow = el('div', 'wave-ghost', t('┄ + new wave ┄'));
-    ghostRow.title = t('Add a task in a new wave after the last one');
+    // Lot B densité (2026-08-09) : ghostRow n'est plus la cellule elle-même
+    // mais la RANGÉE qui l'accueille — la ligne d'ajout de la dernière vague
+    // en file vient s'y ranger à sa gauche (renderGroups) au lieu d'occuper
+    // une deuxième rangée pleine largeur juste au-dessus. Le rail continue de
+    // mesurer sa hauteur sur ghostRow.offsetTop : la rangée a la même origine
+    // verticale que la cellule qu'elle remplace, measureRail est inchangé.
+    const ghostRow = el('div', 'ghost-line');
+    const ghostNew = el('div', 'wave-ghost wave-new', t('+ new wave'));
+    ghostNew.title = t('Add a task in a new wave after the last one');
+    ghostRow.appendChild(ghostNew);
     const node = {
       root, head, chev, count, done, body, members: new Map(), id: g.id,
-      mas, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
-      rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow,
-      masterHead, masterSlot, masterOut, masterUnlink, masterFallback: null,
+      mas, kill, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
+      rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow, ghostNew,
+      masterHead, masterSlot, masterOut, masterFallback: null,
     };
     head.addEventListener('click', function (e) {
       if (e.target !== head && head.contains(e.target) && e.target.classList.contains('gbtn')) return;
       vscode.postMessage({ type: 'toggleGroupCollapse', id: node.id });
     });
     mas.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'setGroupMaster', id: node.id }); });
-    masterOut.addEventListener('click', function (e) {
+    kill.addEventListener('click', function (e) {
       e.stopPropagation();
       vscode.postMessage({ type: 'dissolveGroup', id: node.id });
     });
-    masterUnlink.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'unlinkGroupMaster', id: node.id }); });
-    ghostRow.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(node.id, null); });
-    ghostRow.addEventListener('mouseenter', function () { highlightPromptField(true); });
-    ghostRow.addEventListener('mouseleave', function () { highlightPromptField(false); });
+    masterOut.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'unlinkGroupMaster', id: node.id }); });
+    ghostNew.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(node.id, null); });
+    ghostNew.addEventListener('mouseenter', function () { highlightPromptField(true); });
+    ghostNew.addEventListener('mouseleave', function () { highlightPromptField(false); });
     return node;
   }
 
@@ -1822,7 +1911,7 @@ function renderHtml(webview) {
         // reviendrait à la lancer aussitôt en mode auto, la surprise interdite.
         const queued = w > g.launchedWave;
         const addRow = node.waveAddRows.get(w) || (function () {
-          const r = el('div', 'wave-ghost wave-add-row', t('┄ + add to this wave ┄'));
+          const r = el('div', 'wave-ghost wave-add-row', t('+ this wave'));
           r.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(g.id, w); });
           r.addEventListener('mouseenter', function () { highlightPromptField(true); });
           r.addEventListener('mouseleave', function () { highlightPromptField(false); });
@@ -1881,10 +1970,22 @@ function renderHtml(webview) {
           mn.foot.style.display = (noteText || m.canLink || m.canRelaunch) ? '' : 'none';
           place(node.body, idx++, mn.root);
         });
-        // Pleine largeur, centrée, APRÈS le dernier membre de la vague EN FILE
-        // (jamais sur vague lancée/terminée — remplace l'ancien petit « + »
-        // du séparateur, invisible/mal placé).
-        if (queued) place(node.body, idx++, addRow);
+        // APRÈS le dernier membre de la vague EN FILE (jamais sur vague
+        // lancée/terminée — remplace l'ancien petit « + » du séparateur,
+        // invisible/mal placé).
+        //
+        // Lot B densité (2026-08-09) — la ligne de la DERNIÈRE vague rendue ne
+        // prend plus de rangée à elle : elle rejoint la ligne fantôme finale,
+        // à gauche de « + new wave ». C'est le seul cas fusionnable, et il
+        // couvre celui qu'on voit tout le temps : « queued » vaut
+        // w > launchedWave sur une liste triée, donc dès qu'une vague est en
+        // file la DERNIÈRE l'est aussi — et c'est elle qui se retrouvait
+        // collée sous la ligne fantôme. Les vagues en file intermédiaires
+        // gardent leur rangée : leur ligne d'ajout doit rester au contact des
+        // membres de LEUR vague, pas migrer en fin de groupe.
+        const isLastWave = w === waveNums[waveNums.length - 1];
+        if (queued && isLastWave) place(node.ghostRow, 0, addRow);
+        else if (queued) place(node.body, idx++, addRow);
         if (w === g.launchedWave) { renderWaveCtrl(node, g, blocked, hardBlocked); place(node.body, idx++, node.waveCtrl); ctrlPlaced = true; }
       });
       // launchedWave absente des vagues RENDUES : soit défensif (ne devrait
@@ -1895,9 +1996,11 @@ function renderHtml(webview) {
       // au-dessus, elle vient en fin de corps plutôt que de disparaître
       // silencieusement.
       if (!ctrlPlaced) { renderWaveCtrl(node, g, blocked, hardBlocked); place(node.body, idx++, node.waveCtrl); }
-      // Ligne fantôme « + nouvelle vague » : TOUJOURS en fin de corps, y
-      // compris groupe fini (décision 2 du design — en auto, la nouvelle
-      // vague part au prochain battement du moteur, c'est assumé).
+      // Ligne fantôme finale : TOUJOURS en fin de corps, y compris groupe fini
+      // (décision 2 du design — en auto, la nouvelle vague part au prochain
+      // battement du moteur, c'est assumé). Depuis le lot B densité elle porte
+      // aussi, à sa gauche, la ligne d'ajout de la dernière vague en file
+      // quand il y en a une.
       place(node.body, idx++, node.ghostRow);
       // En-têtes de vague devenus inutiles (vague retirée par édition) — purge
       // avant de purger les membres, même logique.
@@ -1914,6 +2017,9 @@ function renderHtml(webview) {
         // file passait à lancée (w reste dans waveNums, juste plus queued) —
         // constat user 2026-08-05. launchedWave ne redescend jamais, une
         // vague lancée n'a plus jamais besoin de sa ligne d'ajout.
+        // remove() couvre les DEUX parents possibles depuis le lot B densité
+        // (corps du groupe, ou ligne fantôme finale) : le critère de purge est
+        // le même, il ne dépend pas de l'endroit où la ligne est rangée.
         if (waveNums.indexOf(w) !== -1 && w > g.launchedWave) return;
         row.remove();
         node.waveAddRows.delete(w);
@@ -1927,7 +2033,9 @@ function renderHtml(webview) {
       // Rail P1 : mesuré APRÈS placement de tous les enfants du corps —
       // offsetTop force un reflow, sans coût perceptible vu la cadence des
       // pushes (30 s mini). Du haut du corps jusqu'au sommet de la ligne
-      // fantôme, jamais plus bas (§3 du plan) : ghostRow, jamais addRow.
+      // fantôme, jamais plus bas (§3 du plan) : ghostRow, jamais addRow —
+      // depuis le lot B densité, une ligne d'ajout FUSIONNÉE est un enfant de
+      // ghostRow, donc à la même altitude : le pied du rail ne bouge pas.
       // Re-mesurée aussi par le ResizeObserver ci-dessus (measureRail) —
       // cette ligne couvre le rendu normal, lui couvre les largeurs qui
       // bougent SANS nouveau postMessage (cf. commentaire à sa définition).

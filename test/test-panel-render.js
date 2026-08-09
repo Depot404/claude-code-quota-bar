@@ -253,16 +253,22 @@ async function run() {
     // Une interruption ne doit RIEN partager avec le ✓ : ni le glyphe, ni la
     // couleur verte. Le carré creux muted est le seul état qui dit « inachevé ».
     console.log('\n1c. Carré « stop » pour interrupted');
+    // 2026-08-09 : la forme vit dans le ::before, plus dans la bordure de
+    // l'hôte — c'est ce qui lui permet de survivre à l'anneau d'un groupe (cf.
+    // §9bis, « un seul jeu de symboles »). On mesure donc le pseudo.
     const intIco = await cdp.evaluate(`(() => {
       const i = document.querySelectorAll('.conv')[5].querySelector('.ico');
-      const cs = getComputedStyle(i);
+      const cs = getComputedStyle(i, '::before');
       return { text: i.textContent, cls: i.className, radius: cs.borderTopLeftRadius,
-               style: cs.borderTopStyle, tip: document.querySelectorAll('.conv')[5].title };
+               style: cs.borderTopStyle, hostBorder: getComputedStyle(i).borderTopStyle,
+               tip: document.querySelectorAll('.conv')[5].title };
     })()`);
     check('interrupted rendu en carré (classe dédiée, aucun ✓ dans la pastille)',
       intIco.cls.includes('ico-interrupted') && intIco.text === '', JSON.stringify(intIco));
     check('trait plein et angles droits — ni le ✓ done, ni le cercle pointillé stale',
       intIco.style === 'solid' && parseFloat(intIco.radius) <= 2, JSON.stringify(intIco));
+    check('… et la forme n\'est PAS dans la bordure de l\'hôte (sinon l\'anneau d\'un groupe l\'avale)',
+      intIco.hostBorder === 'none', JSON.stringify(intIco));
     check('infobulle explicite « unfinished »',
       /interrupted — unfinished/.test(intIco.tip), JSON.stringify(intIco.tip));
 
@@ -648,21 +654,55 @@ async function run() {
     check('ligne de conv rendue : aucune classe ico-pending-wait/idle qui traîne',
       await cdp.evaluate(`!document.querySelector('#flow .conv .ico-pending-wait, #flow .conv .ico-pending-idle')`) === true);
 
-    // waiting/interrupted/stale d'une conv LISTÉE (c1, réutilisée) : chacun un
-    // glyphe visible dans l'anneau, en plus du ✓ done déjà couvert.
-    for (const [state, expectGlyph] of [['waiting', '?'], ['interrupted', '⚠'], ['stale', '⚠']]) {
+    // UN SEUL JEU DE SYMBOLES (2026-08-09) — la propriété qui remplace l'ancien
+    // « chaque état porte un glyphe dans l'anneau » : ce n'est plus assez de
+    // vérifier qu'il y a QUELQUE CHOSE dans l'anneau, il faut que ce soit LE
+    // MÊME symbole que hors groupe. L'ancien banc validait précisément le bug
+    // signalé par l'user (⚠ dans un lot vs carré hors lot, et ⚠ commun à
+    // interrupted et stale) : il exigeait le glyphe de substitution.
+    // La preuve porte sur la SIGNATURE de la forme (pseudo ::before + texte de
+    // l'hôte), pas sur une capture : l'anneau du groupe se superpose au symbole
+    // et rendrait toute comparaison de pixels bruts fausse par construction.
+    // Le même état est rendu SIMULTANÉMENT dans le groupe (c1) et sur une ligne
+    // plate (c6) — deux nœuds vivants au même instant, donc aucune dérive
+    // possible entre deux mesures prises à des moments différents.
+    const SYMBOL_SIG = `(function (ico) {
+      const b = getComputedStyle(ico, '::before'), h = getComputedStyle(ico);
+      return JSON.stringify({
+        cls: ico.className, text: ico.textContent,
+        content: b.content, position: b.position,
+        borderStyle: b.borderTopStyle, borderWidth: b.borderTopWidth, borderColor: b.borderTopColor,
+        radius: b.borderTopLeftRadius, pseudoColor: b.color, color: h.color,
+        hostBorder: h.borderTopStyle,
+        anims: ico.getAnimations({ subtree: true }).map(a => a.animationName).sort().join(','),
+      });
+    })`;
+    let staleVsInterrupted = null;
+    for (const state of ['busy', 'waiting', 'done', 'interrupted', 'stale']) {
       const s = JSON.parse(JSON.stringify(grouped));
-      s.conversations[0].state = state;
+      s.conversations[0].state = state;   // c1 — DANS le groupe
+      s.conversations[5].state = state;   // c6 — ligne plate, même instant
+      s.conversations[0].acked = true; s.conversations[5].acked = true;
+      s.groups[0].members[0].status = state === 'done' ? 'done' : state;
       await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: s })}, '*')`);
       await sleep(120);
-      const g = await cdp.evaluate(`(() => {
-        const ico = document.querySelector('#flow .grp-body .member .conv .ico');
-        const before = getComputedStyle(ico, '::before');
-        return { cls: ico.className, glyph: before.content.replace(/"/g, ''), anims: ico.getAnimations().length };
+      const pair = await cdp.evaluate(`(() => {
+        const sig = ${SYMBOL_SIG};
+        const inGrp = document.querySelector('#flow .grp-body .member .conv .ico');
+        const flat = Array.from(document.querySelectorAll('#flow > .conv'))
+          .find(c => ((c.querySelector('.title') || {}).textContent || '').indexOf('Coupée au clavier') >= 0);
+        return { grp: inGrp ? sig(inGrp) : null, flat: flat ? sig(flat.querySelector('.ico')) : null };
       })()`);
-      check('groupe, état ' + state + ' : glyphe « ' + expectGlyph + ' » rendu dans l\'anneau',
-        g.glyph === expectGlyph, JSON.stringify(g));
-      check('… ' + state + ' : jamais de spinner (statique)', g.anims === 0, JSON.stringify(g));
+      check('état ' + state + ' : le symbole DANS un lot est le MÊME que hors lot (aucune substitution)',
+        !!pair.grp && pair.grp === pair.flat,
+        'groupe=' + pair.grp + ' / plate=' + pair.flat);
+      // Corollaire du bug : deux états distincts ne doivent pas se retrouver
+      // sous une même forme dans un lot (⚠ valait pour interrupted ET stale).
+      if (state === 'stale') {
+        check('… et « en sommeil » ne se confond pas avec « interrompue » dans un lot',
+          pair.grp !== staleVsInterrupted, 'signature identique aux deux états : ' + pair.grp);
+      }
+      if (state === 'interrupted') staleVsInterrupted = pair.grp;
     }
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(120);
@@ -1137,6 +1177,82 @@ async function run() {
     check('ligne fantôme toujours présente (groupe multi-vagues)',
       await cdp.evaluate(`!!document.querySelector('#flow .wave-ghost')`) === true);
 
+    // Lot B densité (2026-08-09) — les deux fantômes ne font plus qu'UNE
+    // rangée. Un groupe se terminait par deux lignes pleine largeur empilées
+    // (~52 px) pour deux actions voisines ; elles partagent maintenant la même
+    // bande, chacune sur sa moitié. Ce qui est vérifié ici, c'est la
+    // GÉOMÉTRIE (une seule rangée, deux boîtes disjointes) — les règles qui
+    // les séparent, elles, sont testées juste en dessous et en 10ter, sur ces
+    // mêmes nœuds : rien n'a bougé de leur logique, seulement de leur parent.
+    const mergedGhost = await cdp.evaluate(`(() => {
+      const line = document.querySelector('#flow .ghost-line');
+      const addRow = line && line.querySelector('.wave-add-row');
+      const ghostNew = line && line.querySelector('.wave-ghost:not(.wave-add-row)');
+      if (!line || !addRow || !ghostNew) return { line: !!line, addRow: !!addRow, ghostNew: !!ghostNew };
+      const l = line.getBoundingClientRect(), a = addRow.getBoundingClientRect(), n = ghostNew.getBoundingClientRect();
+      const body = line.parentElement;
+      // Le rail est un enfant du corps en position absolue, que place()
+      // repousse en fin de liste au fil des insertions par index : il ne dit
+      // rien de l'ordre VISUEL, on l'écarte avant de chercher le dernier.
+      const flow = Array.from(body.children).filter((c) => !c.classList.contains('grp-rail'));
+      return {
+        line: true, addRow: true, ghostNew: true,
+        distinct: addRow !== ghostNew,
+        sameTop: Math.abs(a.top - n.top) < 0.5,
+        sameBottom: Math.abs(a.bottom - n.bottom) < 0.5,
+        disjoint: a.right <= n.left + 0.5,
+        addFirst: a.left < n.left,
+        lineHeight: l.height, cellHeight: a.height,
+        addRowsInBody: document.querySelectorAll('#flow .grp-body > .wave-add-row').length,
+        ghostLines: document.querySelectorAll('#flow .ghost-line').length,
+        closesGroup: body.classList.contains('grp-body') && flow[flow.length - 1] === line,
+      };
+    })()`);
+    check('les deux fantômes sont deux nœuds DISTINCTS sur la même rangée (mêmes haut et bas)',
+      mergedGhost.distinct === true && mergedGhost.sameTop === true && mergedGhost.sameBottom === true,
+      JSON.stringify(mergedGhost));
+    check('… boîtes DISJOINTES, « + cette vague » à gauche, « + nouvelle vague » à droite (un clic ne peut pas se tromper de cible)',
+      mergedGhost.disjoint === true && mergedGhost.addFirst === true, JSON.stringify(mergedGhost));
+    check('… la rangée ne coûte que la hauteur d\'UNE ligne (plus deux empilées)',
+      mergedGhost.lineHeight <= mergedGhost.cellHeight + 0.5, JSON.stringify(mergedGhost));
+    check('… plus aucune ligne d\'ajout pleine largeur en enfant du corps (la dernière vague en file a fusionné)',
+      mergedGhost.addRowsInBody === 0 && mergedGhost.ghostLines === 1, JSON.stringify(mergedGhost));
+    check('… et c\'est cette rangée unique qui ferme le groupe',
+      mergedGhost.closesGroup === true, JSON.stringify(mergedGhost));
+
+    // Deux vagues en file : SEULE la dernière fusionne. Celle du milieu garde
+    // sa rangée, au contact des membres de SA vague — la fusion est une
+    // économie de fin de groupe, pas une migration de toutes les lignes
+    // d'ajout vers le bas (elles ne diraient plus à quelle vague elles
+    // ajoutent).
+    const twoQueued = JSON.parse(JSON.stringify(grouped));
+    twoQueued.groups[0].members.push({
+      key: 'm4', prompt: 'Encore plus tard', wave: 3, asked: { model: null, effort: null }, convId: null,
+      status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, note: '', hint: 'Queued — opens when this wave starts.',
+    });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: twoQueued })}, '*')`);
+    await sleep(150);
+    const midWave = await cdp.evaluate(`(() => {
+      const body = document.querySelector('#flow .grp-body');
+      const inBody = Array.from(body.querySelectorAll(':scope > .wave-add-row'));
+      const merged = document.querySelector('#flow .ghost-line .wave-add-row');
+      const next = inBody[0] ? inBody[0].nextElementSibling : null;
+      return {
+        inBody: inBody.length,
+        merged: !!merged,
+        mergedIsOther: !!merged && merged !== inBody[0],
+        nextIsWaveHeader: !!next && next.classList.contains('wave-hdr'),
+        total: document.querySelectorAll('#flow .wave-add-row').length,
+      };
+    })()`);
+    check('vagues 2 et 3 en file : une seule ligne d\'ajout reste dans le corps (la vague 2), l\'autre a fusionné',
+      midWave.total === 2 && midWave.inBody === 1 && midWave.merged === true && midWave.mergedIsOther === true,
+      JSON.stringify(midWave));
+    check('… et celle de la vague 2 reste au contact de ses membres (suivie de l\'en-tête de la vague 3)',
+      midWave.nextIsWaveHeader === true, JSON.stringify(midWave));
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
+    await sleep(150);
+
     // Prompt rempli → clic sur la ligne d'ajout de la vague 2 → addTaskToGroup, champ vidé.
     await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Nouvelle tache en file'; ta.dispatchEvent(new Event('input')); })()`);
     await cdp.evaluate(`window.__sent = []`);
@@ -1178,6 +1294,21 @@ async function run() {
     await sleep(150);
     check('vague 2 lancée : sa ligne « + add to this wave » disparaît (plus d\'orpheline en fin de corps)',
       await cdp.evaluate(`document.querySelectorAll('#flow .wave-add-row').length`) === 0);
+    // … et la rangée fusionnée retombe sur son seul occupant : « + nouvelle
+    // vague » reprend TOUTE la largeur, comme avant le lot B. La cellule
+    // d'ajout est absente du DOM, jamais masquée par un style — un enfant de
+    // flux coûterait sa place même invisible (invariant maison, cf. le pied
+    // des membres en file et la croix des lignes de groupe).
+    const soloGhost = await cdp.evaluate(`(() => {
+      const line = document.querySelector('#flow .ghost-line');
+      if (!line) return { line: false };
+      const cell = line.querySelector('.wave-ghost');
+      const l = line.getBoundingClientRect(), c = cell.getBoundingClientRect();
+      return { line: true, children: line.children.length, lineWidth: l.width, cellWidth: c.width };
+    })()`);
+    check('… la rangée fantôme reste, avec « + nouvelle vague » seule sur toute la largeur',
+      soloGhost.line === true && soloGhost.children === 1
+      && Math.abs(soloGhost.lineWidth - soloGhost.cellWidth) < 0.5, JSON.stringify(soloGhost));
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
 
@@ -1204,6 +1335,19 @@ async function run() {
     await sleep(50);
     check('bloc reconnu : 2 tâches préremplies (mode étendu)',
       await cdp.evaluate(`document.querySelectorAll('#batchForm .task').length`) === 2);
+
+    // Les deux cibles de cette section vivent sur la MÊME rangée depuis le lot
+    // B densité : c'est exactement ce que la fusion ne doit pas confondre —
+    // l'une refuse un bloc multi-tâches, l'autre le transfère en entier après
+    // confirmation. La vérifier ici, c'est prouver que les deux règles
+    // s'exercent bien sur des cellules voisines et non sur un bouton unique.
+    check('(mise en place) les deux cibles testées ci-dessous sont bien les deux cellules de la MÊME rangée fantôme',
+      await cdp.evaluate(`(() => {
+        const line = document.querySelector('#flow .ghost-line');
+        const a = document.querySelector('#flow .wave-add-row');
+        const n = document.querySelector('#flow .wave-ghost:not(.wave-add-row)');
+        return !!line && a.parentElement === line && n.parentElement === line && a !== n;
+      })()`) === true);
 
     // « + ajouter à cette vague » (vague 2, en file) avec un bloc multi-tâches
     // dans le champ → REFUS, aucun message, le formulaire n'est PAS vidé.
@@ -1728,20 +1872,34 @@ async function run() {
     check('ligne en attente (queued) : anneau présent, même axe',
       !!pendingRing && pendingRing.present && pendingRing.centerDelta < 0.5, JSON.stringify(pendingRing));
 
-    // Séparateurs de vague et ligne d'ajout en file : commencent après l'axe
-    // du rail, ne le croisent pas (décision 2, dernier paragraphe).
+    // Séparateurs de vague et lignes fantômes : commencent après l'axe du
+    // rail, ne le croisent pas (décision 2, dernier paragraphe).
+    //
+    // Mesuré en GÉOMÉTRIE depuis le lot B densité (2026-08-09) : la ligne
+    // d'ajout de la dernière vague en file n'est plus un enfant du corps mais
+    // une cellule de la rangée fantôme finale, qui porte l'écart pour elle —
+    // lire sa marge PROPRE interrogerait la mauvaise boîte et jurerait « 0 »
+    // sur une ligne pourtant bien placée. Ce que la règle protège, c'est le
+    // bord gauche RÉEL de chaque bordure pointillée : il reste à droite du
+    // rail, où que la cellule soit rangée.
     const sepOffset = await cdp.evaluate(`(() => {
       const hdr = document.querySelector('#flow .grp-body .wave-hdr:not(.launch)');
       const addRow = document.querySelector('#flow .wave-ghost.wave-add-row');
+      const ghostNew = document.querySelector('#flow .wave-ghost:not(.wave-add-row)');
+      const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
       return {
         hdrPaddingLeft: hdr ? parseFloat(getComputedStyle(hdr).paddingLeft) : null,
-        addRowMarginLeft: addRow ? parseFloat(getComputedStyle(addRow).marginLeft) : null,
+        railRight: rail.right,
+        addRowLeft: addRow ? addRow.getBoundingClientRect().left : null,
+        ghostNewLeft: ghostNew ? ghostNew.getBoundingClientRect().left : null,
       };
     })()`);
     check('séparateur de vague inerte : padding-left après l\'axe du rail (14px + marge)',
       sepOffset.hdrPaddingLeft !== null && sepOffset.hdrPaddingLeft >= 20, JSON.stringify(sepOffset));
-    check('ligne d\'ajout en file : margin-left après l\'axe du rail (sa bordure pointillée ne le croise pas)',
-      sepOffset.addRowMarginLeft !== null && sepOffset.addRowMarginLeft >= 20, JSON.stringify(sepOffset));
+    check('ligne d\'ajout en file : bord gauche à droite du rail (sa bordure pointillée ne le croise pas)',
+      sepOffset.addRowLeft !== null && sepOffset.addRowLeft >= sepOffset.railRight - 0.5, JSON.stringify(sepOffset));
+    check('« + nouvelle vague » : même écart au rail, cellule voisine sur la même rangée',
+      sepOffset.ghostNewLeft !== null && sepOffset.ghostNewLeft >= sepOffset.railRight - 0.5, JSON.stringify(sepOffset));
 
     console.log('\n13ter. Repli = les CONVERSATIONS du groupe disparaissent, la ligne master ne bouge PAS d\'un pixel (2026-08-07)');
     // Signalement user : replier « changeait l'apparence de la master » (elle
@@ -1758,6 +1916,13 @@ async function run() {
       const cs = getComputedStyle(head);
       const after = getComputedStyle(head, '::after');
       return {
+        // Largeur de VIEWPORT au moment de la mesure (2026-08-09) : une
+        // géométrie en pixels absolus n'a de sens qu'à viewport constant. Si
+        // la page cesse de déborder au repli, la barre de défilement disparaît
+        // et TOUTE la colonne s'élargit de ~15px — un écart qui n'apprend rien
+        // sur la ligne master. Mesurée ici pour que l'échec le DISE, au lieu
+        // de laisser accuser le CSS de la ligne.
+        clientWidth: document.documentElement.clientWidth,
         left: r.left, right: r.right, width: r.width, height: r.height,
         ctxRight: ctxRect ? ctxRect.right : null, ctxWidth: ctxRect ? ctxRect.width : null,
         radius: cs.borderTopLeftRadius + '/' + cs.borderTopRightRadius + '/' + cs.borderBottomRightRadius + '/' + cs.borderBottomLeftRadius,
@@ -1765,6 +1930,17 @@ async function run() {
         children: Array.from(head.children).filter((c) => getComputedStyle(c).display !== 'none').map((c) => c.className).join(','),
       };
     })()`;
+    // Viewport figé le temps des DEUX mesures (2026-08-09) : replier le groupe
+    // raccourcit la page, et si elle cesse alors de déborder, Chromium retire
+    // la barre de défilement — la colonne entière s'élargit de 15px et toute
+    // comparaison en pixels absolus tombe, sans que le CSS de la ligne ait
+    // bougé d'un iota (mesuré : clientWidth 487 déplié / 502 replié, écart
+    // strictement égal à celui des largeurs incriminées). Le seuil de
+    // débordement dépend de la densité du panneau et de la taille de la
+    // fenêtre : ce n'est pas une propriété du groupe, ça ne doit pas décider
+    // du verdict. overflow-y:scroll réserve la gouttière dans les deux états ;
+    // restauré juste après pour ne rien changer aux sections suivantes.
+    await cdp.evaluate(`document.documentElement.style.overflowY = 'scroll'`);
     const shapeOpen = await cdp.evaluate(masterShape);
     const collapsedWithMaster = JSON.parse(JSON.stringify(withMaster));
     collapsedWithMaster.groups[0].collapsed = true;
@@ -1790,6 +1966,12 @@ async function run() {
     check('… la ligne master reste visible', repli.masterHeadVisible === true, JSON.stringify(repli));
     check('… seuls le rail et les membres du corps sont masqués',
       repli.railHidden === true && repli.membersHidden === true, JSON.stringify(repli));
+    await cdp.evaluate(`document.documentElement.style.overflowY = ''`);
+    // Ceinture : si la gouttière n'avait pas tenu, l'échec doit dire QUE c'est
+    // le viewport, pas la ligne master (le JSON porte clientWidth pour ça).
+    check('(mise en place) largeur de viewport identique dans les deux états — sinon la comparaison en pixels absolus ne veut rien dire',
+      shapeOpen.clientWidth === shapeCollapsed.clientWidth,
+      `${shapeOpen.clientWidth} vs ${shapeCollapsed.clientWidth}`);
     const sameShape = ['left', 'right', 'width', 'height', 'ctxRight', 'ctxWidth']
       .every((k) => shapeOpen[k] !== null && Math.abs(shapeOpen[k] - shapeCollapsed[k]) < 0.5);
     check('ligne master : géométrie IDENTIQUE dépliée/repliée (bords, largeur, hauteur, barre ctx)',
@@ -1812,30 +1994,53 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(120);
 
-    console.log('\n13quater. Délier au survol — hover-only, zéro pixel permanent (plan repli-auto étape 9)');
-    // Sans cette porte de sortie, un ⌂ posé par erreur serait irréversible —
-    // même classe m-hover que les mouveurs ◂/▸ d'un membre (opacité 0 au
-    // repos, révélée au survol de la ligne master).
+    console.log('\n13quater. ⤴ de la ligne master — RETRAIT du lot, geste identique à celui d\'un membre (2026-08-09)');
+    // La ligne maîtresse portait DEUX sorties côte à côte (chip texte
+    // « Dissocier » + ✕ de dissolution) dont l'une agissait sur la ligne et
+    // l'autre sur le bloc entier : portée illisible depuis l'emplacement, et
+    // dans un lot terminé les deux produisaient jusqu'au même écran. Il ne
+    // reste qu'un geste par ligne — le MÊME ⤴ que tout membre, même classe
+    // .m-out, donc même gabarit et même hover-only.
     const unlinkBtn = await cdp.evaluate(`(() => {
-      const b = document.querySelector('#flow .grp-master-head .m-hover');
+      const b = document.querySelector('#flow .grp-master-head .m-out');
       const cs = b ? getComputedStyle(b) : null;
-      return { present: !!b, opacity: cs ? cs.opacity : null, hasClass: !!b && b.classList.contains('m-hover') };
+      return { present: !!b, opacity: cs ? cs.opacity : null, glyph: b ? b.textContent : null,
+               // .link-master exclu : ce ⌂ existe sur TOUTE ligne (rowFor est la
+               // même fabrique partout) et c'est son contexte d'accueil qui le
+               // masque ici — il ne compte pas comme une action de la master.
+               chips: document.querySelectorAll('#flow .grp-master-head .chip:not(.link-master)').length };
     })()`);
-    check('bouton « délier » présent sur la ligne master, hover-only (opacité 0 au repos)',
-      unlinkBtn.present === true && unlinkBtn.opacity === '0' && unlinkBtn.hasClass === true, JSON.stringify(unlinkBtn));
-    await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .grp-master-head .m-hover').click()`);
-    const sentUnlink = await cdp.evaluate(`window.__sent`);
-    check('clic → unlinkGroupMaster (id du groupe, geste réversible sans confirmation)',
-      Array.isArray(sentUnlink) && sentUnlink.some((m) => m.type === 'unlinkGroupMaster' && m.id === 'g1'), JSON.stringify(sentUnlink));
-
-    console.log('\n13quinquies. ⨯ de la ligne master — DISSOLUTION seule (plan repli-auto étape 15 : jamais de fermeture d\'onglet ; confirmation existante côté extension, cf. test-group-master-focus.js)');
+    check('⤴ présent sur la ligne master, hover-only (opacité 0 au repos), et plus aucun chip d\'action à côté',
+      unlinkBtn.present === true && unlinkBtn.opacity === '0' && unlinkBtn.glyph === '⤴' && unlinkBtn.chips === 0,
+      JSON.stringify(unlinkBtn));
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`document.querySelector('#flow .grp-master-head .m-out').click()`);
+    const sentUnlink = await cdp.evaluate(`window.__sent`);
+    check('clic ⤴ → unlinkGroupMaster (id du groupe, geste réversible sans confirmation)',
+      Array.isArray(sentUnlink) && sentUnlink.some((m) => m.type === 'unlinkGroupMaster' && m.id === 'g1'), JSON.stringify(sentUnlink));
+    check('le ⤴ de la master ne dissout JAMAIS le lot (portée = la ligne qui le porte)',
+      Array.isArray(sentUnlink) && !sentUnlink.some((m) => m.type === 'dissolveGroup'), JSON.stringify(sentUnlink));
+
+    console.log('\n13quinquies. ✕ de la GRIP — dissolution du lot, portée par le lot et non par une de ses lignes (2026-08-09)');
+    const killBtn = await cdp.evaluate(`(() => {
+      const b = document.querySelector('#flow .grp-head .g-kill');
+      const cs = b ? getComputedStyle(b) : null;
+      return { present: !!b, opacity: cs ? cs.opacity : null, glyph: b ? b.textContent : null,
+               inMasterRow: !!document.querySelector('#flow .grp-master-head .g-kill') };
+    })()`);
+    check('✕ présent sur la grip, hover-only, et absent de la ligne master',
+      killBtn.present === true && killBtn.opacity === '0' && killBtn.glyph === '✕' && killBtn.inMasterRow === false,
+      JSON.stringify(killBtn));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-head .g-kill').click()`);
     const sentClose = await cdp.evaluate(`window.__sent`);
-    check('clic ⨯ → dissolveGroup avec id du groupe seul (aucun identifiant d\'onglet transporté)',
+    check('clic ✕ → dissolveGroup avec id du groupe seul (aucun identifiant d\'onglet transporté)',
       Array.isArray(sentClose) && sentClose.some((m) => m.type === 'dissolveGroup' && m.id === 'g1' && m.convId === undefined),
       JSON.stringify(sentClose));
+    // Le ✕ vit DANS la grip, dont le clic replie le groupe : sans la classe
+    // .gbtn (que le handler de repli ignore), dissoudre replierait aussi.
+    check('clic ✕ ne replie pas le groupe au passage (classe .gbtn ignorée par le handler de repli)',
+      Array.isArray(sentClose) && !sentClose.some((m) => m.type === 'toggleGroupCollapse'), JSON.stringify(sentClose));
 
     console.log('\n14. Lot micro-allègements 2026-07-24 — dismiss du feedback de collage');
     // Bloc claude-convs BARE (pas de fence ``` — la zone de collage EST le
@@ -2019,7 +2224,7 @@ async function run() {
         headShadowPos: getComputedStyle(head, '::after').position,
         headBg: getComputedStyle(head).backgroundColor,
         gripBg: getComputedStyle(grip).backgroundColor,
-        unlinkPos: getComputedStyle(q('#flow .grp-master-head .m-hover')).position,
+        killPos: getComputedStyle(q('#flow .grp-head .g-kill')).position,
       };
     })()`;
     // Invariants vérifiés à l'identique dans plusieurs états du monde : une
@@ -2066,8 +2271,12 @@ async function run() {
         `${g.headShadowPos} / ${g.headShadowLayer}`);
       check(`${label} — même fond teinté sur la grip et sur la ligne master (une seule variable)`,
         g.headBg === g.gripBg && g.headBg !== 'rgba(0, 0, 0, 0)', `${g.gripBg} / ${g.headBg}`);
-      check(`${label} — « délier » hors du flux (position absolute) : zéro pixel de GABARIT, pas seulement d'encre`,
-        g.unlinkPos === 'absolute', g.unlinkPos);
+      // Le ✕ de dissolution, lui, a le droit de rester dans le flux : il vit
+      // désormais sur la GRIP (2026-08-09), qui ne porte aucune barre de
+      // contexte — l'invariant « au pixel » ne concerne que les lignes de
+      // conversation, dont l'égalité est vérifiée juste au-dessus.
+      check(`${label} — le ✕ de dissolution est sur la grip, jamais sur une ligne`,
+        g.killPos === 'static', g.killPos);
       return g;
     }
 
@@ -2340,8 +2549,13 @@ async function run() {
         pillVsRail.pos === 'relative' && pillVsRail.z === '1', JSON.stringify(pillVsRail));
     }
 
-    // (g) Glyphe ⚠ centré dans son anneau — mesuré sur les PIXELS (un ::before
-    // n'a pas de rect, et l'encre d'un caractère ne remplit jamais sa boîte).
+    // (g) Symbole d'état centré dans son anneau — mesuré sur les PIXELS (un
+    // ::before n'a pas de rect). Écrit du temps du glyphe ⚠ de substitution ;
+    // depuis 2026-08-09 c'est le carré « stop » commun aux deux contextes qui
+    // est mesuré ici, et la mesure vaut désormais preuve DOUBLE : centrage, et
+    // surtout ENCRE PRÉSENTE dans l'anneau — une forme portée par la bordure de
+    // l'hôte (l'ancienne écriture) serait avalée par le disque opaque et
+    // rendrait `empty: true`, exactement le motif de l'arc busy en 2.28.2.
     // Le blob passe par createImageBitmap : la CSP du webview interdit un
     // img.src = 'data:…', mais rien n'interdit une image construite en mémoire.
     const SC = 12;
@@ -2387,7 +2601,7 @@ async function run() {
       }
       return null;
     }
-    // Groupe portant les deux glyphes ⚠ : interrupted (muted) et stale.
+    // Groupe portant un membre interrompu — le carré doit se voir DANS l'anneau.
     const warnState = JSON.parse(JSON.stringify(withMaster));
     warnState.conversations[5].state = 'interrupted';
     warnState.conversations[5].groupId = 'g1';
@@ -2395,9 +2609,11 @@ async function run() {
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: warnState })}, '*')`);
     await sleep(250);
     const warnInk = await inkOffset('#flow .grp-body .conv .ico-interrupted');
-    check('glyphe ⚠ : son ENCRE est centrée dans l\'anneau (≤ 0,75 px, le reste tient dans le tramage)',
+    check('carré « stop » d\'un membre : son ENCRE est VISIBLE dans l\'anneau (l\'anneau ne l\'avale pas)',
+      !!warnInk && !warnInk.empty && warnInk.px > 0, JSON.stringify(warnInk));
+    check('… et elle est centrée dans l\'anneau (≤ 0,75 px, le reste tient dans le tramage)',
       !!warnInk && !warnInk.empty && Math.abs(warnInk.dx) < 0.75 && Math.abs(warnInk.dy) < 0.75, JSON.stringify(warnInk));
-    check('… et le centrage vient de la boîte (flex), pas d\'un décalage chiffré : aucune transform sur le glyphe',
+    check('… le centrage vient de la boîte, pas d\'un décalage chiffré : aucune transform sur le symbole',
       await cdp.evaluate(`getComputedStyle(document.querySelector('#flow .grp-body .conv .ico-interrupted'), '::before').transform`) === 'none');
 
     console.log('\n18. Tri « ordre des onglets » — le bloc de groupe s\'INTERCALE dans le flux (2026-08-07)');

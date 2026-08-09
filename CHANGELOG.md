@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.34.0] - 2026-08-09
+
+### Fixed
+- **A conversation's status symbol no longer changes shape depending on whether it sits inside a batch.** Interrupted showed its hollow "stop" square in the flat list but turned into a "⚠" inside a group, where dormant turned into the very same "⚠" — two different states rendered as one symbol, and one state rendered as two symbols, so the panel effectively used two vocabularies at once. The cause was never a design choice: those two shapes were the only ones drawn with the icon's own border, and a group's status ring is painted over that border, which made them vanish inside a batch. Both are now drawn the way the busy arc already was, which survives the ring — so there is a single definition per state, valid everywhere, and the substitute glyph is gone. The render bench now renders every state in a group and in the flat list at the same instant and requires the two to be identical, so no future substitution can creep back in.
+
+## [2.33.0] - 2026-08-09
+
+### Changed
+- **A batch's master row had two exit buttons that were impossible to tell apart — it now has one, and it is the same one every other row has.** Side by side sat a "✕" that dissolved the whole batch and an "Unlink" chip that only forgot which conversation the batch came from: two very different reaches, on the same object, with nothing in their placement to say so. Worse, in the situation where you actually met them — every task finished, their tabs closed, only the master left — both produced the identical result on screen, since a batch with nothing left to show stops being drawn as soon as it has no master. The master row now carries the same "⤴" as any member, meaning the same thing everywhere: this row leaves the block and goes back to being an ordinary conversation. Dissolving the batch moved up to the batch's own header row, where it belongs, and appears on hover so the header still shows nothing but the chevron and counter at rest. Nothing about what either action does has changed — dissolving still asks for confirmation and still closes no tab, unlinking still needs none and can be undone by relinking with "⌂".
+
+## [2.32.0] - 2026-08-09
+
+### Changed
+- **A group now ends with one row instead of two.** "+ add to this wave" and "+ new wave" were two stacked full-width rows, about 52 pixels for two neighbouring actions at the very bottom of every group. They now share a single row, one on each half — two separate boxes, two dashed rules, two independent hover states, so they stay two targets you cannot click by mistake. The labels shrank to fit side by side ("+ this wave" and "+ new wave"); their tooltips still spell out what each one does. Nothing else changed: "+ this wave" still never appears on a wave that has already started or on the one currently running, and still refuses a multi-task block rather than silently collapsing its waves into one, while "+ new wave" still moves the whole block over after asking. When the last wave has already started there is no "+ this wave" at all, and "+ new wave" takes the full width on its own, exactly as before.
+
+## [2.31.0] - 2026-08-09
+
+### Changed
+- **The panel fits more on screen: the same content is now about 10% shorter.** A sidebar is tall and narrow, so vertical space is the scarce resource — and a lot of it was going into gaps rather than content. Wave separators and the "+ add to this wave" / "+ new wave" rows each carried 14 pixels of blank margin around a 13-to-22-pixel box, so a group spent close to 40% of its height on dividers; section headers, the quota block and the page edges were similarly generous. All vertical spacing now comes from three variables defined in one place instead of values scattered across dozens of rules, which is what let them drift apart in the first place. Only empty space was tightened: no row, context bar or status glyph was made smaller, and their geometry is still verified to the pixel by the render bench.
+
 ## [2.30.0] - 2026-08-09
 
 ### Removed
