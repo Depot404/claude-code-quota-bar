@@ -54,10 +54,10 @@ const vscode = require('vscode');
 //       notice: string|null,    // retour du dernier « Create »
 //     },
 //     groups: [{                // lot 2 — métadonnées ; lot 4 ajoute le moteur
-//                               // de vagues (autoAdvance, launchedWave, nextWave,
-//                               // waveNotice, member.status)
+//                               // de vagues (launchedWave, nextWave,
+//                               // waveNotice, member.status) — toujours
+//                               // automatique, pas de toggle manuel.
 //       id, name, hue: number, collapsed: boolean,
-//       autoAdvance: boolean,   // toggle de passage de vague (lot 4)
 //       launchedWave: number,   // vague la plus avancée déjà ouverte
 //       nextWave: number|null,  // vague à proposer au ▶ manuel, null = aucune
 //       waveNotice: string|null,// annonce transitoire (ouverture auto, échec)
@@ -229,6 +229,12 @@ function renderHtml(webview) {
     display: grid; grid-template-columns: 16px 1fr; gap: 8px;
     padding: 5px 6px; border-radius: 4px;
     cursor: pointer;
+    /* Repère du bouton « rattacher » (.link-master, lot B 2026-08-09) — une
+       ligne plate n'a AUCUN wrapper (rowFor() la place directement dans le
+       flux), .conv est donc le seul ancêtre disponible pour un overlay qui
+       respecte l'invariant « zéro emprise sur le flux » sans lui en inventer
+       un. Grid n'est pas affecté par position:relative sur ses items enfants. */
+    position: relative;
   }
   .conv:hover { background: var(--vscode-list-hoverBackground); }
   .conv.active { background: var(--vscode-list-inactiveSelectionBackground); }
@@ -636,8 +642,6 @@ function renderHtml(webview) {
      glyphe ✓ done des membres. */
   .grp-done { flex: none; font-size: 10px; color: var(--done); font-weight: 600; margin-left: 4px; }
   .grp-head .spacer { flex: 1 1 auto; }
-  .grp-adv { flex: none; font-size: 9px; margin-right: 2px; }
-  .grp-adv[hidden] { display: none; }
   .gbtn {
     flex: none; border: 0; background: none; cursor: pointer; padding: 1px 4px;
     border-radius: 3px; font-size: 11px; line-height: 1.2; color: var(--muted);
@@ -884,14 +888,30 @@ function renderHtml(webview) {
     font-size: 10px; font-style: italic; color: var(--muted); opacity: .75;
   }
   /* Actions d'un membre : sous sa ligne, alignées sur le titre (16 px d'icône +
-     8 px de gouttière). Le retrait (lot 4 §1, devenu l'unique sortie au lot 5)
-     vit sur la ligne elle-même, en overlay au survol depuis 2026-08-07 — le
-     pied ne garde plus que « Link… » et ◂/▸ ; vide, il ne réserve plus de
-     hauteur. ◂/▸ (déplacer une tâche en file vers une vague voisine) restent
-     au survol : action d'édition ponctuelle du formulaire de vagues, hors
-     périmètre de ce lot. */
+     8 px de gouttière). Le pied ne contient plus QUE des éléments réellement
+     visibles (note, « Link… », « Relaunch ») — les boutons de survol ◂/▸ en
+     sont sortis (cf. .m-move) : un enfant de flux coûte sa hauteur même à
+     opacité 0, exactement comme il coûtait sa largeur sur la ligne master
+     (étape 13) et sur la croix des membres (2026-08-07). C'est ce pied gonflé
+     à 15,2 px pour un seul bouton invisible qui rendait les lignes EN FILE
+     bien plus épaisses que les lignes lancées (mesuré en CDP, 2026-08-09).
+     Le repli est piloté par panel.js (foot.style.display) et non par :empty :
+     les chips existent toujours dans le DOM, masqués un par un — :empty
+     n'était donc JAMAIS vrai, la règle mentait depuis le début. */
   .m-foot { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 0 0 3px 24px; }
-  .m-foot:empty { display: none; }
+  /* Déplacer une tâche EN FILE vers la vague voisine : overlay au survol, même
+     patron et même gabarit que le bouton de sortie ⤴ (.m-out) qu'il jouxte —
+     zéro emprise sur le flux, au repos comme au survol. Glyphes seuls : le
+     texte « ◂ wave » ne tiendrait pas ici sans recouvrir la moitié du prompt,
+     et l'infobulle dit déjà vers quelle vague on part. pointer-events désarmé
+     au repos, sinon cette bande invisible avalerait les clics destinés à la
+     ligne (le ⤴, lui, ne fait que 15 px et précède cette règle). */
+  .m-move {
+    position: absolute; top: 4px; right: 19px; z-index: 3;
+    display: flex; gap: 4px;
+    opacity: 0; pointer-events: none; transition: opacity .1s;
+  }
+  .member:hover .m-move, .m-move:focus-within { opacity: 1; pointer-events: auto; }
   .m-note { font-size: 10px; color: var(--muted); }
   .m-hover { opacity: 0; transition: opacity .1s; }
   /* .grp-master-head : même porte de sortie « au survol » que .member
@@ -937,14 +957,20 @@ function renderHtml(webview) {
      l'overlay ne pousse rien, la géométrie est la même dans les deux états.
      Le fond opaque masque la fin du titre qu'il recouvre au survol ; il est
      calé sur le fond de la ligne survolée, jamais sur celui du panneau. */
-  .m-out {
-    position: absolute; top: 4px; right: 0; z-index: 3;
+  /* Gabarit commun des pastilles d'action au survol d'une ligne (⤴ sortie, ◂/▸
+     déplacement de vague) : un seul disque, une seule taille — deux gabarits
+     voisins se verraient. Le positionnement, lui, reste propre à chacun (.m-out
+     s'ancre à droite de .m-head, .m-mv vit dans le flex de .m-move). */
+  .m-out, .m-mv {
     width: 15px; height: 15px; box-sizing: border-box; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
     border-radius: 50%; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
     background: var(--vscode-list-hoverBackground, var(--vscode-sideBar-background, var(--vscode-editor-background)));
     color: var(--muted);
     font-size: 10px; line-height: 1; cursor: pointer;
+  }
+  .m-out {
+    position: absolute; top: 4px; right: 0; z-index: 3;
     opacity: 0; transition: opacity .1s;
   }
   /* La ligne master vit dans une boîte qui DÉBORDE de la colonne de contenu
@@ -954,13 +980,29 @@ function renderHtml(webview) {
      membre, l'égalité même que ce lot doit tenir. */
   .grp-master-head .m-out { right: var(--grp-bleed); }
   .member:hover .m-out, .grp-master-head:hover .m-out, .m-out:focus-visible { opacity: 1; }
-  .m-out:hover { color: var(--vscode-foreground); border-color: var(--muted); }
+  .m-out:hover, .m-mv:hover { color: var(--vscode-foreground); border-color: var(--muted); }
   /* Ligne SÉLECTIONNÉE : son fond n'est pas celui du survol — le bouton suit,
      sinon il se détache en pastille sur la seule ligne active. :has() n'est
      pas indispensable (sans lui la règle saute et le repli reste correct). */
   .m-head:has(.conv.active) .m-out, .grp-master-head:has(.conv.active) .m-out {
     background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground));
   }
+  /* Rattacher une ligne plate à la maîtresse de l'onglet actif (lot B, plan
+     « master conv isolée » 2026-08-09) — même porte que le ⌂ de l'en-tête de
+     groupe (setGroupMaster) : aucune saisie, aucune liste, l'onglet VS Code
+     actif tranche. Overlay DANS .conv (.conv est déjà position:relative,
+     ci-dessus) — jamais un enfant du flux flex, même invisible (l'invariant
+     du dossier, cf. CLAUDE.md : un enfant de flux coûte sa largeur et
+     raccourcit la barre de contexte de la ligne). Opacité/transition PROPRES
+     (pas la classe .m-hover, cf. panel.js createRow) : la ligne .conv vit
+     SOUS .grp-master-head/.member selon le contexte, un sélecteur générique
+     .grp-master-head .m-hover matcherait sinon aussi ce bouton. */
+  .link-master { position: absolute; top: 4px; right: 0; opacity: 0; transition: opacity .1s; }
+  .conv:hover .link-master, .link-master:focus-visible { opacity: 1; }
+  /* Visible SEULEMENT sur une ligne plate vraie : le même gabarit .conv sert
+     aussi la ligne master (.grp-master-slot) et chaque membre (.m-slot) —
+     masqué par la structure DOM, jamais par un état JS à tenir à jour. */
+  .m-slot .conv .link-master, .grp-master-slot .conv .link-master { display: none; }
   .chip {
     font-size: 10px; padding: 0 5px; border-radius: 8px; border: 0; cursor: default;
     background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
@@ -1172,11 +1214,32 @@ function renderHtml(webview) {
     body.appendChild(ctxBar);
     root.appendChild(ico);
     root.appendChild(body);
-    const row = { root, ico, title, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, data: null };
+    // Rattacher (lot B, plan « master conv isolée » 2026-08-09) : overlay
+    // hover-only, DANS .conv (cf. règle CSS .link-master) — createRow() sert
+    // aussi bien les lignes plates que la ligne master ou un membre de groupe
+    // (rowFor() est LA même fabrique partout), donc le bouton existe toujours
+    // dans le DOM ; c'est la structure d'accueil (.m-slot/.grp-master-slot)
+    // qui le masque là où il n'a pas de sens — jamais un état JS ici. PAS la
+    // classe .m-hover (son opacité/transition sont redéfinies sur .link-master
+    // directement, ci-dessous) : la ligne .conv étant nichée SOUS
+    // .grp-master-head (via .grp-master-slot), un sélecteur générique
+    // .grp-master-head .m-hover matcherait aussi ce bouton — c'est très
+    // exactement ce qui cassait le clic « Unlink » de la ligne master
+    // (querySelector prend le premier match dans
+    // l'ordre du DOM), constaté par test-panel-render.js.
+    const linkMaster = el('button', 'chip act link-master', '⌂');
+    linkMaster.type = 'button';
+    linkMaster.title = t('Link to the active tab’s conversation as master');
+    root.appendChild(linkMaster);
+    const row = { root, ico, title, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, data: null };
     root.addEventListener('click', function () {
       // tabTitle : titre RÉEL de l'onglet quand il diverge de celui du
       // transcript — sans lui, focus.js ne retrouve pas un onglet renommé.
       if (row.data) vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, tabTitle: row.data.tabTitle || null });
+    });
+    linkMaster.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (row.data) vscode.postMessage({ type: 'linkConvToActiveMaster', id: row.data.id });
     });
     return row;
   }
@@ -1387,17 +1450,6 @@ function renderHtml(webview) {
     const done = el('span', 'grp-done', t('✓ done'));
     done.style.display = 'none';
     const spacer = el('span', 'spacer');
-    // Passage de vague (lot 4) : visible seulement quand le groupe a plus
-    // d'une vague — inutile (et trompeur) avec une vague unique.
-    const advA = el('button', '', t('auto'));
-    advA.type = 'button';
-    advA.title = t('Advance to the next wave automatically once this one is fully done');
-    const advM = el('button', '', t('manual'));
-    advM.type = 'button';
-    advM.title = t('Only advance to the next wave when I click ▶');
-    const adv = el('span', 'seg grp-adv');
-    adv.appendChild(advA);
-    adv.appendChild(advM);
     // ⌂-focus (plan repli-auto étape 9) : visible UNIQUEMENT sans master
     // désignée (toggle en JS, renderGroups) — un clic lie directement
     // l'onglet VS Code actif, plus de QuickPick set/change/unlink.
@@ -1408,7 +1460,6 @@ function renderHtml(webview) {
     head.appendChild(count);
     head.appendChild(done);
     head.appendChild(spacer);
-    head.appendChild(adv);
     head.appendChild(mas);
     const body = el('div', 'grp-body');
     // Rail P1 : un seul nœud par groupe, jamais recréé — sa position CSS est
@@ -1455,12 +1506,12 @@ function renderHtml(webview) {
     ghostRow.title = t('Add a task in a new wave after the last one');
     const node = {
       root, head, chev, count, done, body, members: new Map(), id: g.id,
-      advA, advM, mas, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
+      mas, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
       rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow,
       masterHead, masterSlot, masterOut, masterUnlink, masterFallback: null,
     };
     head.addEventListener('click', function (e) {
-      if (e.target !== head && head.contains(e.target) && (e.target.classList.contains('gbtn') || e.target.closest('.grp-adv'))) return;
+      if (e.target !== head && head.contains(e.target) && e.target.classList.contains('gbtn')) return;
       vscode.postMessage({ type: 'toggleGroupCollapse', id: node.id });
     });
     mas.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'setGroupMaster', id: node.id }); });
@@ -1469,8 +1520,6 @@ function renderHtml(webview) {
       vscode.postMessage({ type: 'dissolveGroup', id: node.id });
     });
     masterUnlink.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'unlinkGroupMaster', id: node.id }); });
-    advA.addEventListener('click', function (e) { e.stopPropagation(); if (!advA.classList.contains('on')) vscode.postMessage({ type: 'toggleGroupAdvance', id: node.id }); });
-    advM.addEventListener('click', function (e) { e.stopPropagation(); if (!advM.classList.contains('on')) vscode.postMessage({ type: 'toggleGroupAdvance', id: node.id }); });
     ghostRow.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(node.id, null); });
     ghostRow.addEventListener('mouseenter', function () { highlightPromptField(true); });
     ghostRow.addEventListener('mouseleave', function () { highlightPromptField(false); });
@@ -1516,23 +1565,31 @@ function renderHtml(webview) {
     // ENCORE LANCÉE vers la vague voisine — une fois lancée, elle ne bouge
     // plus (groups.js moveQueuedMember refuse déjà le cas, ceci n'est que
     // l'affordance ; visible seulement pour status === 'queued'.
-    const moveBack = el('button', 'chip act m-hover', t('◂ wave'));
+    // ◂/▸ vivent SUR la ligne, en overlay au survol (2026-08-09), plus dans le
+    // pied : dans le flux ils réservaient 15 px de hauteur sous CHAQUE tâche en
+    // file — les seules à les afficher —, d'où des lignes en file visiblement
+    // plus épaisses que les lignes lancées. Même leçon que la croix des membres
+    // et le chip « délier » de la master, appliquée cette fois à la hauteur.
+    // Glyphe seul : l'infobulle porte le sens, la place manque à côté du ⤴.
+    const move = el('div', 'm-move');
+    const moveBack = el('button', 'm-mv', '◂');
     moveBack.type = 'button';
     moveBack.title = t('Move to the previous wave');
-    const moveFwd = el('button', 'chip act m-hover', t('wave ▸'));
+    const moveFwd = el('button', 'm-mv', '▸');
     moveFwd.type = 'button';
     moveFwd.title = t('Move to the next wave');
+    move.appendChild(moveBack);
+    move.appendChild(moveFwd);
     foot.appendChild(note);
     foot.appendChild(linkChip);
     foot.appendChild(relaunchChip);
-    foot.appendChild(moveBack);
-    foot.appendChild(moveFwd);
     head.appendChild(slot);
+    head.appendChild(move);
     head.appendChild(outChip);
     root.appendChild(head);
     root.appendChild(foot);
 
-    const node = { root, slot, foot, note, linkChip, relaunchChip, outChip, moveBack, moveFwd, conv: null };
+    const node = { root, slot, foot, note, linkChip, relaunchChip, outChip, move, moveBack, moveFwd, conv: null };
     moveBack.addEventListener('click', function () { vscode.postMessage({ type: 'moveMemberWave', id: gid, key: key, delta: -1 }); });
     moveFwd.addEventListener('click', function () { vscode.postMessage({ type: 'moveMemberWave', id: gid, key: key, delta: 1 }); });
     linkChip.addEventListener('click', function () { vscode.postMessage({ type: 'linkMember', id: gid, key: key }); });
@@ -1704,18 +1761,13 @@ function renderHtml(webview) {
       // (extension.js) continuent de raisonner sur le store COMPLET
       // (g.members) — seule cette liste de RENDU est restreinte.
       const visibleMembers = g.members.filter(function (m) { return m.status !== 'done-closed'; });
-      // Toggle auto/manuel (lot 4) : masqué avec une vague unique — rien à
-      // ordonnancer, le montrer serait un contrôle sans effet.
       const waveNums = [...new Set(visibleMembers.map(function (m) { return m.wave; }))].sort(function (a, b) { return a - b; });
       const multiWave = waveNums.length > 1;
-      node.advA.parentElement.hidden = !multiWave;
-      node.advA.classList.toggle('on', !!g.autoAdvance);
-      node.advM.classList.toggle('on', !g.autoAdvance);
 
       // Calculé UNE fois, partagé entre la bannière de blocage (renderWaveCtrl)
       // et le séparateur-bouton de la prochaine vague (lot 4 §2) — même
-      // sémantique que l'ancien bouton ▶ (dim = auto + pas bloqué), jamais
-      // re-dérivée deux fois.
+      // sémantique que l'ancien bouton ▶ (dim = pas bloqué, l'enchaînement est
+      // toujours automatique), jamais re-dérivée deux fois.
       const curMembers = g.members.filter(function (m) { return m.wave === g.launchedWave; });
       const blockers = curMembers.filter(function (m) { return m.waveStatus === 'stale'; });
       const blocked = blockers.length > 0;
@@ -1724,7 +1776,7 @@ function renderHtml(webview) {
       // est une mauvaise nouvelle. Un mélange des deux dans la même vague →
       // rouge, la conv interrompue prime.
       const hardBlocked = blockers.some(function (m) { return m.status === 'stale'; });
-      const dim = g.autoAdvance && !blocked;
+      const dim = !blocked;
 
       const keys = new Set();
       // La ligne master (si présente) occupe déjà l'index 0 (placée plus
@@ -1821,6 +1873,12 @@ function renderHtml(webview) {
           const canMove = m.waveStatus === 'queued';
           mn.moveBack.style.display = canMove && w - 1 > g.launchedWave ? '' : 'none';
           mn.moveFwd.style.display = canMove && w < waveNums[waveNums.length - 1] ? '' : 'none';
+          // Le pied ne réserve de hauteur que s'il a vraiment quelque chose à
+          // dire (2026-08-09) : ses trois enfants sont masqués un par un, donc
+          // il n'est jamais :empty au sens CSS — c'est ici, où l'on SAIT ce qui
+          // est visible, que son repli se décide. Sans ça, une ligne de membre
+          // reste plus haute qu'une ligne plate même quand elle n'affiche rien.
+          mn.foot.style.display = (noteText || m.canLink || m.canRelaunch) ? '' : 'none';
           place(node.body, idx++, mn.root);
         });
         // Pleine largeur, centrée, APRÈS le dernier membre de la vague EN FILE
@@ -1908,7 +1966,7 @@ function renderHtml(webview) {
   // pour pré-sélectionner le défaut résolu — l'inverse lèverait une
   // ReferenceError (zone morte temporelle du let) au tout premier rendu.
   let batchState = { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null }, lastModel: null, lastEffort: null, tipDismissed: false };
-  let form = { group: '', advance: 'auto', tasks: [blankTask(1)] };
+  let form = { group: '', tasks: [blankTask(1)] };
   let createBtn = null;
 
   // Lot 14 : le bouton « inherit » disparaît, remplacé par une PRÉ-SÉLECTION
@@ -2005,7 +2063,7 @@ function renderHtml(webview) {
     const pending = form.pendingTransfer;
     if (!pending) return;
     vscode.postMessage({ type: 'addTasksToGroup', id: pending.gid, tasks: pending.tasks });
-    form = { group: '', advance: 'auto', tasks: [blankTask(1)] };
+    form = { group: '', tasks: [blankTask(1)] };
     renderForm();
   }
   function cancelPendingTransfer() {
@@ -2468,17 +2526,6 @@ function renderHtml(webview) {
         .forEach(function (tk) { batchFormEl.appendChild(taskCard(tk, disabled)); });
     });
 
-    // Passage de vague (lot 4) : n'a de sens qu'avec plus d'une vague — le
-    // toggle n'apparaît qu'à ce moment-là, exactement comme dans le groupe une
-    // fois créé (renderGroups). Défaut 'auto' (mockup validé).
-    if (waves.length > 1) {
-      batchFormEl.appendChild(el('label', 'fld-label', t('Wave advance')));
-      const advSeg = segment(['auto', 'manual'], form.advance || 'auto', false, function (v) {
-        form.advance = v; renderForm();
-      });
-      batchFormEl.appendChild(advSeg);
-    }
-
     // Rangée unique adders + pied (constat user 2026-08-06, liste étape 19) :
     // les « + » à gauche, Annuler/Créer poussés à droite par le spacer — une
     // ligne de formulaire gagnée. Les deux classes se complètent : task-row
@@ -2501,7 +2548,7 @@ function renderHtml(webview) {
     // là) — Cancel remet le brouillon à zéro (une tâche vierge, mode simple)
     // plutôt que de fermer un panneau qui n'existe plus.
     foot.appendChild(button('', t('Cancel'), function () {
-      form = { group: '', advance: 'auto', tasks: [blankTask(1)] };
+      form = { group: '', tasks: [blankTask(1)] };
       renderForm();
     }));
     createBtn = button('pri', t('Create'), function () {
@@ -2516,13 +2563,12 @@ function renderHtml(webview) {
         type: 'createBatch',
         tasks,
         groupName: (form.group || '').trim(),
-        advance: form.advance || 'auto',
         // Lot 11 : la matière de la recherche de conv maîtresse, non nulle
         // seulement si le dernier collage a été reconnu comme bloc valide.
         paste: form.masterPaste || null,
         session: form.masterSession || null,
       });
-      form = { group: '', advance: 'auto', tasks: [blankTask(1)] };
+      form = { group: '', tasks: [blankTask(1)] };
       renderForm();
     });
     foot.appendChild(createBtn);

@@ -161,7 +161,6 @@ const GROUPS = [{
   name: 'Payment refactor',
   hue: 262,
   collapsed: false,
-  autoAdvance: true,
   launchedWave: 1,
   nextWave: 2,
   waveNotice: null,

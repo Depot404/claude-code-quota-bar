@@ -101,10 +101,6 @@ function sanitizeGroup(g) {
     name: typeof g.name === 'string' && g.name.trim() ? g.name.trim() : 'Batch',
     createdAt: Number.isFinite(g.createdAt) ? g.createdAt : 0,
     collapsed: !!g.collapsed,
-    // Passage de vague (lot 4). Défaut `true` (mockup validé : `advance:"auto"`
-    // par défaut) — un stockage écrit par le lot 2 (avant ce champ) tombe donc
-    // sur le même comportement que s'il l'avait explicitement choisi.
-    autoAdvance: g.autoAdvance !== false,
     // Conv maîtresse (lot 11) — absente de tout stockage écrit avant ce lot :
     // `null`, comportement d'avant, aucune migration.
     masterSessionId: typeof g.masterSessionId === 'string' && g.masterSessionId ? g.masterSessionId : null,
@@ -192,9 +188,7 @@ function createGroupStore(deps = {}) {
     // d'un `sessionId` quand le lancement l'a déjà retrouvé. Le groupe est créé
     // AVANT le lancement dans le cas nominal : il apparaît tout de suite dans le
     // panneau avec ses membres non liés, et les sessionId arrivent ensuite.
-    // `advance` : toggle de passage de vague voulu à la création ('auto'
-    // par défaut, cf. sanitizeGroup) — modifiable ensuite via setAutoAdvance.
-    create(name, tasks, advance) {
+    create(name, tasks) {
       const at = now();
       const list = Array.isArray(tasks) ? tasks : [];
       const g = {
@@ -202,7 +196,6 @@ function createGroupStore(deps = {}) {
         name: (typeof name === 'string' && name.trim()) || `Batch ${new Date(at).toISOString().slice(11, 16)}`,
         createdAt: at,
         collapsed: false,
-        autoAdvance: advance !== 'manual',
         masterSessionId: null,
         masterTitle: '',
         members: list.map((t, i) => memberOfTask(t, `m${i + 1}`, at)),
@@ -243,14 +236,6 @@ function createGroupStore(deps = {}) {
       if (!sessionId) return null;
       for (const g of groups) if (g.masterSessionId === sessionId) return g.id;
       return null;
-    },
-
-    setAutoAdvance(id, auto) {
-      const g = find(id);
-      if (!g) return false;
-      g.autoAdvance = !!auto;
-      persist();
-      return true;
     },
 
     // Membres d'une vague donnée, dans leur ordre de création — c'est l'ordre

@@ -418,7 +418,7 @@ async function run() {
       // Moteur de vagues (lot 4) : vague 1 en cours (m1 busy, m2 done), vague 2
       // encore en file — exactement le cas « unlocks when wave 1 is done ».
       id: 'g1', name: 'Refonte paiements', hue: 210, collapsed: false,
-      autoAdvance: true, launchedWave: 1, nextWave: 2, waveNotice: null,
+      launchedWave: 1, nextWave: 2, waveNotice: null,
       // Membres tels que les SÉRIALISE extension.js depuis la table de vérité
       // (lot 10) : le webview n'en déduit plus rien lui-même — status/note/
       // canLink/canClose arrivent résolus. La table elle-même est éprouvée cas
@@ -520,7 +520,7 @@ async function run() {
     const hidden = JSON.parse(JSON.stringify(grouped));
     hidden.groups[0] = {
       id: 'g1', name: 'Refonte paiements', hue: 210, collapsed: false,
-      autoAdvance: true, launchedWave: 2, nextWave: 3, waveNotice: null, done: false,
+      launchedWave: 2, nextWave: 3, waveNotice: null, done: false,
       master: { convId: 'c-master', title: 'Cadrage du chantier', listed: false, tabTitle: null, hint: 'Running.', status: 'busy' },
       members: [
         { key: 'm1', prompt: 'Tâche 1 finie', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: null, status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '✓ done · closed', hint: '' },
@@ -705,25 +705,16 @@ async function run() {
     // vague, les icônes d'état et le bouton ▶.
     check('plus de ligne wave-sub (info déjà portée ailleurs)',
       await cdp.evaluate(`!document.querySelector('.wave-sub')`) === true);
-    // Fix régression 2.20.0 : le segment auto/manuel et les gbtns (⌂ ✎ ⨯) ne
-    // doivent jamais rétrécir, seul le titre du groupe (ellipsis) le peut.
-    check('.grp-adv ne rétrécit jamais (flex: none)',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('.grp-adv')).flexShrink`) === '0');
+    // Fix régression 2.20.0 : les gbtns (⌂ ✎ ⨯) ne doivent jamais rétrécir,
+    // seul le titre du groupe (ellipsis) le peut.
     check('les gbtns (⌂ ✎ ⨯ +) ne rétrécissent jamais (flex: none)',
       await cdp.evaluate(`Array.from(document.querySelectorAll('.grp-head .gbtn')).every(b => getComputedStyle(b).flexShrink === '0')`) === true);
-    const manualMode = JSON.parse(JSON.stringify(grouped));
-    manualMode.groups[0].autoAdvance = false;
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: manualMode })}, '*')`);
-    await sleep(120);
-    check('séparateur franc/bleu (pri) en mode manuel',
-      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === true);
-    check('… et plus dim', await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('dim')`) === false);
     const blockedWave = JSON.parse(JSON.stringify(grouped));
     blockedWave.groups[0].members[0].waveStatus = 'stale';
     blockedWave.groups[0].members[0].status = 'stale';
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: blockedWave })}, '*')`);
     await sleep(120);
-    check('séparateur franc/bleu (pri) quand la vague est bloquée, même en mode auto (chemin de secours)',
+    check('séparateur franc/bleu (pri) quand la vague est bloquée (chemin de secours)',
       await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === true);
     // Bandeaux PROPORTIONNÉS (plan lien-mort-né 2026-08-04) : le rouge est
     // réservé à une conv vraiment interrompue à mi-travail.
@@ -798,8 +789,6 @@ async function run() {
       triHdrTexts.indexOf('▶ wave 2') !== -1 && triHdrTexts.indexOf('wave 3 — queued') !== -1, triHdrTexts);
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(120);
-    check('toggle auto/manuel : « auto » actif (autoAdvance true)',
-      await cdp.evaluate(`document.querySelector('.grp-adv button.on').textContent`) === 'auto');
     // Lot 5 : la croix rouge (.m-out) est désormais l'UNIQUE action de sortie,
     // toujours visible, quel que soit le statut du membre — plus de chip vert
     // séparé ni de bascule sur canClose.
@@ -832,7 +821,7 @@ async function run() {
     linkedInView.conversations = [linkedInView.conversations[1]];   // c2, done
     linkedInView.conversations[0].tabOpen = true;
     linkedInView.groups = [{
-      id: 'g8', name: 'Lot 8', hue: 90, collapsed: false, autoAdvance: true,
+      id: 'g8', name: 'Lot 8', hue: 90, collapsed: false,
       launchedWave: 1, nextWave: null, waveNotice: null,
       members: [
         { key: 'linked', prompt: 'Tâche liée à c2', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'c2', status: 'done', waveStatus: 'done', canLink: false, canClose: true, note: '', hint: '' },
@@ -1031,6 +1020,63 @@ async function run() {
     check('… flèche de retrait et non plus une croix, et plus aucune teinte d\'erreur sur la ligne',
       outPaint.glyph === '⤴' && outPaint.color !== outPaint.err && outPaint.border !== outPaint.err,
       JSON.stringify(outPaint));
+
+    console.log('\n10quater. Une tâche EN FILE n\'est pas plus épaisse qu\'une tâche lancée (2026-08-09)');
+    // Signalé par l'user sur un groupe à 3 vagues : les lignes en file étaient
+    // visiblement plus hautes que les lignes lancées. Cause — les mouveurs ◂/▸
+    // étaient des enfants du flux du pied, affichés (à opacité 0) sur les SEULES
+    // tâches en file : 15,2 px de pied pour un bouton qu'on ne voit pas. Même
+    // leçon que le chip « délier » et la croix des membres, appliquée cette fois
+    // à la HAUTEUR. L'état de ce check reproduit le cas signalé : il FAUT deux
+    // vagues en file, sinon aucun mouveur n'est proposé et le bug ne se voit pas
+    // (c'est très exactement pourquoi `grouped`, à vague 2 unique, le ratait).
+    const threeWaves = JSON.parse(JSON.stringify(grouped));
+    threeWaves.groups[0].members.push(
+      { key: 'm4', prompt: 'Vague 3, en file elle aussi', wave: 3, asked: { model: 'opus', effort: 'high' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: threeWaves })}, '*')`);
+    await sleep(150);
+    const rowH = await cdp.evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('#flow .member')).map(function (m) {
+        const foot = m.querySelector('.m-foot');
+        const mv = m.querySelector('.m-move');
+        return {
+          queued: !!m.querySelector('.m-pending'),
+          h: Math.round(m.getBoundingClientRect().height * 10) / 10,
+          foot: foot ? Math.round(foot.getBoundingClientRect().height * 10) / 10 : null,
+          movers: mv ? Array.from(mv.querySelectorAll('.m-mv')).filter(function (b) { return getComputedStyle(b).display !== 'none'; }).length : 0,
+          movePos: mv ? getComputedStyle(mv).position : null,
+          movePE: mv ? getComputedStyle(mv).pointerEvents : null,
+        };
+      });
+      return { rows: rows, launched: rows.filter(function (r) { return !r.queued; }), queued: rows.filter(function (r) { return r.queued; }) };
+    })()`);
+    check('au moins une tâche en file propose bien un mouveur ◂/▸ (sinon ce banc ne prouve rien)',
+      rowH.queued.some(function (r) { return r.movers > 0; }), JSON.stringify(rowH.queued));
+    check('… et elle n\'est JAMAIS plus haute qu\'une tâche lancée (le pied ne réserve plus rien)',
+      rowH.queued.every(function (q) { return rowH.launched.every(function (l) { return q.h <= l.h; }); }),
+      JSON.stringify(rowH.rows));
+    check('… pied replié pour de bon (hauteur 0, pas seulement « petite »)',
+      rowH.queued.every(function (q) { return q.foot === 0; }), JSON.stringify(rowH.queued));
+    check('les mouveurs sont un OVERLAY, clics désarmés au repos (ils ne volent pas le clic de la ligne)',
+      rowH.rows.every(function (r) { return r.movePos === 'absolute' && r.movePE === 'none'; }), JSON.stringify(rowH.rows));
+    // Le survol ne doit RIEN pousser : même hauteur, mouveurs et ⤴ côte à côte
+    // sans se recouvrir, tout à l'intérieur de la ligne.
+    const hoverGeom = await cdp.evaluate(`(() => {
+      const m = Array.from(document.querySelectorAll('#flow .member')).find(function (x) { return x.querySelector('.m-pending'); });
+      const before = m.getBoundingClientRect().height;
+      const ev = function (t) { m.dispatchEvent(new MouseEvent(t, { bubbles: true })); };
+      ev('mouseover'); ev('mouseenter');
+      const head = m.querySelector('.m-head').getBoundingClientRect();
+      const mv = m.querySelector('.m-move').getBoundingClientRect();
+      const out = m.querySelector('.m-out').getBoundingClientRect();
+      return { before: Math.round(before * 10) / 10, after: Math.round(m.getBoundingClientRect().height * 10) / 10,
+               overlap: Math.round(mv.right) > Math.round(out.left),
+               inside: Math.round(mv.left) >= Math.round(head.left) && Math.round(mv.right) <= Math.round(head.right) };
+    })()`);
+    check('survol : la ligne ne grandit pas d\'un pixel',
+      hoverGeom.before === hoverGeom.after, JSON.stringify(hoverGeom));
+    check('… mouveurs et ⤴ côte à côte, dans les bords de la ligne',
+      hoverGeom.overlap === false && hoverGeom.inside === true, JSON.stringify(hoverGeom));
 
     // Modèle · effort PRÉVUS grisés sur une tâche en file (m3, pas encore liée).
     const intentState = JSON.parse(JSON.stringify(grouped));
@@ -1236,7 +1282,7 @@ async function run() {
     const justCreated = JSON.parse(JSON.stringify(STATE));
     justCreated.conversations = [];
     justCreated.groups = [{
-      id: 'g10', name: 'Batch tout neuf', hue: 30, collapsed: false, autoAdvance: true,
+      id: 'g10', name: 'Batch tout neuf', hue: 30, collapsed: false,
       launchedWave: 1, nextWave: 2, waveNotice: null,
       members: [
         { key: 'a', prompt: 'Tâche A', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 's-a', status: 'inserted', waveStatus: 'launched', canLink: false, canClose: false, note: 'press Enter in the tab', hint: 'Tab open with the prompt inserted — press Enter to start it.' },
@@ -2374,7 +2420,7 @@ async function run() {
       fconv('f3', 'Onglet 3 plate'),
     ];
     const flowGroup = {
-      id: 'gf', name: 'Groupe intercalé', hue: 200, collapsed: false, autoAdvance: true,
+      id: 'gf', name: 'Groupe intercalé', hue: 200, collapsed: false,
       launchedWave: 1, nextWave: null, waveNotice: null, master: null,
       members: [{
         key: 'k1', prompt: 'Membre du groupe', wave: 1, asked: { model: 'opus', effort: 'high' },

@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.30.0] - 2026-08-09
+
+### Removed
+- **The auto/manual wave-advance toggle is gone — a group's waves now always advance on their own.** The choice never earned its keep: the ▶ launch control on the next wave's header was already always there to force it open early, whichever mode was selected, so "manual" only meant one extra click on every batch of a group for no real benefit. Waves now always open automatically once the current one finishes, exactly as "auto" behaved before; forcing the next wave early still works the same way it always did.
+
+## [2.29.1] - 2026-08-09
+
+### Fixed
+- **Queued tasks are no longer visibly taller than launched ones.** In a group with more than one wave still ahead, every queued task carried an empty 15-pixel strip under it, breaking the rhythm of the list. The strip was the row's action footer, kept open by the "move to the neighbouring wave" buttons: those only appear on queued tasks, and even at zero opacity a flow child still costs its height. They now sit on the row itself as a hover overlay next to the ⤴ button, as compact circles — the same pattern already used for the remove button and the master row's "unlink" chip, applied to height this time. The footer collapses completely when it has nothing visible to show, so a task in a group is exactly as tall as its content, whether it has started or not.
+
+## [2.29.0] - 2026-08-09
+
+### Added
+- **A single conversation can now have a master, too.** Until now, a master conversation only existed for a batch of two or more tasks — a single task launched with a `group:`/handoffs block, or one you typed by hand, stayed a plain row with no way to say where it came from. Launching one task now creates a group (with just that one member) whenever you name it or the panel resolves a master for it, so the same header, counter and wave chrome you already know from bigger batches apply here too.
+- **Link an already-open conversation to a master, after the fact.** Hovering a plain row now reveals a small ⌂ button: click it and the conversation in your currently active VS Code tab becomes its master. No picker, no typing — if the active tab isn't a Claude conversation, or it matches more than one, or either side is already part of a group, nothing happens and you're told why. Works the same way as the existing "link the active tab as master" button on a group's header.
+
 ## [2.28.4] - 2026-08-08
 
 ### Changed

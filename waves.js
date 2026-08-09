@@ -20,6 +20,8 @@
 //     Ne rend jamais plus que `launchedWave + 1` : les vagues sont contiguës
 //     (batch.js normalizeTasks le garantit), donc « jamais plus d'une vague
 //     d'avance » est un invariant STRUCTUREL, pas une règle vérifiée ici.
+//     L'enchaînement est TOUJOURS automatique (pas de toggle manuel : décidé
+//     inutile, le bouton ▶ ci-dessous couvre déjà le besoin de forcer plus tôt).
 //   - canForceLaunch : le bouton ▶ manuel reste TOUJOURS possible dès qu'il
 //     reste une vague en file — y compris quand la vague courante est bloquée
 //     ou seulement partiellement terminée (décision 5 : « forcer = ▶ manuel »).
@@ -71,11 +73,9 @@ function nextWave(members, after) {
 }
 
 // Vague à ouvrir AUTOMATIQUEMENT maintenant, ou `null` si rien à faire :
-//   - toggle sur 'manual' → jamais d'ouverture automatique, quoi qu'il arrive ;
 //   - vague courante pas `done` (encore en cours, ou `blocked`) → on attend ;
 //   - plus de vague suivante → rien à ouvrir (dernière vague déjà lancée).
-function waveToAutoLaunch(members, autoAdvance) {
-  if (!autoAdvance) return null;
+function waveToAutoLaunch(members) {
   const lw = launchedWave(members);
   if (waveStatus(members, lw) !== 'done') return null;
   return nextWave(members, lw);

@@ -328,7 +328,6 @@ function activate(context) {
     // relier tout de suite après) — même esprit que `unsetMaster` côté store.
     unlinkGroupMaster: (msg) => unlinkGroupMaster(msg && msg.id),
     // Moteur de vagues (lot 4).
-    toggleGroupAdvance: (msg) => toggleGroupAdvance(msg && msg.id),
     launchWave: (msg) => handleLaunchWave(msg),
     moveMemberWave: (msg) => moveMemberWave(msg && msg.id, msg && msg.key, Number(msg && msg.delta)),
     // Ajout en file à un groupe existant (plan ajout-tache 2026-07-24) : « + »
@@ -344,6 +343,12 @@ function activate(context) {
     // directement l'onglet VS Code ACTIF de cette fenêtre (plus de QuickPick :
     // ambiguïté ou onglet non-Claude → no-op + message, jamais un lien deviné).
     setGroupMaster: (msg) => setGroupMaster(msg && msg.id),
+    // Rattachement d'une ligne PLATE déjà lancée (lot B, plan « master conv
+    // isolée » 2026-08-09) — bouton overlay hover-only, symétrique du ⌂
+    // ci-dessus : ici c'est la conversation SOUS le survol qui devient
+    // membre, la maîtresse est l'onglet VS Code actif. Même doctrine : aucune
+    // saisie, aucune liste, échec propre sur toute ambiguïté.
+    linkConvToActiveMaster: (msg) => linkConvToActiveMaster(msg && msg.id),
     // Astuce du champ paste (2026-07-23) : le × la masque définitivement, le
     // « ? » du label la ramène. Persisté par machine (globalState), push manuel.
     dismissBatchTip: () => setBatchTipDismissed(true),
@@ -676,7 +681,6 @@ const DEMO_GROUPS = [{
   collapsed: false,
   // Moteur de vagues (lot 4) : vague 1 en cours (d1 busy, d3 done), vague 2
   // encore `queued` — le cas type de « unlocks when wave 1 is fully done ».
-  autoAdvance: true,
   launchedWave: 1,
   nextWave: 2,
   waveNotice: null,
@@ -924,7 +928,6 @@ function groupsState(convs, sources, superseded) {
       // n'est muté ici, group-done.js ne fait que plier des statuts déjà
       // tranchés — panel.js filtre au rendu, cf. CLAUDE.md du dossier).
       done: groupDone(truths.map((t) => t.status), master ? master.status : null),
-      autoAdvance: !!g.autoAdvance,
       // Conv maîtresse (lot 11) : un POINTEUR vers une conversation qui vit sa
       // vie ailleurs — elle n'est pas un membre, ne compte dans aucune vague, et
       // n'est pas retirée de la liste plate. Son statut passe par la MÊME table
@@ -978,7 +981,7 @@ function groupsRenderKey() {
   try {
     if (!groupStore.all().length) return '';
     return JSON.stringify(groupsState(conversationsState()).map((g) => [
-      g.id, g.name, g.done, g.collapsed, g.autoAdvance,
+      g.id, g.name, g.done, g.collapsed,
       g.launchedWave, g.nextWave, g.waveNotice,
       g.master && [g.master.convId, g.master.title, g.master.listed, g.master.status],
       g.members.map((m) => [m.key, m.convId, m.status, m.canLink, m.canRelaunch]),
@@ -1321,6 +1324,18 @@ function computeLastChoiceFromTasks(tasks) {
   };
 }
 
+// Règle de création d'un groupe (lot A, plan « master conv isolée »
+// 2026-08-09) — PURE, testable sans mock vscode (cf. test-batch-notice.js).
+// `tasks.length > 1` groupe toujours (décision 3 du plan groupes) ; pour une
+// tâche unique, un groupe ne naît que s'il a une RAISON (décision 5 du plan
+// isolée) : nom de groupe explicite, ou maîtresse résolue. Une tâche unique
+// tapée à la main sans l'un ou l'autre reste une ligne plate.
+function shouldCreateGroup(taskCount, groupName, hasMasterCandidate) {
+  if (taskCount > 1) return true;
+  if (taskCount !== 1) return false;
+  return !!groupName || !!hasMasterCandidate;
+}
+
 // « Create » du formulaire de lot (lot 1, exécution des vagues au lot 4). Le
 // webview n'envoie que des intentions : c'est ici qu'on valide (normalizeTasks
 // — le webview n'est pas une source fiable), qu'on lance, et qu'on enregistre
@@ -1341,10 +1356,21 @@ async function createBatch(msg) {
   const wave1 = tasks.filter((t) => t.wave === 1);
   batchStatus = { busy: true, notice: vscode.l10n.t('Opening {0} conversation(s)…', wave1.length) };
 
+  // Conversation maîtresse (lot 11, résolution détachée de l'enregistrement
+  // depuis le plan « master conv isolée » 2026-08-09) : cherchée ICI, AVANT la
+  // création du groupe — un batch d'une seule tâche n'a pas encore de groupe
+  // à ce stade, et c'est justement elle qui peut décider d'en créer un (lot
+  // A). Le webview ne transmet le texte collé QUE lorsqu'il a reconnu un bloc
+  // claude-convs valide (plan : « au collage d'un bloc VALIDE ») ; sans lui,
+  // aucune recherche n'a lieu.
+  const masterCandidate = resolveMasterCandidate(msg && msg.paste, msg && msg.session);
+
   // LE FORMULAIRE EST LE GROUPE (décision 3 du plan) — sauf pour une tâche
-  // unique : un groupe d'un seul membre n'apporte que du chrome, et le parcours
-  // utilisateur du plan le dit explicitement (« une seule tâche = pas de groupe
-  // créé, juste une conv »).
+  // unique, où un groupe n'apporte que du chrome SANS RAISON : il ne naît
+  // que si le formulaire porte un nom de groupe explicite OU qu'une maîtresse
+  // a été résolue (plan « master conv isolée » 2026-08-09, décision 5). Une
+  // tâche unique tapée à la main sans l'un ou l'autre reste une ligne plate,
+  // comme avant ce lot.
   //
   // Le groupe est créé AVANT le lancement, avec TOUTES les tâches (vagues à
   // venir comprises) : les ouvertures sont sérialisées et prennent une seconde
@@ -1352,20 +1378,14 @@ async function createBatch(msg) {
   // Ses membres de la vague 1 naissent sans sessionId (« pas encore lancé »)
   // et se rattachent au fil des étages 1 puis 2 ; ceux des vagues suivantes
   // naissent `queued` (groups.js) tant que leur vague n'est pas ouverte.
-  const group = tasks.length > 1 && groupStore
-    ? groupStore.create(msg && msg.groupName, tasks, msg && msg.advance)
+  const groupName = msg && msg.groupName;
+  const group = shouldCreateGroup(tasks.length, groupName, masterCandidate) && groupStore
+    ? groupStore.create(groupName, tasks)
     : null;
-  // Conversation maîtresse (lot 11) : cherchée ICI, à la naissance du groupe —
-  // c'est le seul instant où elle a un sens (un groupe pour la porter, un
-  // collage tout frais pour la désigner). Le webview ne transmet le texte collé
-  // QUE lorsqu'il a reconnu un bloc claude-convs valide (plan : « au collage
-  // d'un bloc VALIDE ») ; sans lui, aucune recherche n'a lieu.
-  // Le retour de resolveMasterForGroup n'est plus lu ici (plan repli-auto
-  // étape 6) : la capsule d'en-tête (étape 3) montre déjà titre + point
-  // d'état de la maîtresse, le répéter en texte de notice était le doublon
-  // que l'étape 6 supprime. On l'appelle quand même pour son effet de bord
-  // (groupStore.setMaster), seul ce qui compte ici.
-  if (group) resolveMasterForGroup(group.id, msg && msg.paste, msg && msg.session);
+  // Enregistrement (effet de bord seul, plus de résolution ici) : la capsule
+  // d'en-tête (étape 3 du plan repli-auto) montre déjà titre + point d'état
+  // de la maîtresse, pas besoin de relire son retour.
+  if (group && masterCandidate) groupStore.setMaster(group.id, masterCandidate.sessionId, masterCandidate.title);
   pushPanelState();
 
   let result = null;
@@ -1705,9 +1725,10 @@ async function handleLaunchWave(msg) {
 }
 
 // Appelé à chaque recompute de state.js (transitions busy→done incluses) :
-// pour chaque groupe en mode auto dont la vague courante vient de se
-// terminer ENTIÈREMENT, ouvre la suivante. `waveToAutoLaunch` (waves.js)
-// garantit structurellement de ne jamais sauter plus d'une vague d'avance.
+// pour chaque groupe dont la vague courante vient de se terminer ENTIÈREMENT,
+// ouvre la suivante — toujours automatique (pas de toggle manuel).
+// `waveToAutoLaunch` (waves.js) garantit structurellement de ne jamais sauter
+// plus d'une vague d'avance.
 function maybeAdvanceWaves() {
   if (!groupStore || !stateEngine) return;
   const snap = stateEngine.getSnapshot();
@@ -1719,16 +1740,10 @@ function maybeAdvanceWaves() {
     // Membres redirigés (husk→successeur) : une vague ne se déclare pas
     // « terminée » sur un husk mort alors que la conv a repris et travaille.
     const members = g.members.map((m) => ({ wave: m.wave, status: memberTruth(redirectMember(m, superseded), sources).waveStatus }));
-    const w = waveToAutoLaunch(members, g.autoAdvance);
+    const w = waveToAutoLaunch(members);
     if (w == null) continue;
     launchWaveForGroup(g.id, w, { auto: true, fromWave: launchedWave(members) });
   }
-}
-
-function toggleGroupAdvance(id) {
-  const g = groupStore && groupStore.get(id);
-  if (!g) return;
-  if (groupStore.setAutoAdvance(id, !g.autoAdvance)) pushPanelState();
 }
 
 function moveMemberWave(id, key, delta) {
@@ -1971,6 +1986,47 @@ async function setGroupMaster(id) {
   pushPanelState();
 }
 
+// Rattachement d'une conversation déjà lancée (lot B, plan « master conv
+// isolée » 2026-08-09) — bouton overlay hover-only d'une ligne PLATE
+// (panel.js createRow). Symétrique de `setGroupMaster` : là-bas l'onglet actif
+// devient la maîtresse d'UN GROUPE DÉJÀ LÀ ; ici, `id` désigne la conversation
+// CIBLE (celle sous le survol), et l'onglet actif désigne la maîtresse d'un
+// groupe qui N'EXISTE PAS ENCORE — il naît ici, avec la cible comme seul et
+// unique membre. Même doctrine partout : aucune saisie, aucune liste,
+// l'onglet actif tranche, tout le reste est un no-op + message.
+async function linkConvToActiveMaster(id) {
+  if (!groupStore || !stateEngine || !id) return;
+  const activeLabel = localActiveLabel();
+  if (!activeLabel) {
+    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: the active tab is not a Claude conversation.'));
+    return;
+  }
+  const matches = stateEngine.getSnapshot().conversations.filter((c) => convMatchesLabel(activeLabel, c));
+  if (matches.length !== 1) {
+    vscode.window.showInformationMessage(matches.length > 1
+      ? vscode.l10n.t('Claude Convs: the active tab matches more than one conversation — cannot link automatically.')
+      : vscode.l10n.t('Claude Convs: could not identify the conversation in the active tab.'));
+    return;
+  }
+  const master = matches[0];
+  if (master.sessionId === id) {
+    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: a conversation cannot be its own master.'));
+    return;
+  }
+  // `claimedIds` (pas `attachedIds`) : refuse aussi une cible ou une
+  // maîtresse déjà REVENDIQUÉE comme maîtresse d'un autre groupe (groups.js) —
+  // une conversation à deux places (membre + master, ou master de deux
+  // groupes) serait la même ambiguïté que le lot 11 refuse déjà côté store.
+  const claimed = groupStore.claimedIds();
+  if (claimed.has(id) || claimed.has(master.sessionId)) {
+    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: one of these conversations is already part of a group.'));
+    return;
+  }
+  const g = groupStore.create(master.title || '', [{ prompt: '', sessionId: id, wave: 1 }]);
+  groupStore.setMaster(g.id, master.sessionId, master.title || '');
+  pushPanelState();
+}
+
 // Porte de sortie d'un ⌂ posé par erreur (survol de la ligne master, hover-only
 // — plan repli-auto étape 9) : dissocie sans confirmation, geste réversible
 // (relier ne coûte qu'un clic sur l'onglet voulu). Mêmes métadonnées seules
@@ -2011,18 +2067,23 @@ function masterCandidates() {
   return out;
 }
 
-function resolveMasterForGroup(groupId, paste, token) {
-  if (!groupStore || !paste) return null;
+// Résolution SEULE (lot A du plan « master conv isolée » 2026-08-09) — aucun
+// effet de bord sur groupStore, donc utilisable AVANT qu'un groupe existe :
+// c'est elle qui décide, pour un batch d'une seule tâche, si un groupe naît.
+// L'ancien `resolveMasterForGroup` faisait les deux (résolution + setMaster)
+// et exigeait donc un groupe préexistant — createBatch() applique maintenant
+// le setMaster séparément, une fois le groupe (éventuellement) créé.
+function resolveMasterCandidate(paste, token) {
+  if (!stateEngine || !paste) return null;
   let res;
   try { res = resolveMaster({ pasted: paste, token, candidates: masterCandidates() }); }
   catch { return null; }
   if (!res.sessionId) {
-    console.log('[QuotaBar] no master conversation for group %s (%s, %d match(es))', groupId, res.reason, res.matches);
+    console.log('[QuotaBar] no master conversation candidate (%s, %d match(es))', res.reason, res.matches);
     return null;
   }
   const conv = stateEngine.getSnapshot().conversations.find((c) => c.sessionId === res.sessionId);
-  if (!groupStore.setMaster(groupId, res.sessionId, (conv && conv.title) || '')) return null;
-  console.log('[QuotaBar] group %s master conversation = %s (via %s)', groupId, res.sessionId, res.via);
+  console.log('[QuotaBar] master conversation candidate = %s (via %s)', res.sessionId, res.via);
   return { sessionId: res.sessionId, title: (conv && conv.title) || '', via: res.via };
 }
 
@@ -2442,5 +2503,5 @@ function hhmm(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', min
 
 module.exports = {
   activate, deactivate, computeBatchNoticeFromLaunch, computeLastChoiceFromTasks,
-  buildBatchStaticSuffix, shouldPurgeBatchLaunch,
+  buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup,
 };
