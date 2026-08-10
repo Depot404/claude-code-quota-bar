@@ -105,7 +105,33 @@ function check(name, cond, detail) {
   if (cond) { pass++; console.log(`  ok   ${name}`); }
   else { fail++; console.log(`  FAIL ${name}${detail ? ' → ' + detail : ''}`); }
 }
+// ⚠️ DÉFAUT OUVERT (2026-08-10) — la section 1 échoue environ 1 fois sur 3, et
+// ce n'est PAS le banc : l'attente ci-dessous a été passée en condition avec un
+// plafond de 3 s, et les échecs subsistent à l'identique. Donc l'avance de vague
+// au boot n'a parfois JAMAIS lieu. Piste, à instruire dans une session dédiée :
+// `maybeAdvanceWaves()` est appelé UNE fois au retour d'activate()
+// (extension.js) ; s'il tombe avant que l'état soit complet, il ne trouve rien à
+// avancer — et l'état devenant ensuite STABLE, aucun `onChange` ne tire plus
+// jamais, exactement le trou que cet appel était censé boucher. Effet côté
+// utilisateur : un lot dont une vague s'est terminée pendant que VS Code était
+// fermé peut rester bloqué au démarrage. Ne pas « stabiliser » ce banc en
+// rallongeant une attente : il échoue pour une bonne raison.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Attente de CONDITION, jamais de durée. Les deux checks de la section 1
+// tenaient sur un délai fixe (120 ms) et sur l'idée que l'avance de boot est
+// entièrement synchrone : sous charge (plusieurs bancs à la suite, un
+// navigateur ouvert) le banc rendait 4 ok / 2 fail une fois sur trois — le banc
+// qui doute, pas le code qui casse. Une condition avec plafond distingue les
+// deux : si elle finit par être vraie, c'était un délai ; si le plafond tombe,
+// c'est un vrai bug — et le test échoue alors pour la bonne raison.
+async function waitFor(fn, capMs = 3000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < capMs) {
+    if (fn()) return true;
+    await sleep(20);
+  }
+  return fn();
+}
 
 // ── Faux workspace ────────────────────────────────────────────────────────
 const WS = 'C:\\Users\\Test\\Projets VSCODE\\Demo';
@@ -188,8 +214,13 @@ async function run() {
   });
 
   console.log('\n1. Avance AU BOOT : vague 1 finie extension éteinte → vague 2 lancée sans autre événement');
-  // markLaunched est SYNCHRONE dans launchWaveForGroup (avant tout await) : au
-  // retour d'activate(), l'avance de boot a déjà marqué la vague 2 du groupe A.
+  // `markLaunched` est synchrone DANS launchWaveForGroup, mais ce qui y mène ne
+  // l'est pas (l'avance de boot part d'une lecture d'état) : au retour
+  // d'activate() le marquage a « presque toujours » eu lieu, et c'est ce
+  // « presque » qui faisait clignoter ce banc. Ce qui compte ici n'est pas
+  // l'instant du marquage — c'est qu'il ait lieu SANS qu'aucun onChange ne
+  // tire, ce que le plafond de waitFor vérifie tout aussi bien.
+  await waitFor(() => launched('gA', 'm2'));
   check('groupe A : vague 2 LANCÉE dès le boot (aucun onChange n\'a pourtant tiré)',
     launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
 
@@ -197,10 +228,10 @@ async function run() {
   check('groupe B : vague 2 TOUJOURS en file au boot (vague 1 busy)',
     !launched('gB', 'm2'), JSON.stringify(memberOf('gB', 'm2')));
 
-  // Le repli presse-papier du lancement de gA/m2 est asynchrone : on lui laisse
-  // le temps d'écrire, puis on vérifie qu'un lancement a bien été TENTÉ (et pas
-  // seulement le flag posé).
-  await sleep(120);
+  // Le repli presse-papier du lancement de gA/m2 est asynchrone : on attend
+  // qu'il ait écrit (condition, pas durée), puis on vérifie qu'un lancement a
+  // bien été TENTÉ (et pas seulement le flag posé).
+  await waitFor(() => clips.includes('PROMPT-A-WAVE2'));
   check('groupe A : le lancement de la vague 2 a bien été tenté (prompt au presse-papier)',
     clips.includes('PROMPT-A-WAVE2'), JSON.stringify(clips));
   check('groupe B : aucun lancement tenté tant que la vague 1 tourne',
