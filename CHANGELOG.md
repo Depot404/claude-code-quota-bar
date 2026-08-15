@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.35.0] - 2026-08-15
+
+### Changed
+- **The batch notice now says how many conversations are still waiting, instead of how many have started.** "0/1 conversation(s) opened" asked you to work out the remainder yourself, and its total was fixed at launch time; it now reads "1 conversation not sent yet — press Enter in its tab.", counting the one thing the panel can actually prove at any moment: tabs that are open and have sent nothing.
+
+### Fixed
+- **A batch with several waves no longer describes a wave that is already over.** The notice tracked the conversations opened by the first wave and only those, so when a wave finished and the next one opened its tabs, a conversation sitting there with its prompt unsent was never counted — the line kept reporting the previous wave, or had already disappeared. Every conversation the batch has opened is now counted, whichever wave opened it.
+- **Two French messages had drifted back to English.** The wording of the "lost its link before sending" notices changed when their remedy was simplified, which orphaned their translations; both are translated again.
+
+## [2.34.3] - 2026-08-15
+
+### Fixed
+- **A conversation could ring twice for one turn.** A `Stop` hook that returns feedback (exit code 2) doesn't cancel an ending — it sends Claude back for one more turn, which ends in a second, entirely real stop. Both endings rang, 10 to 25 s apart, far beyond the 2.5 s rebound guard, and no guard length could have covered it without delaying every ending. The **done** sound is now keyed on the turn you started rather than on the engine stopping, so one turn rings once however many times a hook sends Claude back — including hooks the extension knows nothing about. The **waiting** sound is unchanged: several permission prompts in one turn are several real calls for you. Where the `UserPromptSubmit` hook isn't installed, the previous behaviour applies unchanged.
+
+## [2.34.2] - 2026-08-10
+
+### Fixed
+- **Two conversations that merely share a title no longer collapse into one.** When a window reloads, the panel folds an abandoned transcript into the conversation that took its tab over — that is how a restarted conversation keeps one line instead of two. But a tab is matched by its label, so two conversations bearing the same title both look like they own it, and the older one was folded away even when each had a tab of its own. The panel now counts the tabs carrying that title: as many tabs as claimants means nobody took anything over, so nothing is folded. A conversation whose process is still running is still recognised as the successor, as before.
+- **A batch could stay parked on a wave that had already finished, and one of its conversations could vanish from the list.** Two conversations that merely *open with the same short message* — "ok", "continue", "go on" — were taken for one single conversation resumed under a new id. The panel then dropped the older one from the list, and any batch task pointing at it read its status off the other conversation instead: still running, so the wave never counted as complete and the next one never opened on its own. Recognising a resumed conversation by its replayed opening message stays in place — it is what catches a batch whose title drifted by a word — but it now requires a message long enough to actually identify something, exactly the threshold the panel already applies everywhere else it matches a prompt. Below it, two identical openings prove nothing and fold nothing.
+
 ## [2.34.1] - 2026-08-09
 
 ### Fixed

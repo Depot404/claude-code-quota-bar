@@ -25,6 +25,26 @@ const { acquireLock, releaseLock } = require('./hooks/sessions-state.js');
 // ~2 s ; ce module rajoute une marge à son niveau : un `done` arme un timer,
 // annulé si la conv repasse `busy` dans la fenêtre. `waiting` est urgent —
 // aucun débounce, il joue à la transition même.
+//
+// UN SON PAR TOUR, PAS PAR ARRÊT (2026-08-15) — un hook `Stop` à feedback
+// (exit 2) ne corrige pas un faux `done` : il fait repartir Claude pour un tour
+// de plus, qui se termine par un SECOND `Stop` bien réel. hook-session-state.js
+// réarme délibérément `since` à chaque Stop (deux Stop d'affilée sont deux faits
+// distincts pour lui), donc la clé de claim changeait et le son rejouait : deux
+// dings — mesuré ici de 10 à 25 s d'écart, très au-delà de tout débounce qu'on
+// puisse tenir sans retarder chaque fin de conversation. Allonger le délai ne
+// répare rien : c'est la question posée qui était fausse. Ce que le son annonce
+// n'est pas « le moteur s'est arrêté » mais « la main te revient » — donc la
+// clé du `done` s'ancre sur le TOUR de l'utilisateur (`busy_since`, posé par le
+// hook UserPromptSubmit et préservé par le merge de sessions-state.js), jamais
+// sur l'horodatage de l'arrêt. Un tour = un ding, quel que soit le nombre de
+// relances par des hooks, y compris ceux qu'on n'a pas écrits. Le son tombe au
+// PREMIER `done` du tour : quand un hook rallonge derrière, il devance la vraie
+// fin de quelques secondes — préféré à un silence de 30 s sur toutes les autres.
+// `waiting` garde sa clé sur `since` : plusieurs demandes de permission dans un
+// même tour sont plusieurs sollicitations réelles, chacune mérite son son.
+// Sans `busy_since` (hooks pas installés, version antérieure), repli sur
+// `since` — le comportement d'avant, jamais un silence.
 // ============================================================================
 
 const CLAIMS_PATH = path.join(os.homedir(), '.claude', 'sound-claims.json');
@@ -130,7 +150,9 @@ function createSoundPlayer(deps = {}) {
     // Appelé sur CHAQUE transition d'état observée (before !== after), jamais
     // sur un recompute qui ne change rien — c'est à l'appelant (extension.js)
     // de ne le brancher que là, sur le même signal que le fetch événementiel.
-    onTransition(sessionId, state, since) {
+    // `turnId` = `busySince` de la conv (démarrage du run demandé par
+    // l'utilisateur) ; absent ⇒ repli sur `since`, cf. en-tête.
+    onTransition(sessionId, state, since, turnId) {
       if (state === 'busy') {
         // Rebond Stop→busy (correction transcript-après-Stop, cf. état
         // engine) : le `done` qui vient d'être armé décrivait un tour encore
@@ -141,12 +163,17 @@ function createSoundPlayer(deps = {}) {
       if (state !== 'done' && state !== 'waiting') return;
       if (!isEnabled()) return;
 
-      const key = `${sessionId}:${state}:${since}`;
-
       if (state === 'waiting') {
-        if (claimSound(key)) play('waiting');
+        if (claimSound(`${sessionId}:waiting:${since}`)) play('waiting');
         return;
       }
+
+      // Clé du tour, pas de l'arrêt (cf. en-tête). Le préfixe `turn` évite toute
+      // collision avec un claim posé sur un `since` par une version antérieure :
+      // les deux sont des horodatages ms, donc le même espace de valeurs.
+      const key = turnId
+        ? `${sessionId}:done:turn${turnId}`
+        : `${sessionId}:done:${since}`;
 
       cancelPendingDone(sessionId);
       const timer = setTimeout(() => {

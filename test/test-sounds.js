@@ -127,12 +127,65 @@ async function multiInstanceTest() {
     JSON.stringify({ r1, r2 }));
 }
 
+// ── 9. UN SON PAR TOUR : un hook Stop à feedback relance Claude, le moteur
+//      s'arrête donc deux fois pour un seul tour de l'utilisateur. `since` est
+//      réarmé à chaque Stop (hook-session-state.js), `busySince` non : c'est
+//      lui qui identifie le tour. Ce banc tombe si la clé du `done` repasse
+//      un jour sur `since` — c'est le bug des « plusieurs dings » (2026-08-15).
+console.log('\n9. Deux arrêts dans le MÊME tour (hook Stop à feedback) → un seul ding');
+async function oneSoundPerTurnTest() {
+  const played = [];
+  const player = createSoundPlayer({ isEnabled: () => true, play: (k) => played.push(k), doneDebounceMs: 30 });
+  const TURN = 700000;
+  player.onTransition('turn-a', 'done', 7000, TURN);   // 1er Stop — le hook va sortir en 2
+  await sleep(60);
+  check('le 1er arrêt du tour sonne', played.length === 1 && played[0] === 'done', JSON.stringify(played));
+  player.onTransition('turn-a', 'busy', 7010, TURN);   // Claude est reparti (relancé par le hook)
+  player.onTransition('turn-a', 'done', 7020, TURN);   // 2e Stop : `since` neuf, MÊME tour
+  await sleep(60);
+  check('le 2e arrêt du même tour reste muet', played.length === 1, JSON.stringify(played));
+  player.dispose();
+}
+
+// ── 10. …mais le tour SUIVANT doit sonner : un seul son par tour, pas un seul
+//       son par conversation.
+console.log('\n10. Nouveau prompt utilisateur (busySince neuf) → le ding revient');
+async function nextTurnRingsTest() {
+  const played = [];
+  const player = createSoundPlayer({ isEnabled: () => true, play: (k) => played.push(k), doneDebounceMs: 30 });
+  player.onTransition('turn-b', 'done', 8000, 800000);
+  await sleep(60);
+  player.onTransition('turn-b', 'busy', 8010, 800500); // l'utilisateur a renvoyé un prompt
+  player.onTransition('turn-b', 'done', 8020, 800500);
+  await sleep(60);
+  check('deux tours = deux dings', played.length === 2, JSON.stringify(played));
+  player.dispose();
+}
+
+// ── 11. Dégradation silencieuse : sans `busy_since` (hook UserPromptSubmit
+//       absent ou version antérieure), on retombe sur le comportement d'avant.
+//       Jamais un silence — un son perdu est une régression invisible.
+console.log('\n11. Sans busySince → repli sur `since`, comportement d\'avant');
+async function noTurnFallbackTest() {
+  const played = [];
+  const player = createSoundPlayer({ isEnabled: () => true, play: (k) => played.push(k), doneDebounceMs: 30 });
+  player.onTransition('turn-c', 'done', 9000);
+  await sleep(60);
+  player.onTransition('turn-c', 'done', 9100);
+  await sleep(60);
+  check('le son n\'est jamais perdu faute de tour connu', played.length === 2, JSON.stringify(played));
+  player.dispose();
+}
+
 (async () => {
   await doneDelayedTest();
   await doneCancelledTest();
   await perSessionTest();
   await disposeTest();
   await multiInstanceTest();
+  await oneSoundPerTurnTest();
+  await nextTurnRingsTest();
+  await noTurnFallbackTest();
   try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
   console.log(`\n${pass} ok, ${fail} fail`);
   process.exit(fail ? 1 : 0);

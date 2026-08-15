@@ -54,6 +54,26 @@ function looksLikeSamePrompt(prompt, firstUser) {
   return a.slice(0, n) === b.slice(0, n);
 }
 
+// Ce message est-il assez SPÉCIFIQUE pour valoir IDENTITÉ à lui seul ?
+//
+// Les deux questions que looksLikeSamePrompt sert ne sont PAS de même nature, et
+// c'est ce qui a manqué :
+//   - matchPending (ici) demande « ce transcript est-il né du prompt que JE
+//     viens d'insérer ? ». Un prompt court y est un signal légitime : je sais ce
+//     que j'ai envoyé, et le couple est en plus borné par `launchedAt` et par
+//     l'unicité exigée des deux côtés. D'où l'égalité stricte sous MIN_PREFIX.
+//   - supersede.js demande « ces deux transcripts quelconques sont-ils la MÊME
+//     conversation, resumée ? ». Là, deux premiers messages IDENTIQUES mais
+//     courts — « ok », « continue », « suite », « prompt » — ne prouvent rien du
+//     tout : ils se répètent d'une conversation à l'autre, ce que MIN_PREFIX
+//     refuse justement à un préfixe. L'égalité stricte, elle, passait au travers.
+// D'où ce prédicat, à la fois voisin du seuil qu'il applique et exigible par
+// l'appelant qui en a besoin (2026-08-10 : deux conversations distinctes fondues
+// l'une dans l'autre sur le mot « prompt », vague de lot bloquée à jamais).
+function identifiesConversation(firstUser) {
+  return normalizeForMatch(firstUser).length >= MIN_PREFIX;
+}
+
 // members    : [{ groupId, key, prompt, launchedAt }]  (store.pending())
 // candidates : [{ sessionId, firstUser, mtime }]       conversations NON rattachées
 // → [{ groupId, key, sessionId }] — uniquement les couples SANS ambiguïté.
@@ -135,4 +155,7 @@ function pendingForRelink(groups, truthOf) {
   return out;
 }
 
-module.exports = { matchPending, pendingForRelink, looksLikeSamePrompt, normalizeForMatch, MIN_PREFIX, CMP_LEN };
+module.exports = {
+  matchPending, pendingForRelink, looksLikeSamePrompt, identifiesConversation,
+  normalizeForMatch, MIN_PREFIX, CMP_LEN,
+};

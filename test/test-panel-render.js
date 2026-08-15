@@ -1639,7 +1639,7 @@ async function run() {
       type: 'state',
       state: { batch: {
         envConflict: [], busy: false,
-        notice: '2/3 conversation(s) opened — press Enter in each tab.',
+        notice: '2 conversations not sent yet — press Enter in their tabs.',
         noticeHint: 'The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.',
         inherit: { model: null, effort: null },
       } },
@@ -1650,7 +1650,7 @@ async function run() {
       return { text: n.textContent, title: n.title, shown: n.classList.contains('show') };
     })()`);
     check('texte du notice = EXACTEMENT le compteur actionnable, aucun texte de groupe/maîtresse/vagues concaténé',
-      noticeShown.text === '2/3 conversation(s) opened — press Enter in each tab.', JSON.stringify(noticeShown));
+      noticeShown.text === '2 conversations not sent yet — press Enter in their tabs.', JSON.stringify(noticeShown));
     check('disclaimer menu officiel posé en tooltip (title), jamais dans le texte visible',
       noticeShown.title.indexOf('official menu') !== -1 && noticeShown.text.indexOf('official menu') === -1, JSON.stringify(noticeShown));
     check('notice visible (classe show)', noticeShown.shown === true);

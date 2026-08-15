@@ -266,6 +266,16 @@ function hasOpenTab(c, tabs) {
   return tabs.labels.some((l) => convMatchesLabel(l, c));
 }
 
+// COMBIEN d'onglets ouverts portent cette conversation — pas « y en a-t-il un »
+// (hasOpenTab suffit à l'affichage), mais combien. Seule supersede.js en a
+// besoin, et pour une raison précise : deux conversations HOMONYMES matchent le
+// même onglet aussi bien que le leur, si bien qu'un `tabOpen` vrai des deux
+// côtés ne dit pas s'il y a UN onglet repris (le vrai husk) ou DEUX onglets
+// bien réels (deux conversations distinctes). Le compte, lui, le dit.
+function countOpenTabs(c, tabs) {
+  return tabs.labels.reduce((n, l) => (convMatchesLabel(l, c) ? n + 1 : n), 0);
+}
+
 // Tolérance au bruit d'UN SEUL recompute (lot 2, bascule au focus, 2026-07-24).
 // Symptôme : plusieurs conversations d'un même groupe partagent le préfixe
 // « Implement part N… » ; une fois tronqués par VS Code à la largeur (pas à un
@@ -669,6 +679,9 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     mtime: c.mtime,
     live: live.has(c.sessionId),
     tabOpen: c.tabOpen,
+    // Nombre d'onglets qui portent cette conv (cf. countOpenTabs) : ce qui
+    // permet à supersede.js de distinguer un onglet REPRIS d'un onglet de plus.
+    tabMatches: countOpenTabs(c, tabs),
     // Second signal (durci 2026-08-05) : premier message user, pour folder un
     // respawn même quand l'ai-title a dérivé d'un mot — cf. createFirstUserReader.
     firstUser: typeof readFirstUser === 'function' ? readFirstUser(c.transcript) : null,

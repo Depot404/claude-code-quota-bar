@@ -51,6 +51,48 @@ map = computeSupersededBy([
 check('deux vivants homonymes → aucune supplantation (onglets réels distincts)',
   Object.keys(map).length === 0, JSON.stringify(map));
 
+// Deux morts homonymes ayant CHACUN un onglet (2026-08-10) : `tabOpen` vient
+// d'un matching par libellé — deux homonymes matchent le même onglet aussi bien
+// que le leur, donc un successeur prouvé par le SEUL onglet ne prouve rien face
+// à un husk qui en revendique un aussi. Découvert en rejouant
+// test-group-master-focus.js, rouge une fois sur deux avant ce correctif : la
+// conversation la plus ancienne des deux homonymes disparaissait de la liste,
+// et le ⌂ ne voyait plus d'ambiguïté là où il y en a une.
+map = computeSupersededBy([
+  c({ sessionId: 'a', title: 'Conversation ambiguë', mtime: 100, tabOpen: true, tabMatches: 2 }),
+  c({ sessionId: 'b', title: 'Conversation ambiguë', mtime: 200, tabOpen: true, tabMatches: 2 }),
+]);
+check('deux morts homonymes, DEUX onglets ouverts → aucune supplantation (rien n\'a été repris)',
+  Object.keys(map).length === 0, JSON.stringify(map));
+
+// UN SEUL onglet pour deux homonymes : là, quelqu'un a bien repris l'onglet de
+// l'autre — c'est la forme exacte de l'incident 2026-07-24, le fold doit rester.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Conversation ambiguë', mtime: 100, tabOpen: true, tabMatches: 1 }),
+  c({ sessionId: 'succ', title: 'Conversation ambiguë', mtime: 200, tabOpen: true, tabMatches: 1 }),
+]);
+check('… un seul onglet pour deux homonymes → husk supplanté (onglet repris)',
+  map.husk === 'succ' && Object.keys(map).length === 1, JSON.stringify(map));
+
+// … et un successeur VIVANT tranche de toute façon, quel que soit le compte
+// d'onglets : son process prouve la continuité à lui seul.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Conversation ambiguë', mtime: 100, tabOpen: true, tabMatches: 2 }),
+  c({ sessionId: 'succ', title: 'Conversation ambiguë', mtime: 200, tabOpen: true, tabMatches: 2, live: true }),
+]);
+check('… successeur VIVANT → husk supplanté même avec un onglet chacun',
+  map.husk === 'succ' && Object.keys(map).length === 1, JSON.stringify(map));
+
+// `tabMatches` absent (appelant qui ne le fournit pas) → garde neutralisée,
+// comportement d'avant ce durcissement : c'est ce que fait tout le reste de ce
+// banc, on le pose une fois explicitement.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Conversation ambiguë', mtime: 100, tabOpen: true }),
+  c({ sessionId: 'succ', title: 'Conversation ambiguë', mtime: 200, tabOpen: true }),
+]);
+check('compte d\'onglets non fourni → dégradation silencieuse (fold comme avant)',
+  map.husk === 'succ', JSON.stringify(map));
+
 // Deux morts homonymes SANS onglet ni vie → pas de preuve de reload, rien fold.
 map = computeSupersededBy([
   c({ sessionId: 'a', title: 'X', mtime: 100 }),
@@ -137,6 +179,29 @@ map = computeSupersededBy([
 ]);
 check('premier message trop court → jamais un signal d\'identité',
   Object.keys(map).length === 0, JSON.stringify(map));
+
+// LE CAS QUI MANQUAIT (2026-08-10) : deux messages courts et STRICTEMENT
+// ÉGAUX. Le check ci-dessus passait pour la mauvaise raison — ses deux chaînes
+// diffèrent, donc rien ne matchait de toute façon. Sous MIN_PREFIX,
+// looksLikeSamePrompt retombe sur l'égalité stricte (légitime côté attach.js,
+// qui compare le prompt qu'il vient d'insérer) : « ok » == « ok » fondait deux
+// conversations réelles. Symptôme mesuré : test-wave-advance.js en échec une
+// fois sur trois, la vague d'un lot bloquée pour toujours.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Groupe A vague une terminée', mtime: 100, firstUser: 'prompt' }),
+  c({ sessionId: 'succ', title: 'Groupe B vague une en cours', mtime: 200, live: true, tabOpen: true, firstUser: 'prompt' }),
+]);
+check('deux premiers messages courts IDENTIQUES → toujours aucune supplantation',
+  Object.keys(map).length === 0, JSON.stringify(map));
+
+// Même paire, message assez long pour identifier : le second signal reprend son
+// office — la correction ci-dessus est un SEUIL, pas une désactivation.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Titre A', mtime: 100, firstUser: 'Reprends le chantier des vagues' }),
+  c({ sessionId: 'succ', title: 'Titre B', mtime: 200, live: true, tabOpen: true, firstUser: 'Reprends le chantier des vagues' }),
+]);
+check('… mais un premier message assez long identifie toujours (seuil, pas désactivation)',
+  map.husk === 'succ' && Object.keys(map).length === 1, JSON.stringify(map));
 
 // Titres différents ET premiers messages différents → deux vraies conversations,
 // jamais confondues.

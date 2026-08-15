@@ -105,25 +105,27 @@ function check(name, cond, detail) {
   if (cond) { pass++; console.log(`  ok   ${name}`); }
   else { fail++; console.log(`  FAIL ${name}${detail ? ' → ' + detail : ''}`); }
 }
-// ⚠️ DÉFAUT OUVERT (2026-08-10) — la section 1 échoue environ 1 fois sur 3, et
-// ce n'est PAS le banc : l'attente ci-dessous a été passée en condition avec un
-// plafond de 3 s, et les échecs subsistent à l'identique. Donc l'avance de vague
-// au boot n'a parfois JAMAIS lieu. Piste, à instruire dans une session dédiée :
-// `maybeAdvanceWaves()` est appelé UNE fois au retour d'activate()
-// (extension.js) ; s'il tombe avant que l'état soit complet, il ne trouve rien à
-// avancer — et l'état devenant ensuite STABLE, aucun `onChange` ne tire plus
-// jamais, exactement le trou que cet appel était censé boucher. Effet côté
-// utilisateur : un lot dont une vague s'est terminée pendant que VS Code était
-// fermé peut rester bloqué au démarrage. Ne pas « stabiliser » ce banc en
-// rallongeant une attente : il échoue pour une bonne raison.
+// DÉFAUT REFERMÉ (2026-08-10) — la section 1 échouait une fois sur trois, et
+// le banc avait raison : dans ces cas-là l'avance n'avait JAMAIS lieu. La piste
+// soupçonnée (un maybeAdvanceWaves() de boot tombant avant que l'état soit
+// complet) était FAUSSE — instrumenté, le boot voit toujours un état complet.
+// La cause était la SUPPLANTATION : les deux transcripts de ce banc ouvrent sur
+// le même premier message (« prompt »), et supersede.js prenait cette égalité
+// pour une identité alors qu'elle est plus COURTE que MIN_PREFIX. w1a (vague 1
+// du groupe A, terminée) était donc redirigé sur w1b (vague 1 du groupe B,
+// encore busy) : la vague de A n'était jamais complète, la suivante ne partait
+// jamais. Le « une fois sur trois » ne tenait qu'au mtime des deux fichiers —
+// écrits dans la même milliseconde, aucun n'est « plus ancien », donc pas de
+// husk, donc pas de fold. Correctif : identifiesConversation (attach.js),
+// appliqué au second signal de supersede.js ; cas ajoutés à test-supersede.js.
+// Ne pas « stabiliser » ce banc en rallongeant une attente : s'il repart, c'est
+// pour une bonne raison.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Attente de CONDITION, jamais de durée. Les deux checks de la section 1
-// tenaient sur un délai fixe (120 ms) et sur l'idée que l'avance de boot est
-// entièrement synchrone : sous charge (plusieurs bancs à la suite, un
-// navigateur ouvert) le banc rendait 4 ok / 2 fail une fois sur trois — le banc
-// qui doute, pas le code qui casse. Une condition avec plafond distingue les
-// deux : si elle finit par être vraie, c'était un délai ; si le plafond tombe,
-// c'est un vrai bug — et le test échoue alors pour la bonne raison.
+// Attente de CONDITION, jamais de durée — et seulement pour ce qui est
+// RÉELLEMENT asynchrone (le repli presse-papier du lancement). L'avance de boot,
+// elle, ne s'attend plus : elle est synchrone par construction (markLaunched est
+// posé dans launchWaveForGroup avant la moindre attente), et c'est exactement ce
+// que la section 1 doit prouver.
 async function waitFor(fn, capMs = 3000) {
   const t0 = Date.now();
   while (Date.now() - t0 < capMs) {
@@ -214,13 +216,11 @@ async function run() {
   });
 
   console.log('\n1. Avance AU BOOT : vague 1 finie extension éteinte → vague 2 lancée sans autre événement');
-  // `markLaunched` est synchrone DANS launchWaveForGroup, mais ce qui y mène ne
-  // l'est pas (l'avance de boot part d'une lecture d'état) : au retour
-  // d'activate() le marquage a « presque toujours » eu lieu, et c'est ce
-  // « presque » qui faisait clignoter ce banc. Ce qui compte ici n'est pas
-  // l'instant du marquage — c'est qu'il ait lieu SANS qu'aucun onChange ne
-  // tire, ce que le plafond de waitFor vérifie tout aussi bien.
-  await waitFor(() => launched('gA', 'm2'));
+  // AUCUNE attente ici, volontairement : le marquage est synchrone de bout en
+  // bout (l'avance de boot lit un état déjà construit, et markLaunched est posé
+  // dans launchWaveForGroup avant la première await). Une attente masquerait la
+  // seule chose que cette section prouve — que la vague part au retour
+  // d'activate(), sans qu'aucun onChange n'ait eu à tirer.
   check('groupe A : vague 2 LANCÉE dès le boot (aucun onChange n\'a pourtant tiré)',
     launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
 

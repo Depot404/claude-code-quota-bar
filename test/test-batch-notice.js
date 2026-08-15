@@ -18,9 +18,9 @@ Module._load = function (req, ...rest) {
   }
   return origLoad.call(this, req, ...rest);
 };
-let computeBatchNoticeFromLaunch, buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup;
+let computeBatchNoticeFromLaunch, buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup, mergeLaunchedWaveMembers;
 try {
-  ({ computeBatchNoticeFromLaunch, buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup } = require(path.join(__dirname, '..', 'extension.js')));
+  ({ computeBatchNoticeFromLaunch, buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup, mergeLaunchedWaveMembers } = require(path.join(__dirname, '..', 'extension.js')));
 } finally {
   Module._load = origLoad;
 }
@@ -47,11 +47,11 @@ check('fallback', computeBatchNoticeFromLaunch(launch({ trackedSessionIds: [] })
 
 console.log('\n3. Juste après le lancement : rien envoyé, les 3 process sont vivants → message initial inchangé');
 const n3 = computeBatchNoticeFromLaunch(launch(), [], new Set(['a', 'b', 'c']), null);
-check('0/3 pour l’instant', n3 === '0/3 conversation(s) opened — press Enter in each tab.', n3);
+check('les 3 restent à envoyer', n3 === '3 conversations not sent yet — press Enter in their tabs.', n3);
 
 console.log('\n4. Un membre a été envoyé (entrée dans le snapshot), les deux autres encore ouverts → recompte');
 const n4 = computeBatchNoticeFromLaunch(launch(), [{ sessionId: 'a' }], new Set(['b', 'c']), null);
-check('1/3, toujours en attente pour les 2 autres', n4 === '1/3 conversation(s) opened — press Enter in each tab.', n4);
+check('le texte compte le RESTE (2), jamais une progression', n4 === '2 conversations not sent yet — press Enter in their tabs.', n4);
 
 console.log('\n5. Les 3 ont été envoyés (les 3 apparaissent dans le snapshot) → le bandeau DISPARAÎT (rend null)');
 const n5 = computeBatchNoticeFromLaunch(launch(), [{ sessionId: 'a' }, { sessionId: 'b' }, { sessionId: 'c' }], new Set(), 'jamais affiché');
@@ -63,7 +63,7 @@ const n6 = computeBatchNoticeFromLaunch(launch(), [{ sessionId: 'a' }], new Set(
 // Plan lien-mort-né 2026-08-04 : le texte ne dit plus « onglet fermé » — un fait
 // sur l'ONGLET qu'on ne peut pas connaître ; seul le LIEN est prouvé perdu.
 check('message mentionne le lien perdu, PAS "lost" sur un envoyé', /1 task lost its link before sending/.test(n6), n6);
-check('reste "opened" tant qu’il reste un membre inserted (b)', /1\/3 conversation\(s\) opened/.test(n6), n6);
+check('reste "not sent yet" tant qu’il reste un membre inserted (b), au singulier', /^1 conversation not sent yet — press Enter in its tab\./.test(n6), n6);
 
 console.log('\n7. Plus aucun membre inserted : le reste (2) a perdu son lien → message dédié, avec le remède du groupe');
 const n7 = computeBatchNoticeFromLaunch(launch(), [{ sessionId: 'a' }], new Set(), null);
@@ -85,7 +85,7 @@ check('aucune action réelle (pas de relaunchChip/linkChip hors groupe) → noti
 console.log('\n8ter. Étape 14 — lot SANS groupe, mixte : un membre encore inserted (onglet prouvé ouvert) + un lien mort-né');
 const n8ter = computeBatchNoticeFromLaunch(launch({ trackedSessionIds: ['a', 'b'], total: 2, groupId: null }), [], new Set(['a']), null);
 // a : vivant, rien envoyé → inserted (pending) — b : mort, rien envoyé → unsent-lost (lost), mais SANS groupe.
-check('le segment "press Enter" reste (a est PROUVÉ inserted)', /0\/2 conversation\(s\) opened/.test(n8ter), n8ter);
+check('le segment "press Enter" reste (a est PROUVÉ inserted)', /^1 conversation not sent yet/.test(n8ter), n8ter);
 check('le lien perdu de b n\'est PAS mentionné (aucun remède hors groupe)', !/lost their link|lost its link/.test(n8ter), n8ter);
 
 console.log('\n9. Suffixe statique (groupe, vagues, non-identifiés) conservé tant que le bandeau "opened" est affiché');
@@ -95,7 +95,7 @@ const n9 = computeBatchNoticeFromLaunch(
   new Set(['a', 'b', 'c']),
   null
 );
-check('suffixe accroché', n9 === '0/3 conversation(s) opened — press Enter in each tab. Grouped as “Demo”.', n9);
+check('suffixe accroché', n9 === '3 conversations not sent yet — press Enter in their tabs. Grouped as “Demo”.', n9);
 
 console.log('\n10. Lot 9 — done + onglet fermé, mais transcript existant (fait durable) → aucun bandeau');
 const n10 = computeBatchNoticeFromLaunch(launch(), [], new Set(), null, () => true);
@@ -109,7 +109,7 @@ check('texte "lost their link" conservé, remède "Relancer" (groupe) seulement 
 console.log('\n12. Lot 9 — cas mixte : a a un transcript (vue périmée), b sans transcript ni process (lien mort-né), c vivant');
 const n12 = computeBatchNoticeFromLaunch(launch(), [], new Set(['c']), null, (id) => id === 'a');
 check('a compté "sent" via transcript, pas "lost"', /1 task lost its link before sending/.test(n12), n12);
-check('reste "opened" tant que c (vivant, pas envoyé) est en attente', /1\/3 conversation\(s\) opened/.test(n12), n12);
+check('reste "not sent yet" tant que c (vivant, pas envoyé) est en attente', /^1 conversation not sent yet/.test(n12), n12);
 
 console.log('\n13. Plan repli-auto étape 6 — buildBatchStaticSuffix() : réduit à l’ACTIONNABLE');
 check('rien de tracké, pas de groupe → suffixe vide',
@@ -148,13 +148,13 @@ check('groupe vidé par retraits successifs (dernier membre parti) = même verdi
   shouldPurgeBatchLaunch({ groupId: 'g1' }, (id) => false) === true);
 
 console.log('\n15. Étape 14 — invariant bout en bout : segments indépendants, jamais une chaîne de cas figée');
-check('pending>0 seul → un seul segment "opened", pas de mention de lien perdu',
-  computeBatchNoticeFromLaunch(launch(), [], new Set(['a', 'b', 'c']), null) === '0/3 conversation(s) opened — press Enter in each tab.');
+check('pending>0 seul → un seul segment "not sent yet", pas de mention de lien perdu',
+  computeBatchNoticeFromLaunch(launch(), [], new Set(['a', 'b', 'c']), null) === '3 conversations not sent yet — press Enter in their tabs.');
 check('lost>0 seul (groupé) → un seul segment "Relancer", pas de "press Enter"',
   computeBatchNoticeFromLaunch(launch(), [], new Set(), null) === '3 tasks lost their link before sending — use “Relaunch”.');
 check('pending>0 ET lost>0 (groupé) → les deux segments, dans l\'ordre, un seul espace',
   computeBatchNoticeFromLaunch(launch(), [], new Set(['a']), null)
-    === '0/3 conversation(s) opened — press Enter in each tab. 2 tasks lost their link before sending — use “Relaunch”.',
+    === '1 conversation not sent yet — press Enter in its tab. 2 tasks lost their link before sending — use “Relaunch”.',
   computeBatchNoticeFromLaunch(launch(), [], new Set(['a']), null));
 check('ni pending ni lost actionnable (ungrouped, tout mort-né) → null, jamais de phrase creuse',
   computeBatchNoticeFromLaunch(launch({ groupId: null }), [], new Set(), null) === null);
@@ -172,6 +172,42 @@ check('1 tâche, collage non résolu (candidat null/falsy) et sans nom → pas d
   shouldCreateGroup(1, undefined, null) === false);
 check('0 tâche (garde défensive, ne devrait pas arriver après normalizeTasks) → pas de groupe',
   shouldCreateGroup(0, 'Nom', true) === false);
+
+console.log('\n17. 2026-08-15 — un lot à VAGUES : le bandeau suit les conversations ouvertes après le « Create »');
+// `trackedSessionIds` naît avec la vague 1 ; launchWaveForGroup rattache les
+// vagues suivantes au GROUPE. Sans fusion, le bandeau ne voit jamais l'onglet
+// que la vague 2 vient d'ouvrir — symptôme constaté : « une nouvelle conv "non
+// envoyé" apparaît, le label ne se met pas à jour ».
+const wave1Only = { total: 1, trackedSessionIds: ['a'], staticSuffix: '', groupId: 'g1' };
+const members2 = [
+  { key: 'k1', sessionId: 'a', launchedAt: 1, wave: 1 },
+  { key: 'k2', sessionId: 'b', launchedAt: 2, wave: 2 },
+];
+const merged = mergeLaunchedWaveMembers(wave1Only, members2);
+check('la session ouverte par la vague 2 entre dans le suivi',
+  merged.trackedSessionIds.join(',') === 'a,b', JSON.stringify(merged.trackedSessionIds));
+check('sans fusion, la vague 2 est invisible : le bandeau annonce encore 1 seule conversation',
+  computeBatchNoticeFromLaunch(wave1Only, [{ sessionId: 'a' }], new Set(['b']), null) === null);
+check('avec fusion, il compte celle qui attend vraiment (a envoyée, b ouverte)',
+  computeBatchNoticeFromLaunch(merged, [{ sessionId: 'a' }], new Set(['b']), null)
+    === '1 conversation not sent yet — press Enter in its tab.',
+  computeBatchNoticeFromLaunch(merged, [{ sessionId: 'a' }], new Set(['b']), null));
+check('deux vagues ouvertes en attente → pluriel, et le compte suit',
+  computeBatchNoticeFromLaunch(merged, [], new Set(['a', 'b']), null)
+    === '2 conversations not sent yet — press Enter in their tabs.',
+  computeBatchNoticeFromLaunch(merged, [], new Set(['a', 'b']), null));
+check('membre en file (jamais lancé, launchedAt null) → PAS compté : aucun onglet ouvert',
+  mergeLaunchedWaveMembers(wave1Only, [{ key: 'k3', sessionId: 'c', launchedAt: null, wave: 3 }])
+    .trackedSessionIds.join(',') === 'a');
+check('membre sans sessionId (non identifié) → ignoré, jamais une entrée fantôme',
+  mergeLaunchedWaveMembers(wave1Only, [{ key: 'k4', sessionId: null, launchedAt: 3 }])
+    .trackedSessionIds.join(',') === 'a');
+check('rien de neuf → l’objet d’origine est rendu tel quel (pas de copie à chaque push)',
+  mergeLaunchedWaveMembers(wave1Only, [{ key: 'k1', sessionId: 'a', launchedAt: 1 }]) === wave1Only);
+check('aucun groupe (lot ungrouped) → inchangé, la liste de naissance suffit',
+  mergeLaunchedWaveMembers(wave1Only, null) === wave1Only);
+check('pas de lot en cours → null passe sans exploser',
+  mergeLaunchedWaveMembers(null, members2) === null);
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

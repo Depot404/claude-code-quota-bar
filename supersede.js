@@ -54,10 +54,20 @@
 // repli → ignoré par le groupement titre ; `firstUser` absent (pas fourni par
 // l'appelant, ou transcript illisible) → ignoré par le groupement prompt.
 // Rien qui matche nulle part = aucune supplantation, comportement d'avant.
+//
+// SEUIL DU SECOND SIGNAL (2026-08-10) — un premier message plus COURT que
+// MIN_PREFIX ne vaut jamais identité, même identique au caractère près : « ok »,
+// « continue », « suite » ouvrent des dizaines de conversations différentes.
+// C'est ce que MIN_PREFIX interdit déjà à un préfixe ; l'égalité stricte que
+// looksLikeSamePrompt applique en dessous du seuil est légitime là où elle est
+// née (attach.js compare le prompt qu'on VIENT d'insérer, borné par
+// `launchedAt`), jamais ici. Deux conversations distinctes d'un même lot ont été
+// fondues l'une dans l'autre sur le mot « prompt » — la vague ne s'est plus
+// jamais complétée, donc la suivante ne s'est plus jamais ouverte.
 // ============================================================================
 
 const { norm } = require('./labels');
-const { looksLikeSamePrompt } = require('./attach');
+const { looksLikeSamePrompt, identifiesConversation } = require('./attach');
 
 // Mêmes sources que state.js MATCHABLE_TITLE_SOURCES : un titre qui PEUT porter
 // un libellé d'onglet, donc dont l'égalité entre deux convs est une identité
@@ -88,12 +98,39 @@ function resolveGroup(group, out) {
   // on n'en fold aucun (jamais de fusion devinée sans preuve).
   if (!succ.live && !succ.tabOpen) return;
 
+  // Y a-t-il assez d'onglets pour tout le monde ? Une supplantation SUPPOSE
+  // qu'un onglet a été REPRIS : le successeur occupe celui du husk. S'il y a
+  // autant d'onglets ouverts que de conversations qui les revendiquent,
+  // personne n'a rien repris — ce sont des conversations distinctes qui
+  // partagent un titre. `tabMatches` absent (appelant qui ne le fournit pas,
+  // bancs) → 0 → cette garde ne se déclenche jamais : comportement d'avant, à
+  // l'octet près, comme pour les deux autres signaux.
+  const claimants = group.filter((c) => c.tabOpen).length;
+  const tabsAvailable = group.reduce((n, c) => Math.max(n, c.tabMatches || 0), 0);
+  const enoughTabsForEveryone = tabsAvailable >= claimants;
+
   for (const c of group) {
     if (c === succ) continue;
     // Un HUSK : mort, et strictement plus ancien que le successeur. Un second
     // VIVANT homonyme (deux vrais onglets concurrents) n'est JAMAIS fold — ce
     // sont deux conversations réelles, pas un artefact de reload/respawn.
     if (!c.live && (c.mtime || 0) < (succ.mtime || 0)) {
+      // ONGLET REPRIS, ou onglet de plus ? (2026-08-10) Quand le successeur
+      // n'est prouvé QUE par un onglet (son process ne tourne pas) et que le
+      // husk présumé en revendique un lui aussi, `tabOpen` ne tranche pas : il
+      // vient d'un matching par LIBELLÉ (state.js `hasOpenTab`), et deux
+      // homonymes matchent le même onglet aussi bien que le leur. Le COMPTE, si.
+      // Autant d'onglets que de prétendants ⇒ personne n'a repris l'onglet de
+      // personne ⇒ deux conversations réelles qui partagent un titre, jamais un
+      // husk. Doute → aucun fold, comme partout ailleurs ici : une ligne en trop
+      // est bénigne, une conversation escamotée ne l'est pas — elle sort de la
+      // liste (state.js ampute le husk) et tout membre de lot qui la désigne
+      // résout son statut contre sa voisine, ce qui fige la vague pour toujours
+      // (test-group-master-focus.js, rouge une fois sur deux avant ce
+      // correctif : deux conversations distinctes au même titre, un onglet
+      // chacune). Un successeur VIVANT, lui, prouve la continuité par son
+      // process : le fold reste, c'est la forme même de l'incident d'origine.
+      if (!succ.live && c.tabOpen && enoughTabsForEveryone) continue;
       out[c.sessionId] = succ.sessionId;
     }
   }
@@ -133,7 +170,17 @@ function computeSupersededBy(convs) {
   // prime — on ne recalcule rien pour les paires qu'il a déjà tranchées).
   // Paire NON ambiguë seulement : chaque côté ne doit matcher qu'UN seul autre
   // transcript, sinon aucun des deux ne fold (ambiguïté = aucune conclusion).
-  const withPrompt = list.filter((c) => c.firstUser && !resolvedByTitle.has(c.sessionId));
+  // `identifiesConversation` (attach.js) : un premier message plus court que
+  // MIN_PREFIX n'est PAS un signal d'identité, même répété au caractère près.
+  // Sans ce filtre, deux conversations distinctes ouvertes par « ok »,
+  // « continue » ou « suite » se fondaient l'une dans l'autre — la plus ancienne
+  // sortait de la liste (state.js ampute le husk) et tout membre de lot qui la
+  // désignait résolvait son statut contre la conversation d'à côté, encore
+  // `busy` : vague jamais complète, vague suivante jamais ouverte, pour
+  // toujours. Diagnostiqué le 2026-08-10 par test-wave-advance.js, qui échouait
+  // une fois sur trois — l'écart tenait au seul `mtime` des deux transcripts
+  // (égal à la milliseconde = pas de husk, donc pas de fold).
+  const withPrompt = list.filter((c) => c.firstUser && identifiesConversation(c.firstUser) && !resolvedByTitle.has(c.sessionId));
   const pairs = [];
   for (let i = 0; i < withPrompt.length; i++) {
     for (let j = i + 1; j < withPrompt.length; j++) {

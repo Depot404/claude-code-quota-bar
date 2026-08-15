@@ -772,7 +772,10 @@ function maybeFetchOnTransition(snapshot) {
     if (before !== undefined && before !== c.state) {
       // Même signal que le fetch événementiel ci-dessous, jamais un recompute
       // qui ne change rien — le son se branche ici, pas ailleurs.
-      if (soundPlayer) soundPlayer.onTransition(c.sessionId, c.state, c.since);
+      // `busySince` = démarrage du run demandé par l'utilisateur : c'est LUI qui
+      // identifie le tour, pas `since` (réarmé à chaque Stop, donc deux fois par
+      // tour dès qu'un hook Stop à feedback relance Claude) — cf. sounds.js.
+      if (soundPlayer) soundPlayer.onTransition(c.sessionId, c.state, c.since, c.busySince);
       if (c.state === 'done' || c.state === 'waiting') transitioned = true;
     }
   }
@@ -1580,7 +1583,10 @@ function memberSources(getConv) {
 
 function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTranscript) {
   if (!launch) return fallback;
-  const { total, trackedSessionIds, staticSuffix, groupId } = launch;
+  // `total` n'est plus lu depuis 2026-08-15 (le texte compte le reste à faire,
+  // pas une progression) — le champ reste posé par launchBatch, personne ne le
+  // déstructure plus ici.
+  const { trackedSessionIds, staticSuffix, groupId } = launch;
   // Aucun membre rattaché à suivre (tout non identifié dès le départ, ou lot
   // 100% en repli presse-papier) : rien à recalculer, le texte d'origine reste
   // affiché tel quel — dégradation silencieuse, pas de régression.
@@ -1604,14 +1610,14 @@ function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTran
 
   // Classement par la table de vérité (lot 10), plus par une chaîne de `if`
   // locale : « en attente d'Entrée » = statut `inserted`, « lien perdu sans
-  // rien envoyer » = `unsent-lost`, tout le reste a envoyé. Les trois autres
-  // consommateurs répondent exactement pareil.
-  let sent = 0, pending = 0, lost = 0;
+  // rien envoyer » = `unsent-lost`, tout le reste a envoyé (et n'est plus
+  // compté depuis 2026-08-15, cf. le segment « pas encore envoyée » ci-dessous).
+  // Les trois autres consommateurs répondent exactement pareil.
+  let pending = 0, lost = 0;
   for (const id of trackedSessionIds) {
     const t = memberTruth({ sessionId: id, launchedAt: 1 }, sources);
     if (t.status === 'inserted') pending++;
     else if (t.status === 'unsent-lost') lost++;
-    else sent++;
   }
 
   // Invariant (étape 14, cf. commentaire de shouldPurgeBatchLaunch juste
@@ -1624,8 +1630,18 @@ function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTran
   // `unsent-lost` n'en fait plus partie par définition (son process est
   // mort) — pending === 0 signifie qu'aucun onglet n'est plus prouvé ouvert,
   // donc plus aucune raison d'écrire cette phrase.
+  //
+  // Ce que la phrase COMPTE (2026-08-15, demande user) : le RESTE À FAIRE,
+  // jamais une progression « sent/total ». Un « 0/1 » posait une devinette là
+  // où il n'y a qu'une action — et son total, figé au lancement de la vague 1,
+  // devenait faux dès qu'une vague suivante ouvrait ses propres onglets
+  // (cf. mergeLaunchedWaveMembers). `pending` est le seul nombre que le
+  // panneau puisse prouver à l'instant : des onglets vivants qui n'ont rien
+  // envoyé. Singulier/pluriel séparés, comme le segment « lien perdu ».
   if (pending > 0) {
-    segments.push(vscode.l10n.t('{0}/{1} conversation(s) opened — press Enter in each tab.', sent, total));
+    segments.push(pending > 1
+      ? vscode.l10n.t('{0} conversations not sent yet — press Enter in their tabs.', pending)
+      : vscode.l10n.t('{0} conversation not sent yet — press Enter in its tab.', pending));
   }
   // « lien perdu » : exige au moins un `unsent-lost` ET un groupe pour porter
   // son remède — relaunchChip/linkChip (panel.js) et le ré-appariement
@@ -1648,13 +1664,45 @@ function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTran
   return segments.join(' ') + (pending > 0 ? staticSuffix : '');
 }
 
+// Un lot à plusieurs vagues OUVRE des conversations longtemps après son
+// « Create » : `trackedSessionIds` est figé sur la vague 1 (launchBatch), et
+// launchWaveForGroup rattache les vagues suivantes au GROUPE sans jamais les y
+// ajouter. Le bandeau décrivait donc une vague révolue pendant qu'un onglet
+// fraîchement ouvert attendait son Entrée — constat user 2026-08-15 : « une
+// nouvelle conv "non envoyé" apparaît, mais le label ne se met pas à jour ».
+//
+// Même classe d'erreur que les cinq déjà documentées en tête de
+// shouldPurgeBatchLaunch : un état posé une fois, jamais réconcilié avec le
+// monde qui bouge dessous. La parade est de ne plus jamais faire confiance à
+// la liste de naissance : les membres LANCÉS du groupe (`launchedAt != null`,
+// posé par markLaunched avant même l'ouverture) sont la seule source qui suive
+// le lot dans le temps. On les UNIT à la liste d'origine plutôt que de la
+// remplacer — un lot sans groupe (tâche unique) n'a que celle-là.
+//
+// Pure et injectée (jamais `groupStore` lu ici) : testable sans VS Code.
+function mergeLaunchedWaveMembers(launch, members) {
+  if (!launch) return launch;
+  const ids = new Set(launch.trackedSessionIds || []);
+  const before = ids.size;
+  for (const m of members || []) {
+    if (m && m.sessionId && m.launchedAt != null) ids.add(m.sessionId);
+  }
+  // Même jeu d'identifiants → on rend l'objet d'origine (pas de copie inutile
+  // à chaque push, et l'identité de `batchLastLaunch` reste comparable).
+  if (ids.size === before) return launch;
+  return { ...launch, trackedSessionIds: [...ids] };
+}
+
 // `sources` = celles du recompute en cours (buildPanelState) quand il y en a —
 // sinon on en fabrique : ce chemin sert aussi juste après un « Create », hors
 // de tout push.
 function composeBatchNotice(convs, sources) {
   const s = sources || memberSources();
+  const g = batchLastLaunch && batchLastLaunch.groupId && groupStore
+    ? groupStore.get(batchLastLaunch.groupId)
+    : null;
   return computeBatchNoticeFromLaunch(
-    batchLastLaunch,
+    mergeLaunchedWaveMembers(batchLastLaunch, g && g.members),
     convs,
     (id) => s.isLive(id),
     batchStatus.notice,
@@ -2504,4 +2552,5 @@ function hhmm(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', min
 module.exports = {
   activate, deactivate, computeBatchNoticeFromLaunch, computeLastChoiceFromTasks,
   buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup,
+  mergeLaunchedWaveMembers,
 };

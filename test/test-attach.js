@@ -17,7 +17,7 @@ const os = require('os');
 const path = require('path');
 
 const EXT = path.join(__dirname, '..');
-const { matchPending, pendingForRelink, looksLikeSamePrompt, MIN_PREFIX } = require(path.join(EXT, 'attach.js'));
+const { matchPending, pendingForRelink, looksLikeSamePrompt, identifiesConversation, MIN_PREFIX } = require(path.join(EXT, 'attach.js'));
 const { memberTruth } = require(path.join(EXT, 'member-truth.js'));
 const { firstUserText } = require(path.join(EXT, 'hooks', 'transcript.js'));
 const { createGroupStore } = require(path.join(EXT, 'groups.js'));
@@ -76,6 +76,23 @@ function run() {
     looksLikeSamePrompt('go', 'go') === true && looksLikeSamePrompt('go', 'go ahead') === false);
   check(`… seuil documenté (${MIN_PREFIX} caractères)`, MIN_PREFIX >= 8);
   check('vide des deux côtés → jamais un match', looksLikeSamePrompt('', '') === false);
+
+  // `identifiesConversation` (2026-08-10) : le MÊME seuil, mais posé comme
+  // question distincte — « ce message suffit-il à IDENTIFIER une conversation ? »
+  // C'est ce que supersede.js doit exiger avant de conclure qu'un transcript est
+  // le resume d'un autre. L'égalité stricte ci-dessus reste vraie et légitime
+  // ICI (on compare le prompt qu'on vient d'insérer, borné par launchedAt) ;
+  // là-bas, elle fondait deux conversations distinctes ouvertes par « ok ».
+  check('message court → n\'identifie AUCUNE conversation',
+    identifiesConversation('go') === false && identifiesConversation('ok') === false
+    && identifiesConversation('prompt') === false);
+  check('message assez long → identifie',
+    identifiesConversation(PROMPT) === true);
+  check('longueur mesurée APRÈS normalisation des blancs',
+    identifiesConversation('   ok   \n\n ') === false
+    && identifiesConversation('a'.repeat(MIN_PREFIX)) === true);
+  check('null / vide → n\'identifie rien, jamais d\'exception',
+    identifiesConversation(null) === false && identifiesConversation('') === false);
 
   console.log('\n3. Étage 2 : appariement en masse');
   const members = [
