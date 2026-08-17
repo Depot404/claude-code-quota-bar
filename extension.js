@@ -39,7 +39,7 @@ const { firstUserText } = require('./hooks/transcript.js');
 // Moteur de vagues (lot 4) : Node pur, ne connaît que `{wave, status}` — le
 // statut RÉEL de chaque membre (queued/launched/done/stale) est résolu ici,
 // à partir de la conversation qu'il pointe (ou de son absence).
-const { launchedWave, waveToAutoLaunch, canForceLaunch } = require('./waves');
+const { launchedWave, waveToAutoLaunch, canForceLaunch, advanceGate, WAVE_STABLE_MS } = require('./waves');
 // Table de vérité UNIQUE du statut d'un membre (lot 10) : le rendu des lignes,
 // le moteur de vagues et le bandeau de batch la consomment TOUS — plus une
 // seule déduction locale à partir de « la conversation est-elle dans la liste
@@ -50,6 +50,11 @@ const { memberTruth } = require('./member-truth');
 // tranché par member-truth.js en une condition de non-rendu du groupe entier,
 // ne re-déduit rien — cf. group-done.js.
 const { groupDone } = require('./group-done');
+// Filiation des lots (plan arbre-filiation 2026-08-15) : quel groupe se rend
+// SOUS la ligne d'un membre d'un autre — le cas nominal du lot N qui propose
+// les handoffs du lot N+1. Node pur, et il consomme la forme déjà envoyée au
+// webview : aucune seconde résolution, cf. nesting.js en tête.
+const { computeNesting } = require('./nesting');
 // Conversation maîtresse d'un groupe (lot 11) : la résolution est du Node pur
 // (normalisation + « exactement un transcript contient ce bloc »), les lectures
 // de transcripts restent ici — et sont PONCTUELLES, déclenchées par un Create,
@@ -294,7 +299,21 @@ function activate(context) {
     // Clic = acte observé explicite (lot 10c), même si l'onglet est déjà actif
     // — c'est le seul cas où aucune bascule/transition ne peut jamais se
     // produire, donc le seul chemin d'ack possible en mono-onglet.
-    focusConv: (msg) => { focusConversation(msg); ackConversationById(msg && msg.id); },
+    //
+    // `reportActivation` (2026-08-17, plan gel-tabs) : focusConversation()
+    // retourne le libellé RÉELLEMENT activé quand l'onglet est chez nous — on
+    // le rapporte au tracker AVANT de redemander un recompute, pour que le
+    // surlignage suive le clic même si la copie miroir des onglets de l'hôte
+    // d'extension est gelée (lecture fraîche qui relirait alors le gel).
+    // `null` (onglet ailleurs, relayé) → rien à rapporter ICI : c'est la
+    // fenêtre qui répondra au relais qui le fera, sur SON tracker.
+    focusConv: (msg) => {
+      focusConversation(msg).then((label) => {
+        if (label && tabTracker) tabTracker.reportActivation(label);
+        if (stateEngine) stateEngine.refresh();
+      }).catch(() => {});
+      ackConversationById(msg && msg.id);
+    },
     toggleSounds: () => toggleSounds(context),
     toggleCollapse: (msg) => toggleCollapse(msg && msg.section),
     setSortOrder: (msg) => setSortOrder(msg && msg.order),
@@ -409,7 +428,11 @@ function activate(context) {
     // Ce que les GROUPES affichent, ajouté à la clé de changement du moteur
     // (cf. state.js `extraKey`) : sans elle, une bascule de statut qui ne
     // touche aucune conversation de la liste n'était jamais poussée au webview.
-    extraKey: groupsRenderKey,
+    // Le gel des onglets (2026-08-17) rejoint la même clé, MÊME RAISON : ni la
+    // liste ni les groupes ne bougent quand le canal RPC des onglets meurt ou
+    // reparle — sans lui ici, la bascule gel/dégel ne pousserait qu'au
+    // prochain changement sans rapport.
+    extraKey: () => groupsRenderKey() + '|' + tabsFrozenKey(),
     // L'ack APRÈS le push : la conv apparaît terminée tout de suite, l'accusé
     // suit. Ici passe le cas « l'onglet était déjà sous les yeux quand Claude a
     // fini » — aucune bascule d'onglet ne se produira, c'est donc l'arrivée du
@@ -487,7 +510,15 @@ function activate(context) {
   // Relais de focus inter-fenêtres (lot 4) : le panneau liste les convs du
   // workspace, dont certaines ont leur onglet dans une AUTRE fenêtre VS Code.
   // Chaque instance écoute les requêtes ; celle qui possède l'onglet répond.
-  context.subscriptions.push(createFocusRelay());
+  // `onActivated` (2026-08-17, plan gel-tabs) : SYMÉTRIQUE du câblage de
+  // `focusConv` ci-dessus — c'est ICI, dans la fenêtre qui possède réellement
+  // l'onglet, que l'acte doit être rapporté à SON tracker.
+  context.subscriptions.push(createFocusRelay({
+    onActivated: (label) => {
+      if (tabTracker) tabTracker.reportActivation(label);
+      if (stateEngine) stateEngine.refresh();
+    },
+  }));
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -569,6 +600,7 @@ function restartTimer() {
 
 function deactivate() {
   clearInterval(timer);
+  if (waveGateTimer) { clearTimeout(waveGateTimer); waveGateTimer = null; }
 }
 
 // `force` (commande Refresh / bouton du panneau, lot 13 §2) court-circuite la
@@ -668,6 +700,10 @@ const DEMO_CONVERSATIONS = [
   // sonnet·medium — le badge est le SEUL mécanisme qui le signale.
   { id: 'd6', title: 'Fix flaky checkout integration test', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 22, tokens: 44000, denom: 200000 }, state: 'done', acked: true, active: false, asked: { model: 'opus', effort: 'high' }, mismatch: { model: { asked: 'opus', real: 'sonnet' }, effort: { asked: 'high', real: 'medium' } } },
   { id: 'd7', title: 'Migrate legacy cron jobs to queues', model: 'Opus 4.8', effort: 'high', ctx: { pct: 47, tokens: 470000, denom: 1000000 }, state: 'interrupted', acked: true, active: false },
+  // Sous-lot imbriqué (plan arbre-filiation) : les membres du lot dont d3 —
+  // elle-même membre de demo-g — est la maîtresse.
+  { id: 'd8', title: 'Wire the new billing client into checkout', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 41, tokens: 82000, denom: 200000 }, state: 'busy', acked: true, active: false, groupId: 'demo-g2' },
+  { id: 'd9', title: 'Add smoke tests for invoice PDFs', model: 'Haiku 4.5', effort: 'low', ctx: { pct: 9, tokens: 18000, denom: 200000 }, state: 'done', acked: false, active: false, groupId: 'demo-g2', tabOpen: true },
 ];
 
 // Groupe de démonstration (lot 2), rendu en mode CLAUDE_QUOTA_PANEL_DEMO : les
@@ -677,6 +713,7 @@ const DEMO_CONVERSATIONS = [
 const DEMO_GROUPS = [{
   id: 'demo-g',
   name: 'Payment refactor',
+  stamp: '14:07',
   hue: hueOf('Payment refactor'),
   collapsed: false,
   // Moteur de vagues (lot 4) : vague 1 en cours (d1 busy, d3 done), vague 2
@@ -690,6 +727,24 @@ const DEMO_GROUPS = [{
     { key: 'm1', prompt: 'Extract the billing client into packages/billing', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'd1', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
     { key: 'm2', prompt: 'Add a PDF export button to the invoice page', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd3', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
     { key: 'm3', prompt: 'Update the docs once the other two land', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' },
+  ],
+}, {
+  // Sous-lot IMBRIQUÉ (plan arbre-filiation) : sa maîtresse d3 est membre m2 de
+  // demo-g. La filiation n'est PAS écrite ici — le retour démo de groupsState
+  // passe par computeNesting comme le réel : la démo exerce la dérivation,
+  // elle n'en recopie jamais la sortie.
+  id: 'demo-g2',
+  name: 'Billing rollout',
+  stamp: '15:32',
+  hue: hueOf('Billing rollout'),
+  collapsed: false,
+  launchedWave: 1,
+  nextWave: null,
+  waveNotice: null,
+  master: { convId: 'd3', title: 'Add a PDF export button to the invoice page', tabTitle: null, listed: true, status: 'done', hint: '' },
+  members: [
+    { key: 'm1', prompt: 'Wire the new billing client into checkout', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'd8', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
+    { key: 'm2', prompt: 'Add smoke tests for invoice PDFs', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd9', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
   ],
 }];
 
@@ -906,12 +961,33 @@ function conversationsState() {
 // `convs` = sortie de conversationsState(), déjà calculée par buildPanelState
 // — un seul passage sur stateEngine, pas un second par groupe.
 function groupsState(convs, sources, superseded) {
-  if (process.env.CLAUDE_QUOTA_PANEL_DEMO === '1') return DEMO_GROUPS;
+  if (process.env.CLAUDE_QUOTA_PANEL_DEMO === '1') {
+    // Le jeu de démo passe par la MÊME dérivation de filiation et de rôle de
+    // maîtresse que le chemin réel : la démo doit EXERCER computeNesting, pas
+    // recopier sa sortie à la main (deux écritures d'un même fait divergent —
+    // classe d'erreur documentée en tête de member-truth.js). Copie
+    // superficielle d'abord : DEMO_GROUPS est un const de module, le
+    // post-traitement ne doit pas le muter d'un appel à l'autre.
+    const demo = DEMO_GROUPS.map((g) => ({ ...g, master: g.master ? { ...g.master } : g.master }));
+    const { nestedUnder, masterRole } = computeNesting(demo);
+    for (const g of demo) {
+      g.nestedUnder = nestedUnder[g.id] || null;
+      const role = (g.master && masterRole[g.id]) || { role: 'host', blocksDone: true };
+      g.done = groupDone(g.members.map((m) => m.status), (g.master && role.blocksDone) ? g.master.status : null);
+      if (role.role === 'ceded') g.master = null;
+    }
+    return demo;
+  }
   if (!groupStore) return [];
   const sup = superseded || currentSuperseded();
   const convById = new Map((convs || []).map((c) => [c.id, c]));
   const src = sources || memberSources((id) => convById.get(id));
-  return groupStore.all().map((g) => {
+  // Statuts des membres, gardés de côté pour le calcul de `done` : il se fait
+  // désormais APRÈS la résolution inter-groupes (plus bas), parce qu'il dépend
+  // du rôle de la maîtresse — or ce rôle se décide entre PLUSIEURS groupes, ce
+  // que le map ci-dessous ne peut pas voir.
+  const memberStatuses = new Map();
+  const rendered = groupStore.all().map((g) => {
     // UNE résolution par membre (lot 10), partagée par le moteur de vagues et
     // par le rendu : le webview ne re-déduit plus rien de « la conversation
     // est-elle dans la liste » — il affiche ce que la table a conclu.
@@ -921,16 +997,28 @@ function groupsState(convs, sources, superseded) {
     const truths = rm.map((m) => memberTruth(m, src));
     const abstract = rm.map((m, i) => ({ wave: m.wave, status: truths[i].waveStatus }));
     const master = masterState(g, src, convById, sup);
+    memberStatuses.set(g.id, truths.map((t) => t.status));
     return {
       id: g.id,
       name: g.name,
+      // Identité courte du lot, affichée dans la grip (« BATCH 14:12 »).
+      // L'heure de création plutôt que le nom : deux lots peuvent porter le
+      // même group: dans leur bloc collé (ou aucun, et tomber tous deux sur le
+      // repli), leur heure de création les sépare toujours. Formatée ICI comme
+      // tout autre libellé d'heure du panneau — hhmm(), celui du reset de
+      // quota : le webview affiche ce qui a été conclu, il ne dérive pas une
+      // heure locale de son côté. Groupe legacy sans createdAt (repli 0 du
+      // sanitize) → null, et la grip n'affiche alors aucun libellé plutôt
+      // qu'une heure inventée (dégradation silencieuse, comme partout ici).
+      stamp: g.createdAt ? hhmm(new Date(g.createdAt)) : null,
       hue: hueOf(g.name),
       collapsed: !!g.collapsed,
       // « Ce qui reste à faire » (étape 11) : groupe ENTIER terminé (membres
       // ET maîtresse, si désignée) → le webview ne le rend plus DU TOUT (rien
       // n'est muté ici, group-done.js ne fait que plier des statuts déjà
       // tranchés — panel.js filtre au rendu, cf. CLAUDE.md du dossier).
-      done: groupDone(truths.map((t) => t.status), master ? master.status : null),
+      // POSÉ PLUS BAS : la maîtresse ne bloque que le lot qui la rend en tête.
+      done: false,
       // Conv maîtresse (lot 11) : un POINTEUR vers une conversation qui vit sa
       // vie ailleurs — elle n'est pas un membre, ne compte dans aucune vague, et
       // n'est pas retirée de la liste plate. Son statut passe par la MÊME table
@@ -964,6 +1052,32 @@ function groupsState(convs, sources, superseded) {
       })),
     };
   });
+
+  // Filiation (plan arbre-filiation, lot 1) — calculée SUR CE QUI PART AU
+  // WEBVIEW, une fois tous les groupes résolus : c'est une relation ENTRE
+  // groupes, elle ne peut pas se décider dans le map ci-dessus, qui n'en voit
+  // qu'un à la fois. `nestedUnder` porté par CHAQUE groupe (null compris) :
+  // le webview lit un champ, il n'a jamais à déduire une absence.
+  const { nestedUnder, masterRole } = computeNesting(rendered);
+  for (const g of rendered) {
+    g.nestedUnder = nestedUnder[g.id] || null;
+    // Rôle de la maîtresse (plan « la maîtresse n'engage que son dernier lot ») :
+    // repli sur le comportement d'avant si nesting.js n'a rien à en dire —
+    // dégradation silencieuse, comme partout ici.
+    const role = (g.master && masterRole[g.id]) || { role: 'host', blocksDone: true };
+    // Une maîtresse encore vivante ne doit retenir QUE le lot qu'elle pilote
+    // vraiment : sans ça, un lot terminé depuis des heures reste affiché
+    // « 3/3 done » tant que la conv de cadrage enchaîne les suivants.
+    g.done = groupDone(memberStatuses.get(g.id), (g.master && role.blocksDone) ? g.master.status : null);
+    // Lot qui a CÉDÉ sa maîtresse à plus récent que lui : le webview reçoit
+    // `null` et emprunte sa branche sans-maîtresse (grip seule) — celle-là
+    // même qu'utilise un lot qui n'en a jamais eu. Aucun rendu nouveau, et
+    // surtout AUCUNE écriture dans le store : la relation reste dérivée, comme
+    // la filiation, et le lien historique reste lisible (l'user peut toujours
+    // relier ailleurs, ce qui rebasculera la tête).
+    if (role.role === 'ceded') g.master = null;
+  }
+  return rendered;
 }
 
 // Signature de ce que les GROUPES affichent — la moitié de la clé de rendu que
@@ -985,11 +1099,25 @@ function groupsRenderKey() {
     if (!groupStore.all().length) return '';
     return JSON.stringify(groupsState(conversationsState()).map((g) => [
       g.id, g.name, g.done, g.collapsed,
+      // La filiation change la STRUCTURE du rendu (un lot passe de bloc frère
+      // à sous-arbre) sans qu'aucun autre champ ne bouge : sans elle dans la
+      // clé, le passage se ferait au prochain recompute qui change autre
+      // chose — jamais à l'instant où il devient vrai.
+      g.nestedUnder && [g.nestedUnder.groupId, g.nestedUnder.memberKey],
       g.launchedWave, g.nextWave, g.waveNotice,
       g.master && [g.master.convId, g.master.title, g.master.listed, g.master.status],
       g.members.map((m) => [m.key, m.convId, m.status, m.canLink, m.canRelaunch]),
     ]));
   } catch { return ''; }
+}
+
+// Signature du gel des onglets (2026-08-17, plan gel-tabs) — même doctrine que
+// `groupsRenderKey` ci-dessus : `renderKey` (state.js) ne décrit que la liste
+// des conversations, or le bandeau de gel (panel.js) est à l'écran sans être
+// dérivé d'AUCUNE conv. La MÊME lecture que buildPanelState enverra
+// (`tabTracker.getTabs().frozen`), jamais une résolution « équivalente ».
+function tabsFrozenKey() {
+  return tabTracker && tabTracker.getTabs().frozen ? 'F' : '';
 }
 
 // Pointeur vers la conv maîtresse d'un groupe (lot 11). `null` quand aucune
@@ -1013,6 +1141,12 @@ function masterState(g, src, convById, superseded) {
     // vieillit hors de la vue ne servirait plus à rien.
     title: (conv && conv.title) || g.masterTitle || vscode.l10n.t('Master conversation'),
     listed: !!conv,
+    // Instant du lien (groups.js) : il ne s'affiche nulle part, il ARBITRE —
+    // quand plusieurs lots revendiquent cette même conversation, nesting.js
+    // donne la tête au plus récemment lié. Il doit donc circuler jusqu'à la
+    // forme rendue, seule chose que nesting.js consomme (il ne lit pas le
+    // store, cf. son en-tête).
+    linkedAt: Number.isFinite(g.masterLinkedAt) ? g.masterLinkedAt : 0,
     tabTitle: (conv && conv.tabTitle) || null,
     hint: t.hint ? vscode.l10n.t(t.hint) : t.hint,
     // Statut canonique (member-truth.js) de la maîtresse — exposé pour que
@@ -1173,6 +1307,10 @@ function buildPanelState() {
     },
     // Lot 13 §1 : indicateur discret, jamais de popup — voir checkTabCanary().
     canary: canaryActive,
+    // Plan gel-tabs (2026-08-17) : canal RPC des onglets mort pour CETTE
+    // fenêtre — cf. tabs.js `reportActivation`/`noteTabsEventReceived`. Lu à
+    // chaque push, jamais mis en cache (même doctrine que `canary` ci-dessus).
+    tabsFrozen: !!(tabTracker && tabTracker.getTabs().frozen),
     // Formulaire de création groupée (lot 1). `notice` est recalculé à CHAQUE
     // push (lot 6, correctif §3) plutôt que figé au moment du « Create » : sans
     // ça, le message restait affiché après que tous les onglets aient été
@@ -1339,6 +1477,32 @@ function shouldCreateGroup(taskCount, groupName, hasMasterCandidate) {
   return !!groupName || !!hasMasterCandidate;
 }
 
+// Décision de chaînage (lot 3, plan gel-tabs) — PURE, testable sans mock
+// vscode (même style que `shouldCreateGroup`) : étant donné les groupes déjà
+// RENDUS (sortie de `groupsState` — `done` et `master` déjà résolus par
+// nesting.js, rôle inter-groupes compris) et le sessionId candidat, quel
+// groupe vivant, s'il existe, doit accueillir ce Create au lieu d'en fonder
+// un nouveau. Un groupe qui a CÉDÉ sa maîtresse à plus récent que lui rend
+// `master: null` (canon « une maîtresse n'engage que son dernier lot ») et ne
+// peut donc jamais matcher ici — un seul groupe vivant peut revendiquer la
+// tête d'une conversation donnée à un instant donné.
+function findChainTarget(renderedGroups, sessionId) {
+  if (!sessionId) return null;
+  return (renderedGroups || []).find((g) => !g.done && g.master && g.master.convId === sessionId) || null;
+}
+
+// Même dérivation que `buildPanelState`, recalculée à la demande pour un état
+// forcément à jour : createBatch tourne avant tout push.
+function findLiveMasterGroup(sessionId) {
+  if (!groupStore || !stateEngine || !sessionId) return null;
+  const superseded = currentSuperseded();
+  const convs = conversationsState();
+  const convById = new Map(convs.map((c) => [c.id, c]));
+  const sources = memberSources((id) => convById.get(id));
+  const rendered = groupsState(convs, sources, superseded);
+  return findChainTarget(rendered, sessionId);
+}
+
 // « Create » du formulaire de lot (lot 1, exécution des vagues au lot 4). Le
 // webview n'envoie que des intentions : c'est ici qu'on valide (normalizeTasks
 // — le webview n'est pas une source fiable), qu'on lance, et qu'on enregistre
@@ -1356,9 +1520,6 @@ async function createBatch(msg) {
   const tasks = normalizeTasks(msg && msg.tasks, readInheritSettings());
   if (!tasks.length) return;
 
-  const wave1 = tasks.filter((t) => t.wave === 1);
-  batchStatus = { busy: true, notice: vscode.l10n.t('Opening {0} conversation(s)…', wave1.length) };
-
   // Conversation maîtresse (lot 11, résolution détachée de l'enregistrement
   // depuis le plan « master conv isolée » 2026-08-09) : cherchée ICI, AVANT la
   // création du groupe — un batch d'une seule tâche n'a pas encore de groupe
@@ -1367,6 +1528,45 @@ async function createBatch(msg) {
   // claude-convs valide (plan : « au collage d'un bloc VALIDE ») ; sans lui,
   // aucune recherche n'a lieu.
   const masterCandidate = resolveMasterCandidate(msg && msg.paste, msg && msg.session);
+
+  // Lot 3 (plan gel-tabs, 2026-08-17) : une maîtresse déjà en tête d'un
+  // groupe VIVANT n'en fonde jamais un second, concurrent — c'est ce que
+  // faisait 2.39.0 depuis qu'il a remplacé le refus de double revendication
+  // par « le dernier lié prend la tête » (`masterLinkedAt`, canon plus haut) :
+  // correct pour le RENDU d'un store multi-revendiqué, pas pour un CREATE, qui
+  // fabriquait un batch concurrent volant la maîtresse au batch précédent. Le
+  // bloc s'enchaîne à la suite de ce groupe à la place, mêmes garanties que
+  // le « + nouvelle vague » (`addTasksToGroup`) ; le cas SANS maîtresse ou
+  // avec un groupe déjà DONE retombe sur le comportement normal ci-dessous.
+  const chainGroup = masterCandidate ? findLiveMasterGroup(masterCandidate.sessionId) : null;
+  if (chainGroup) {
+    const rawGroup = groupStore.get(chainGroup.id);
+    if (rawGroup) {
+      const appendAfter = rawGroup.members.reduce((max, m) => Math.max(max, m.wave), 0);
+      const remapped = appendTasksAfterWave(tasks, appendAfter);
+      let added = false;
+      for (const task of remapped) {
+        if (groupStore.addTask(chainGroup.id, task, task.wave)) added = true;
+      }
+      if (added) {
+        // Rien ne se lance ici : les tâches naissent `queued` (groups.js), le
+        // moteur de vagues existant les ouvre à son rythme — décision 2 du
+        // plan (« une vague déjà finie → prochain battement »).
+        maybeAdvanceWaves();
+        batchStatus = {
+          busy: false,
+          notice: chainGroup.stamp
+            ? vscode.l10n.t('Added after batch {0}.', chainGroup.stamp)
+            : vscode.l10n.t('Added to the existing batch.'),
+        };
+        pushPanelState();
+        return;
+      }
+    }
+  }
+
+  const wave1 = tasks.filter((t) => t.wave === 1);
+  batchStatus = { busy: true, notice: vscode.l10n.t('Opening {0} conversation(s)…', wave1.length) };
 
   // LE FORMULAIRE EST LE GROUPE (décision 3 du plan) — sauf pour une tâche
   // unique, où un groupe n'apporte que du chrome SANS RAISON : il ne naît
@@ -1777,6 +1977,15 @@ async function handleLaunchWave(msg) {
 // ouvre la suivante — toujours automatique (pas de toggle manuel).
 // `waveToAutoLaunch` (waves.js) garantit structurellement de ne jamais sauter
 // plus d'une vague d'avance.
+//
+// Verrou de stabilisation (incident 2026-08-17, cf. advanceGate dans waves.js) :
+// plus de lancement sur une lecture instantanée — la vague doit rester prête
+// WAVE_STABLE_MS d'affilée, toute rechute désarme. Les recomputes sont
+// événementiels (fs.watch) : une fois la vague vraiment finie, plus rien
+// n'écrit et plus rien ne tire — d'où le timer d'échéance, qui rappelle cette
+// fonction quand l'armement le plus proche arrive à maturité.
+const waveGates = new Map(); // groupId → { wave, since }
+let waveGateTimer = null;
 function maybeAdvanceWaves() {
   if (!groupStore || !stateEngine) return;
   const snap = stateEngine.getSnapshot();
@@ -1784,13 +1993,27 @@ function maybeAdvanceWaves() {
   const superseded = snap.supersededBy || {};
   const byId = new Map(convs.map((c) => [c.sessionId, c]));
   const sources = memberSources((id) => byId.get(id));
+  const now = Date.now();
+  let nextDue = null;
   for (const g of groupStore.all()) {
     // Membres redirigés (husk→successeur) : une vague ne se déclare pas
     // « terminée » sur un husk mort alors que la conv a repris et travaille.
     const members = g.members.map((m) => ({ wave: m.wave, status: memberTruth(redirectMember(m, superseded), sources).waveStatus }));
-    const w = waveToAutoLaunch(members);
-    if (w == null) continue;
-    launchWaveForGroup(g.id, w, { auto: true, fromWave: launchedWave(members) });
+    const gate = advanceGate(waveGates.get(g.id), waveToAutoLaunch(members), now);
+    if (gate.pending) {
+      waveGates.set(g.id, gate.pending);
+      const due = gate.pending.since + WAVE_STABLE_MS - now;
+      nextDue = nextDue == null ? due : Math.min(nextDue, due);
+    } else {
+      waveGates.delete(g.id);
+    }
+    if (gate.launch != null) launchWaveForGroup(g.id, gate.launch, { auto: true, fromWave: launchedWave(members) });
+  }
+  // Armements orphelins (groupe supprimé entre deux passes) : purge.
+  for (const id of [...waveGates.keys()]) if (!groupStore.get(id)) waveGates.delete(id);
+  if (waveGateTimer) { clearTimeout(waveGateTimer); waveGateTimer = null; }
+  if (nextDue != null) {
+    waveGateTimer = setTimeout(() => { waveGateTimer = null; maybeAdvanceWaves(); }, Math.max(250, nextDue + 50));
   }
 }
 
@@ -2061,12 +2284,22 @@ async function linkConvToActiveMaster(id) {
     vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: a conversation cannot be its own master.'));
     return;
   }
-  // `claimedIds` (pas `attachedIds`) : refuse aussi une cible ou une
-  // maîtresse déjà REVENDIQUÉE comme maîtresse d'un autre groupe (groups.js) —
-  // une conversation à deux places (membre + master, ou master de deux
-  // groupes) serait la même ambiguïté que le lot 11 refuse déjà côté store.
-  const claimed = groupStore.claimedIds();
-  if (claimed.has(id) || claimed.has(master.sessionId)) {
+  // Un seul refus, et il ne porte QUE sur la cible (plan « la maîtresse
+  // n'engage que son dernier lot », 2026-08-15) : le groupe naît ci-dessous
+  // avec elle pour unique membre, or `create()` pose le sessionId directement,
+  // sans passer par la garde d'unicité d'`attach()` — une conv membre de deux
+  // groupes, ce sont deux lignes pour une seule conversation.
+  //
+  // Ce qui ne se refuse PLUS : que l'une des deux soit déjà MAÎTRESSE ailleurs
+  // (c'était `claimedIds`, qui mélangeait les deux revendications). Une conv de
+  // cadrage revendiquée par plusieurs lots est le cas nominal — elle enchaîne
+  // les batchs — et la règle donne la tête au lien le plus récent, donc à
+  // celui-ci : le lot précédent cède au RENDU, il n'est pas délié. Refuser ici
+  // privait le geste de son usage même (re-pointer une maîtresse) et laissait
+  // le store dire une chose que le panneau ne savait plus montrer. Que la
+  // maîtresse soit MEMBRE d'un autre lot est, de même, la filiation nominale.
+  const attached = groupStore.attachedIds();
+  if (attached.has(id)) {
     vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: one of these conversations is already part of a group.'));
     return;
   }
@@ -2552,5 +2785,5 @@ function hhmm(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', min
 module.exports = {
   activate, deactivate, computeBatchNoticeFromLaunch, computeLastChoiceFromTasks,
   buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup,
-  mergeLaunchedWaveMembers,
+  mergeLaunchedWaveMembers, findChainTarget,
 };

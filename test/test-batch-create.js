@@ -353,6 +353,47 @@ async function run() {
     new Set(appendTasksAfterWave(normalizeTasks([{ prompt: 'a' }, { prompt: 'b' }]), 5).map((t) => t.wave)).size === 1
     && appendTasksAfterWave(normalizeTasks([{ prompt: 'a' }, { prompt: 'b' }]), 5)[0].wave === 6);
 
+  console.log('\n14. findChainTarget (extension.js) — lot 3, plan gel-tabs 2026-08-17 : « Créer » depuis une maîtresse déjà en tête d\'un batch vivant enchaîne, ne concurrence plus');
+  const { findChainTarget } = (function () {
+    const Module = require('module');
+    const orig = Module._load;
+    Module._load = function (req, ...rest) {
+      if (req === 'vscode') {
+        return {
+          window: {}, commands: {}, workspace: {}, env: {}, Uri: {},
+          l10n: { t: (message, ...args) => (args.length ? message.replace(/\{(\d+)\}/g, (_, i) => (args[i] !== undefined ? args[i] : '')) : message) },
+        };
+      }
+      return orig.call(this, req, ...rest);
+    };
+    try { return require(path.join(EXT, 'extension.js')); } finally { Module._load = orig; }
+  }());
+  // Groupes déjà RENDUS (sortie de groupsState — même forme que ce que
+  // buildPanelState consomme) : `done` et `master` sont ici déjà résolus par
+  // nesting.js, pas re-dérivés par findChainTarget.
+  const liveGroup = { id: 'g-live', stamp: '18:27', done: false, master: { convId: 'sess-master' } };
+  check('candidate maîtresse d\'un groupe VIVANT → ce groupe est la cible du chaînage',
+    findChainTarget([liveGroup], 'sess-master') === liveGroup);
+
+  const doneGroup = { id: 'g-done', stamp: '17:00', done: true, master: { convId: 'sess-master' } };
+  check('candidate maîtresse d\'un groupe DONE seulement → aucune cible (comportement actuel : nouveau groupe)',
+    findChainTarget([doneGroup], 'sess-master') === null);
+
+  check('sans candidate (sessionId null/undefined) → aucune cible, jamais un groupe pris au hasard',
+    findChainTarget([liveGroup], null) === null && findChainTarget([liveGroup], undefined) === null);
+
+  check('sessionId qui ne matche aucune maîtresse → aucune cible',
+    findChainTarget([liveGroup, doneGroup], 'sess-autre-chose') === null);
+
+  // Une maîtresse qui a CÉDÉ sa tête (canon « la maîtresse n'engage que son
+  // dernier lot ») arrive ici avec `master: null` — nesting.js l'a déjà
+  // exclue avant que findChainTarget ne voie quoi que ce soit.
+  const cededGroup = { id: 'g-ceded', stamp: '16:00', done: false, master: null };
+  check('groupe ayant cédé sa maîtresse (master: null, déjà résolu en amont) → jamais retenu, même vivant',
+    findChainTarget([cededGroup, liveGroup], 'sess-master') === liveGroup);
+
+  check('liste de groupes vide/absente → aucune cible, jamais une exception', findChainTarget([], 'sess-master') === null && findChainTarget(undefined, 'sess-master') === null);
+
   console.log(`\n${pass} ok, ${fail} fail`);
   process.exit(fail ? 1 : 0);
 }

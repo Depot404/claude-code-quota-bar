@@ -19,6 +19,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// Verrou de stabilisation (incident 2026-08-17) : en prod la vague suivante ne
+// part qu'après WAVE_STABLE_MS (15 s) de « prêt » ininterrompu — ce banc le
+// raccourcit à 150 ms (surcharge réservée aux bancs, cf. waves.js) pour tester
+// le VRAI chemin (armement → timer d'échéance → lancement) sans attendre 15 s.
+process.env.CLAUDE_QUOTA_WAVE_STABLE_MS = '150';
+
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'qb-wave-'));
 os.homedir = () => SANDBOX;                       // AVANT tout require du module
 fs.mkdirSync(path.join(SANDBOX, '.claude'), { recursive: true });
@@ -216,12 +222,18 @@ async function run() {
   });
 
   console.log('\n1. Avance AU BOOT : vague 1 finie extension éteinte → vague 2 lancée sans autre événement');
-  // AUCUNE attente ici, volontairement : le marquage est synchrone de bout en
-  // bout (l'avance de boot lit un état déjà construit, et markLaunched est posé
-  // dans launchWaveForGroup avant la première await). Une attente masquerait la
-  // seule chose que cette section prouve — que la vague part au retour
-  // d'activate(), sans qu'aucun onChange n'ait eu à tirer.
-  check('groupe A : vague 2 LANCÉE dès le boot (aucun onChange n\'a pourtant tiré)',
+  // Depuis le verrou de stabilisation (2026-08-17), le lancement n'est PLUS
+  // synchrone : le boot ARME (première lecture « prêt »), et c'est le timer
+  // d'échéance qui lance quand la vague est restée prête WAVE_STABLE_MS
+  // d'affilée — sans qu'aucun onChange n'ait à tirer, ce qui reste la chose
+  // que cette section prouve. On vérifie donc les DEUX moitiés du contrat :
+  // pas de lancement instantané (c'était le bug : une fenêtre de quelques
+  // secondes où un `done` de fin de tour, aussitôt relancé par un hook Stop à
+  // feedback, ouvrait la vague suivante), puis lancement à l'échéance.
+  check('groupe A : PAS de lancement instantané au boot (verrou de stabilisation armé)',
+    !launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
+  await waitFor(() => launched('gA', 'm2'));
+  check('groupe A : vague 2 lancée à l\'échéance du verrou (timer, aucun onChange n\'a tiré)',
     launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
 
   console.log('\n2. Pas d\'avance prématurée : vague 1 encore `busy` au boot → vague 2 en attente');

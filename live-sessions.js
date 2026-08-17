@@ -21,6 +21,28 @@
 // (pid réattribué par Windows) ne fait qu'AFFICHER une conv de plus — le doute
 // profite à l'affichage, comme partout ailleurs.
 //
+// ⚠️ « VIVANTE » NE SUFFIT PAS : IL FAUT UNE FENÊTRE VS CODE (2026-08-17).
+// Toutes les sessions du registre ne naissent pas d'un onglet. Le champ
+// `entrypoint` dit laquelle : `claude-vscode` pour un onglet, `sdk-cli` pour le
+// serveur Remote Control (sessions ouvertes depuis le mobile, qui s'exécutent
+// ici — cf. Tools/RemoteControl), `cli` pour un terminal, `sdk-ts`/`sdk-py`,
+// `mcp`, `local-agent`, `remote*`… (vocabulaire relevé dans le binaire du CLI).
+// Une session sans onglet n'aura JAMAIS de ligne cliquable : la garder affiche
+// une conversation vers laquelle on ne peut pas naviguer, et lui fait consommer
+// une des `maxItems` places au détriment d'une vraie conv. D'où le partage :
+//   - liveSessionIds / liveSessionEntries → sessions d'une FENÊTRE VS CODE, les
+//     seules qui valent une exemption de masquage (invariant de state.js) et le
+//     seul vivier du rattachement d'une conv qu'on vient d'ouvrir (launcher.js) ;
+//   - foreignSessionIds → sessions vivantes dont on SAIT qu'elles ne sont pas
+//     une fenêtre VS Code, à masquer positivement.
+// Dégradation : `entrypoint` absent ou inconnu ⇒ traité comme VS Code, jamais
+// comme étranger. Un CLI qui cesserait d'écrire ce champ nous ramène au
+// comportement d'avant ce lot, il ne fait pas disparaître le panneau — c'est
+// l'exigence « source absente = comportement d'avant, jamais de masquage en
+// plus » qui vaut déjà pour session-titles.js.
+// Why : 2026-08-17, quatre conversations mobiles (RC) affichées en permanence
+// dans le panneau, sans onglet, signalées par l'user.
+//
 // Internal non documenté (relevé sur CLI 2.1.217) : toute lecture est en
 // dégradation silencieuse — dossier absent, JSON illisible, permission refusée
 // → ensemble vide, jamais d'exception.
@@ -55,7 +77,32 @@ function pidAlive(pid) {
 // Vérifié empiriquement le 2026-07-22 (test du lot 1) : le CLI est spawné dès
 // l'OUVERTURE de l'onglet, avant tout envoi de message — donc ce registre
 // connaît la session bien avant que son transcript n'existe.
-function liveSessionEntries(dir = SESSIONS_DIR) {
+// Entrypoints qui prouvent qu'une session N'EST PAS née d'un onglet VS Code.
+// Liste FERMÉE et positive, à l'inverse d'une liste blanche : c'est ce qui rend
+// la dégradation sûre (valeur inconnue ⇒ on ne masque pas). Chaque entrée est un
+// littéral relevé dans le binaire du CLI, pas une supposition.
+const FOREIGN_ENTRYPOINTS = new Set([
+  'cli',            // terminal lancé à la main
+  'sdk-cli',        // Agent SDK — dont le serveur Remote Control (mobile)
+  'sdk-ts', 'sdk-py',
+  'mcp',
+  'local-agent',
+  'bench',
+  'claude-desktop', 'claude-desktop-3p',
+  'claude-in-teams',
+  'claude-code-github-action',
+]);
+
+// `entrypoint` commençant par « remote » (remote, remote_cowork, remote_trigger,
+// remote_cowork_trigger…) : même famille, jamais un onglet d'ici.
+function isForeignEntrypoint(entrypoint) {
+  if (typeof entrypoint !== 'string' || !entrypoint) return false;
+  return FOREIGN_ENTRYPOINTS.has(entrypoint) || entrypoint.startsWith('remote');
+}
+
+// Toutes les sessions vivantes du registre, sans distinction d'origine —
+// interne au module. Les deux exports ci-dessous en sont les deux moitiés.
+function allLiveEntries(dir) {
   const out = [];
   let files;
   try { files = fs.readdirSync(dir); } catch { return out; }
@@ -73,16 +120,35 @@ function liveSessionEntries(dir = SESSIONS_DIR) {
       pid: data.pid,
       cwd: typeof data.cwd === 'string' ? data.cwd : null,
       startedAt: data.startedAt || 0,
+      entrypoint: typeof data.entrypoint === 'string' ? data.entrypoint : null,
+      foreign: isForeignEntrypoint(data.entrypoint),
     });
   }
   return out;
 }
 
-// Set des sessionId dont le process CLI tourne encore, tous workspaces
-// confondus (le filtrage par workspace est déjà fait en amont par le dossier
-// projet des transcripts — un sessionId est unique, aucun risque de collision).
+// Sessions vivantes nées d'une FENÊTRE VS CODE (cf. avertissement en tête).
+function liveSessionEntries(dir = SESSIONS_DIR) {
+  return allLiveEntries(dir).filter((e) => !e.foreign);
+}
+
+// Set des sessionId dont le process CLI tourne encore DANS UNE FENÊTRE VS CODE,
+// tous workspaces confondus (le filtrage par workspace est déjà fait en amont
+// par le dossier projet des transcripts — un sessionId est unique, aucun risque
+// de collision).
 function liveSessionIds(dir = SESSIONS_DIR) {
   return new Set(liveSessionEntries(dir).map((e) => e.sessionId));
 }
 
-module.exports = { liveSessionIds, liveSessionEntries, pidAlive, SESSIONS_DIR };
+// L'autre moitié : sessions vivantes dont l'origine PROUVE qu'aucun onglet ne
+// les porte ici. Un même sessionId peut figurer dans les deux ensembles (une
+// conversation mobile reprise dans VS Code garde son identifiant, et le registre
+// porte alors deux process) : la fenêtre VS Code gagne, cf. isGone.
+function foreignSessionIds(dir = SESSIONS_DIR) {
+  return new Set(allLiveEntries(dir).filter((e) => e.foreign).map((e) => e.sessionId));
+}
+
+module.exports = {
+  liveSessionIds, liveSessionEntries, foreignSessionIds,
+  isForeignEntrypoint, pidAlive, SESSIONS_DIR,
+};

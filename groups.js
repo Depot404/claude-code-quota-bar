@@ -38,6 +38,16 @@
 //   • `masterTitle` est le titre AU MOMENT DU LIEN : quand la conv sort de la
 //     fenêtre du panneau, la ligne de tête reste lisible plutôt que de devenir
 //     un identifiant nu.
+//   • `masterLinkedAt` est l'INSTANT du lien (plan « la maîtresse n'engage que
+//     son dernier lot », 2026-08-15). Une même conversation de cadrage lance
+//     plusieurs lots à des heures différentes : elle est alors revendiquée par
+//     plusieurs groupes, ce qui est légitime — mais UN seul peut la rendre en
+//     tête (il n'y a qu'un nœud de conversation dans le DOM). C'est le plus
+//     RÉCEMMENT lié qui la garde, et la résolution se fait au rendu
+//     (nesting.js), jamais en réécrivant le store : rien n'est délié tout seul.
+//     Pourquoi un champ propre plutôt que `createdAt` du groupe : relier à la
+//     main une maîtresse vers un groupe plus ancien doit avoir un effet visible
+//     (la tête bascule vers lui) — jugé sur `createdAt`, le geste serait muet.
 // Seule interdiction : elle ne peut pas être en même temps membre du MÊME
 // groupe (ce serait la même conversation à deux places dans la même section).
 // ============================================================================
@@ -96,15 +106,22 @@ function sanitizeGroup(g) {
       sessionId: typeof m.sessionId === 'string' && m.sessionId ? m.sessionId : null,
       launchedAt: Number.isFinite(m.launchedAt) ? m.launchedAt : null,
     }));
+  const createdAt = Number.isFinite(g.createdAt) ? g.createdAt : 0;
   return {
     id,
     name: typeof g.name === 'string' && g.name.trim() ? g.name.trim() : 'Batch',
-    createdAt: Number.isFinite(g.createdAt) ? g.createdAt : 0,
+    createdAt,
     collapsed: !!g.collapsed,
     // Conv maîtresse (lot 11) — absente de tout stockage écrit avant ce lot :
     // `null`, comportement d'avant, aucune migration.
     masterSessionId: typeof g.masterSessionId === 'string' && g.masterSessionId ? g.masterSessionId : null,
     masterTitle: typeof g.masterTitle === 'string' ? g.masterTitle : '',
+    // Stockage antérieur au plan « dernier lot » : l'instant du lien n'a jamais
+    // été écrit. Repli sur la création du groupe — c'est la seule date connue
+    // qui ordonne les lots entre eux, et elle donne l'ordre attendu dans le cas
+    // qui a motivé le plan (un lot par heure de lancement). ZÉRO migration :
+    // rien n'est réécrit, le défaut se pose à la lecture.
+    masterLinkedAt: Number.isFinite(g.masterLinkedAt) && g.masterLinkedAt > 0 ? g.masterLinkedAt : createdAt,
     members,
   };
 }
@@ -193,11 +210,21 @@ function createGroupStore(deps = {}) {
       const list = Array.isArray(tasks) ? tasks : [];
       const g = {
         id: mkId(),
-        name: (typeof name === 'string' && name.trim()) || `Batch ${new Date(at).toISOString().slice(11, 16)}`,
+        // Repli quand le bloc collé ne porte pas de ligne `group:`. Heure
+        // LOCALE, jamais toISOString() : celui-ci rend l'heure UTC — un lot
+        // créé à 14:11 à Paris s'appelait « Batch 12:11 ». Le défaut était
+        // quasi invisible tant que ce nom ne vivait qu'en infobulle, et
+        // seulement sur un lot sans maîtresse ; il devient une horloge fausse
+        // en évidence dès que la grip l'affiche. Même idiome que le libellé de
+        // reset du quota (hhmm(), extension.js) : le fuseau et le format
+        // viennent de la machine, pas d'un découpage de chaîne.
+        name: (typeof name === 'string' && name.trim())
+          || `Batch ${new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`,
         createdAt: at,
         collapsed: false,
         masterSessionId: null,
         masterTitle: '',
+        masterLinkedAt: 0,        // aucun lien encore : setMaster le stampe
         members: list.map((t, i) => memberOfTask(t, `m${i + 1}`, at)),
       };
       groups.push(g);
@@ -216,6 +243,12 @@ function createGroupStore(deps = {}) {
       if (g.members.some((m) => m.sessionId === sessionId)) return false;
       if (g.masterSessionId === sessionId && !title) return false;
       g.masterSessionId = sessionId;
+      // Instant du lien : c'est LUI qui départage deux groupes revendiquant la
+      // même conversation (le plus récent la rend en tête, cf. en-tête). Posé à
+      // CHAQUE lien accepté, y compris une re-désignation de la même conv sur
+      // le même groupe : le geste doit avoir un effet, sinon relier une vieille
+      // maîtresse resterait muet — la famille de bugs que ce champ répare.
+      g.masterLinkedAt = now();
       // Titre AU MOMENT DU LIEN : ce qui restera lisible quand la conv sortira
       // de la fenêtre du panneau. Un titre vide n'écrase pas un titre connu.
       if (typeof title === 'string' && title.trim()) g.masterTitle = title.trim();

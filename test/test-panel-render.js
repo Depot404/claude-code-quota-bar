@@ -1177,6 +1177,21 @@ async function run() {
     check('ligne fantôme toujours présente (groupe multi-vagues)',
       await cdp.evaluate(`!!document.querySelector('#flow .wave-ghost')`) === true);
 
+    // Masquage à vide (2026-08-15, constat user) : les deux fantômes existent
+    // dans le DOM (queries ci-dessus) mais ne doivent RIEN peser tant qu'aucune
+    // tâche active n'est prête à être déposée — sinon on n'économise rien et
+    // on attire l'œil vers un bouton qui ne ferait que rendre le focus au champ.
+    const ghostVisEmpty = await cdp.evaluate(`(() => {
+      const ghostNew = document.querySelector('#flow .wave-ghost.wave-new');
+      const addRow = document.querySelector('#flow .wave-add-row');
+      return {
+        ghostNewDisplay: ghostNew ? getComputedStyle(ghostNew).display : null,
+        addRowDisplay: addRow ? getComputedStyle(addRow).display : null,
+      };
+    })()`);
+    check('champ prompt vide : « + nouvelle vague » et « + cette vague » masqués (display:none), pas retirés du DOM',
+      ghostVisEmpty.ghostNewDisplay === 'none' && ghostVisEmpty.addRowDisplay === 'none', JSON.stringify(ghostVisEmpty));
+
     // Lot B densité (2026-08-09) — les deux fantômes ne font plus qu'UNE
     // rangée. Un groupe se terminait par deux lignes pleine largeur empilées
     // (~52 px) pour deux actions voisines ; elles partagent maintenant la même
@@ -1184,6 +1199,20 @@ async function run() {
     // GÉOMÉTRIE (une seule rangée, deux boîtes disjointes) — les règles qui
     // les séparent, elles, sont testées juste en dessous et en 10ter, sur ces
     // mêmes nœuds : rien n'a bougé de leur logique, seulement de leur parent.
+    // Depuis le masquage à vide (2026-08-15), les deux fantômes n'occupent de
+    // la géométrie que si le champ prompt porte une tâche active — le poser
+    // ici est la précondition de tout ce bloc, pas juste de ce test-ci.
+    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Geometrie fantome'; ta.dispatchEvent(new Event('input')); })()`);
+    const ghostVisFilled = await cdp.evaluate(`(() => {
+      const ghostNew = document.querySelector('#flow .wave-ghost.wave-new');
+      const addRow = document.querySelector('#flow .wave-add-row');
+      return {
+        ghostNewDisplay: ghostNew ? getComputedStyle(ghostNew).display : null,
+        addRowDisplay: addRow ? getComputedStyle(addRow).display : null,
+      };
+    })()`);
+    check('… et réapparaissent dès qu\'une tâche active existe dans le champ',
+      ghostVisFilled.ghostNewDisplay !== 'none' && ghostVisFilled.addRowDisplay !== 'none', JSON.stringify(ghostVisFilled));
     const mergedGhost = await cdp.evaluate(`(() => {
       const line = document.querySelector('#flow .ghost-line');
       const addRow = line && line.querySelector('.wave-add-row');
@@ -1299,6 +1328,10 @@ async function run() {
     // d'ajout est absente du DOM, jamais masquée par un style — un enfant de
     // flux coûterait sa place même invisible (invariant maison, cf. le pied
     // des membres en file et la croix des lignes de groupe).
+    // Le champ a été vidé par le dépôt plus haut (l.~1266) : reposer une tâche
+    // active, sinon « + nouvelle vague » elle-même est masquée à vide et ce
+    // test mesurerait une géométrie nulle, pas la fusion qu'il vérifie.
+    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Geometrie fantome solo'; ta.dispatchEvent(new Event('input')); })()`);
     const soloGhost = await cdp.evaluate(`(() => {
       const line = document.querySelector('#flow .ghost-line');
       if (!line) return { line: false };
@@ -2717,6 +2750,525 @@ async function run() {
     check('aucune conversation mais un groupe en attente : le groupe se rend, le message vient après',
       await flowOrderOf('tabOrder', [], [noTabGroup]) === 'GROUPE | (empty)',
       await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+
+    console.log('\n19. Filiation des lots — canon de la maîtresse : grip → ligne de tête → corps (plan arbre-filiation 2026-08-15, lot 2, AMENDÉ 2026-08-16)');
+    // LE BUG D'ORIGINE : la maîtresse d'un lot B est très souvent MEMBRE d'un
+    // lot A (le lot N propose les handoffs du lot N+1). Les deux blocs se
+    // disputaient alors le MÊME nœud de conversation — celui qui servait en
+    // dernier le prenait, l'autre gardait un emplacement VIDE. Le rendu
+    // imbriqué supprime la dispute : la ligne reste membre de A, et devient la
+    // tête de B.
+    //
+    // Le webview ne DÉDUIT aucune filiation : nestedUnder arrive tout résolu de
+    // nesting.js (éprouvé cas par cas dans test-nesting.js). Ce banc mesure ce
+    // que l'ŒIL doit voir, et rien d'autre.
+    const nconv = (id, title, extra) => Object.assign({
+      id, title, model: 'Opus 4.8', effort: 'high', ctx: { pct: 30 }, state: 'idle',
+      acked: true, active: false, tabOpen: true,
+    }, extra || {});
+    const nmember = (key, prompt, convId, extra) => Object.assign({
+      key, prompt, wave: 1, asked: { model: 'opus', effort: 'high' },
+      convId: convId || null, status: convId ? 'busy' : 'queued',
+      waveStatus: convId ? 'launched' : 'queued',
+      canLink: false, canClose: false, canRelaunch: false, note: '', hint: '',
+    }, extra || {});
+    // A : maîtresse listée + 3 membres, dont a2 qui est la maîtresse de B.
+    // B : maîtresse = a2 (déjà rendue comme membre de A) + 3 membres.
+    const nestConvs = [
+      nconv('am', 'A master'),
+      nconv('a1', 'A task one', { groupId: 'A', state: 'busy' }),
+      nconv('a2', 'A task two — opens B', { groupId: 'A' }),
+      nconv('b1', 'B task one', { groupId: 'B', state: 'busy' }),
+      nconv('b2', 'B task two', { groupId: 'B', state: 'done', acked: true }),
+      nconv('z9', 'Flat conversation'),
+    ];
+    const mkA = () => ({
+      id: 'A', name: 'Parent batch', hue: 210, collapsed: false, stamp: '14:12',
+      launchedWave: 1, nextWave: null, waveNotice: null, done: false, nestedUnder: null,
+      master: { convId: 'am', title: 'A master', listed: true, tabTitle: null, hint: '', status: 'idle' },
+      members: [nmember('m1', 'A task one', 'a1'), nmember('m2', 'A task two — opens B', 'a2'), nmember('m3', 'A task three', null)],
+    });
+    const mkB = (nested) => ({
+      id: 'B', name: 'Child batch', hue: 30, collapsed: false, stamp: '15:40',
+      launchedWave: 1, nextWave: null, waveNotice: null, done: false,
+      nestedUnder: nested ? { groupId: 'A', memberKey: 'm2' } : null,
+      master: { convId: 'a2', title: 'A task two — opens B', listed: true, tabTitle: null, hint: '', status: 'idle' },
+      members: [nmember('n1', 'B task one', 'b1'), nmember('n2', 'B task two', 'b2', { status: 'done', waveStatus: 'done' }), nmember('n3', 'B task three', null)],
+    });
+    const nestState = (groups, convs) => ({
+      conversations: convs || nestConvs, groups, quota: STATE.quota, ui: { sortOrder: 'tabOrder' },
+    });
+    const pushNest = async (groups, convs) => {
+      await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: nestState(groups, convs) })}, '*')`);
+      await sleep(180);
+    };
+
+    // (a) Sans filiation : DEUX blocs frères, et la ligne a2 revendiquée deux
+    // fois — c'est l'état d'avant, qu'on mesure pour que l'écart soit un fait
+    // et pas une impression. `emptySlots` compte les emplacements de membre
+    // restés vides : c'est la signature exacte du bug.
+    await pushNest([mkA(), mkB(false)]);
+    const nestBefore = await cdp.evaluate(`(() => ({
+      rootBlocks: document.querySelectorAll('#flow > .grp').length,
+      emptySlots: Array.from(document.querySelectorAll('#flow .m-slot')).filter(s => !s.children.length).length,
+      convNodes: document.querySelectorAll('.conv').length,
+    }))()`);
+    check('(témoin, sans filiation) deux blocs frères, et un emplacement de membre reste VIDE — le bug que ce lot corrige',
+      nestBefore.rootBlocks === 2 && nestBefore.emptySlots === 1, JSON.stringify(nestBefore));
+
+    // (b) Avec filiation : un seul bloc racine, grip du sous-lot JUSTE AVANT
+    // sa ligne de tête, corps JUSTE APRÈS — canon de la maîtresse (amendement
+    // 2026-08-16) : .grp de l'enfant n'est plus un conteneur unique, ses deux
+    // moitiés (.grp-head.nest-grip / .grp-body.nest-body) sont posées
+    // séparément dans le corps du parent.
+    await pushNest([mkA(), mkB(true)]);
+    const nestAfter = await cdp.evaluate(`(() => {
+      const host = Array.from(document.querySelectorAll('#flow .member'))
+        .find(m => (m.querySelector('.title') || {}).textContent === 'A task two — opens B');
+      const grip = document.querySelector('.grp-head.nest-grip');
+      const bodySub = document.querySelector('.grp-body.nest-body');
+      return {
+        rootBlocks: document.querySelectorAll('#flow > .grp').length,
+        emptySlots: Array.from(document.querySelectorAll('#flow .m-slot')).filter(s => !s.children.length).length,
+        gripJustBeforeHost: !!grip && !!host && grip.nextElementSibling === host,
+        bodyJustAfterHost: !!bodySub && !!host && host.nextElementSibling === bodySub,
+        sameParentBody: !!grip && !!bodySub && !!host
+          && grip.parentElement === host.parentElement && bodySub.parentElement === host.parentElement
+          && host.parentElement.classList.contains('grp-body'),
+        subHasMasterLine: !!bodySub && !!bodySub.querySelector('.grp-master-head'),
+        masterHeads: document.querySelectorAll('#flow .grp-master-head').length,
+        // Un nœud par conversation : les 6 convs, pas une de plus, pas une de moins.
+        convNodes: document.querySelectorAll('.conv').length,
+        dupTitles: (() => {
+          const seen = {};
+          Array.from(document.querySelectorAll('.conv .title')).forEach(t => { seen[t.textContent] = (seen[t.textContent] || 0) + 1; });
+          return Object.keys(seen).filter(k => seen[k] > 1);
+        })(),
+      };
+    })()`);
+    check('un seul bloc RACINE dans le flux (le sous-lot n\'y est plus)', nestAfter.rootBlocks === 1, JSON.stringify(nestAfter));
+    check('la grip du sous-lot est rangée JUSTE AVANT la ligne qui lui sert de tête', nestAfter.gripJustBeforeHost === true, JSON.stringify(nestAfter));
+    check('… et son corps JUSTE APRÈS', nestAfter.bodyJustAfterHost === true, JSON.stringify(nestAfter));
+    check('grip, ligne d\'accueil et corps vivent dans le MÊME corps de groupe — celui du parent',
+      nestAfter.sameParentBody === true, JSON.stringify(nestAfter));
+    check('le sous-lot n\'a PAS de ligne maîtresse (sa tête est la ligne du parent)',
+      nestAfter.subHasMasterLine === false && nestAfter.masterHeads === 1, JSON.stringify(nestAfter));
+    check('zéro emplacement de membre vide (le bug d\'origine a disparu)', nestAfter.emptySlots === 0, JSON.stringify(nestAfter));
+    check('UN nœud, UN endroit : aucune conversation rendue deux fois',
+      nestAfter.convNodes === 6 && nestAfter.dupTitles.length === 0, JSON.stringify(nestAfter));
+
+    // (c) « Tête alignée » : la ligne de tête reste un membre du parent, sur le
+    // rail du parent, au MÊME axe que ses sœurs. C'est le cœur de la décision
+    // A du plan — si cet axe bouge, la ligne a cessé d'appartenir à A.
+    const axes = await cdp.evaluate(`(() => {
+      const cx = (n) => { const r = n.getBoundingClientRect(); return r.left + r.width / 2; };
+      const parent = document.querySelector('#flow > .grp');
+      const subBody = document.querySelector('.grp-body.nest-body');
+      const subGrip = document.querySelector('.grp-head.nest-grip');
+      const memberIco = (root, title) => Array.from(root.querySelectorAll('.member'))
+        .find(m => (m.querySelector('.title') || {}).textContent === title).querySelector('.ico');
+      const flat = document.querySelector('#flow > .conv');
+      return {
+        flatIco: cx(flat.querySelector('.ico')),
+        sisterIco: cx(memberIco(parent, 'A task one')),
+        headIco: cx(memberIco(parent, 'A task two — opens B')),
+        headLeft: memberIco(parent, 'A task two — opens B').closest('.conv').getBoundingClientRect().left,
+        sisterLeft: memberIco(parent, 'A task one').closest('.conv').getBoundingClientRect().left,
+        childIco: cx(memberIco(subBody, 'B task one')),
+        parentRail: cx(parent.querySelector(':scope > .grp-body > .grp-rail')),
+        subRail: cx(subBody.querySelector(':scope > .grp-rail')),
+        parentBodyLeft: parent.querySelector(':scope > .grp-body').getBoundingClientRect().left,
+        subBodyLeft: subBody.getBoundingClientRect().left,
+        subGripLeft: subGrip.getBoundingClientRect().left,
+      };
+    })()`);
+    check('la ligne de TÊTE garde l\'axe de ses sœurs membres (elle est restée dans le parent)',
+      Math.abs(axes.headIco - axes.sisterIco) < 0.5 && Math.abs(axes.headIco - axes.flatIco) < 0.5, JSON.stringify(axes));
+    check('… et leur bord gauche, au pixel', Math.abs(axes.headLeft - axes.sisterLeft) < 0.5, JSON.stringify(axes));
+    check('décalage du CORPS du sous-lot = 28px exactement (minimum prouvé : à 14 son cadre traverse le rail du parent)',
+      Math.abs((axes.subBodyLeft - axes.parentBodyLeft) - 28) < 0.5, JSON.stringify(axes));
+    check('… et sa GRIP au même décalage (bleed annulé côté gauche)',
+      Math.abs((axes.subGripLeft - axes.parentBodyLeft) - 28) < 0.5, JSON.stringify(axes));
+    check('deux rails, deux axes : celui de l\'enfant est 28px à droite de celui du parent',
+      Math.abs((axes.subRail - axes.parentRail) - 28) < 0.5, JSON.stringify(axes));
+    check('les anneaux de l\'enfant tombent sur le rail de l\'enfant, pas sur celui du parent',
+      Math.abs(axes.childIco - axes.subRail) < 0.5, JSON.stringify(axes));
+
+    // (d) Les DEUX rails couvrent leurs propres anneaux, du premier au dernier.
+    // Le bloc imbriqué s'intercale entre deux membres du parent : il ne doit pas
+    // interrompre le trait — c'est LE piège trouvé à la maquette (rail tronqué,
+    // parce que la hauteur est calculée en JS après placement).
+    const rails = await cdp.evaluate(`(() => {
+      // MEMBRES directs seulement : l'anneau de la ligne maîtresse est
+      // volontairement AU-DESSUS du rail (étape 19 — le trait ne se dessine
+      // jamais à l'intérieur de la capsule, cf. §13bis qui mesure ce départ).
+      const span = (bodyEl) => {
+        const rail = bodyEl.querySelector(':scope > .grp-rail').getBoundingClientRect();
+        const icos = Array.from(bodyEl.querySelectorAll(':scope > .member .ico, :scope > .member .ico-pending'))
+          .map(i => i.getBoundingClientRect());
+        return {
+          railTop: rail.top, railBottom: rail.bottom, height: rail.height,
+          firstIco: Math.min.apply(null, icos.map(r => r.top + r.height / 2)),
+          lastIco: Math.max.apply(null, icos.map(r => r.top + r.height / 2)),
+          count: icos.length,
+        };
+      };
+      return { parent: span(document.querySelector('#flow > .grp > .grp-body')), sub: span(document.querySelector('.grp-body.nest-body')) };
+    })()`);
+    check('rail du PARENT : couvre du premier au dernier de SES anneaux directs (le bloc imbriqué ne le coupe pas)',
+      rails.parent.height > 0 && rails.parent.railTop <= rails.parent.firstIco + 0.5
+      && rails.parent.railBottom >= rails.parent.lastIco - 0.5, JSON.stringify(rails.parent));
+    check('rail de l\'ENFANT : couvre les siens de la même façon',
+      rails.sub.height > 0 && rails.sub.railTop <= rails.sub.firstIco + 0.5
+      && rails.sub.railBottom >= rails.sub.lastIco - 0.5, JSON.stringify(rails.sub));
+
+    // (e) La capsule de tête, désormais à 3 bords (gauche/droite/bas — le
+    // cadre de .grp-master-head à l'identique, amendement 2026-08-16) : le
+    // bord HAUT n'a plus lieu d'être, la grip juste au-dessus ferme déjà le
+    // cadre par le sien. Toujours un PSEUDO : aucune géométrie touchée
+    // (invariant du §16), rien qui puisse être recouvert par le fond d'une
+    // ligne survolée/sélectionnée.
+    const caps = await cdp.evaluate(`(() => {
+      const probe = document.createElement('span');
+      probe.style.color = 'hsl(30, 45%, 55%)';
+      document.body.appendChild(probe);
+      const hueB = getComputedStyle(probe).color;
+      probe.remove();
+      const host = Array.from(document.querySelectorAll('#flow .member'))
+        .find(m => (m.querySelector('.title') || {}).textContent === 'A task two — opens B');
+      const head = host.querySelector('.m-head');
+      const cs = getComputedStyle(head, '::after');
+      const headRect = head.getBoundingClientRect();
+      // Un CADRE (border réelle) qui contiendrait une ligne de conversation est
+      // interdit dans tout le panneau : une capsule n'encadre qu'un EN-TÊTE.
+      const framedConvs = Array.from(document.querySelectorAll('#flow .conv')).filter((c) => {
+        for (let a = c.parentElement; a && a.id !== 'flow'; a = a.parentElement) {
+          if (parseFloat(getComputedStyle(a).borderTopWidth) > 0) return true;
+        }
+        return false;
+      }).length;
+      return {
+        hueB,
+        shadow: cs.boxShadow, bg: cs.backgroundColor,
+        radiusTL: cs.borderTopLeftRadius, radiusTR: cs.borderTopRightRadius,
+        radiusBL: cs.borderBottomLeftRadius, radiusBR: cs.borderBottomRightRadius,
+        left: parseFloat(cs.left), zIndex: cs.zIndex, pointer: cs.pointerEvents,
+        // 3 bords désormais (gauche/droite/bas), une couche box-shadow par
+        // bord — jamais l'ancien inset unique « 0 0 0 1.5px » qui peignait
+        // les 4 à la fois. Compter les « inset », pas les virgules : chaque
+        // rgb(r, g, b) en contient déjà deux.
+        threeSided: (cs.boxShadow.match(/inset/g) || []).length === 3 && cs.boxShadow.indexOf('1.5px') !== -1,
+        hostHasBorder: getComputedStyle(host).borderTopWidth,
+        headWidth: headRect.width,
+        framedConvs,
+      };
+    })()`);
+    check('capsule : peinte en PSEUDO, 3 bords (gauche/droite/bas) — jamais en bordure de la ligne',
+      caps.threeSided === true && caps.hostHasBorder === '0px', JSON.stringify(caps));
+    check('… coins HAUTS carrés, coins BAS arrondis (fermeture du cadre, comme .grp-master-head)',
+      caps.radiusTL === '0px' && caps.radiusTR === '0px' && caps.radiusBL === '6px' && caps.radiusBR === '6px', JSON.stringify(caps));
+    check('… à la couleur de l\'ENFANT (bulle et anneau restent au parent)',
+      caps.shadow.indexOf(caps.hueB) !== -1, JSON.stringify(caps));
+    check('… sans AUCUN fond (le fond de la ligne reste celui du parent)',
+      caps.bg === 'rgba(0, 0, 0, 0)', JSON.stringify(caps));
+    check('… commençant à 28px : l\'anneau reste DEHORS, sur le rail du parent',
+      Math.abs(caps.left - 28) < 0.5, JSON.stringify(caps));
+    check('… décorative : elle ne vole aucun clic à la ligne', caps.pointer === 'none', caps.pointer);
+    check('AUCUN élément à bordure ne contient une ligne de conversation (une capsule n\'encadre qu\'un en-tête)',
+      caps.framedConvs === 0, JSON.stringify(caps));
+
+    // (f) Cadre continu grip → tête : la grip perd sa bordure basse et son
+    // coin bas-droit (règle .grp-head.nest-grip, même canon que
+    // .grp.has-master > .grp-head) et s'aligne au pixel, bords gauche/droite,
+    // sur la capsule de la ligne juste en dessous. Plus de chip : ⌂ masqué
+    // (la maîtresse du sous-lot est déjà cette ligne), ✕ présent (dissolution
+    // portée par l'objet qu'elle dissout, jamais par une ligne).
+    const gripShape = await cdp.evaluate(`(() => {
+      const grip = document.querySelector('.grp-head.nest-grip');
+      const host = Array.from(document.querySelectorAll('#flow .member'))
+        .find(m => (m.querySelector('.title') || {}).textContent === 'A task two — opens B');
+      const mHead = host.querySelector('.m-head');
+      const gripCs = getComputedStyle(grip);
+      const gripRect = grip.getBoundingClientRect();
+      const headRect = mHead.getBoundingClientRect();
+      const mas = Array.from(grip.querySelectorAll('.gbtn')).find(b => b.textContent === '⌂');
+      const kill = grip.querySelector('.g-kill');
+      return {
+        borderBottomWidth: gripCs.borderBottomWidth,
+        borderBottomRightRadius: gripCs.borderBottomRightRadius,
+        gripLeft: gripRect.left, gripRight: gripRect.right,
+        headLeft: headRect.left, headRight: headRect.right,
+        masHidden: !mas || getComputedStyle(mas).display === 'none',
+        killPresent: !!kill,
+      };
+    })()`);
+    check('grip du sous-lot : bas ouvert, coin bas-droit carré (même canon qu\'un lot racine avec master)',
+      gripShape.borderBottomWidth === '0px' && gripShape.borderBottomRightRadius === '0px', JSON.stringify(gripShape));
+    // La ligne de tête, elle, n'est PAS indentée (elle appartient au flux
+    // normal du parent) — c'est sa CAPSULE (pseudo, décalée à --nest-indent
+    // DEPUIS le bord de m-head) qui tombe au même endroit que la grip.
+    check('bords gauche/droite de la grip et de la capsule de la ligne de tête alignés au pixel (un seul cadre continu)',
+      Math.abs(gripShape.gripLeft - (gripShape.headLeft + 28)) < 0.5 && Math.abs(gripShape.gripRight - gripShape.headRight) < 0.5, JSON.stringify(gripShape));
+    check('⌂ masqué sur la grip d\'un sous-lot (sa maîtresse est déjà la ligne du dessous)', gripShape.masHidden === true, JSON.stringify(gripShape));
+    check('✕ (dissolution) présent sur la grip du sous-lot', gripShape.killPresent === true, JSON.stringify(gripShape));
+
+    // (g) Le clic sur la grip agit sur le SOUS-LOT (jamais son parent) : repli
+    // par le chevron, dissolution par le ✕ — même vocabulaire que la grip
+    // d'un lot racine, aucune portée nouvelle inventée pour ce cas.
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('.grp-head.nest-grip').click()`);
+    const chevClick = await cdp.evaluate(`window.__sent`);
+    check('clic sur la grip → toggleGroupCollapse du SOUS-LOT (jamais du parent)',
+      Array.isArray(chevClick) && chevClick.length === 1
+      && chevClick[0].type === 'toggleGroupCollapse' && chevClick[0].id === 'B', JSON.stringify(chevClick));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('.grp-head.nest-grip .g-kill').click()`);
+    const killClick = await cdp.evaluate(`window.__sent`);
+    check('✕ de la grip du sous-lot → dissolveGroup(B), jamais A',
+      Array.isArray(killClick) && killClick.length === 1
+      && killClick[0].type === 'dissolveGroup' && killClick[0].id === 'B', JSON.stringify(killClick));
+
+    // (h) Le repli laisse la ligne de tête STRICTEMENT identique (bords,
+    // hauteur, capsule) — même leçon que le repli de la ligne maîtresse d'un
+    // lot racine : replier ne doit RIEN changer à ce qui n'est pas à lui.
+    const headShape = `(() => {
+      const host = Array.from(document.querySelectorAll('#flow .member'))
+        .find(m => (m.querySelector('.title') || {}).textContent === 'A task two — opens B');
+      const r = host.querySelector('.conv').getBoundingClientRect();
+      const cs = getComputedStyle(host.querySelector('.m-head'), '::after');
+      return { left: r.left, right: r.right, height: r.height, shadow: cs.boxShadow, capLeft: cs.left };
+    })()`;
+    // Même précaution qu'au §13ter : replier raccourcit la page, et si elle
+    // cesse de déborder Chromium retire la barre de défilement — toute la
+    // colonne s'élargit de ~15px et une comparaison en pixels absolus tombe
+    // sans que le CSS ait bougé. La gouttière est réservée dans les deux états.
+    await cdp.evaluate(`document.documentElement.style.overflowY = 'scroll'`);
+    const openShape = await cdp.evaluate(headShape);
+    const collapsedB = [mkA(), Object.assign(mkB(true), { collapsed: true })];
+    await pushNest(collapsedB);
+    const folded = await cdp.evaluate(`(() => {
+      const bodySub = document.querySelector('.grp-body.nest-body');
+      const grip = document.querySelector('.grp-head.nest-grip');
+      return {
+        chev: grip.querySelector('.chevron').textContent,
+        bodyCollapsed: bodySub.classList.contains('collapsed'),
+        membersHidden: Array.from(bodySub.querySelectorAll('.member')).every(m => getComputedStyle(m).display === 'none'),
+      };
+    })()`);
+    const foldedShape = await cdp.evaluate(headShape);
+    check('replié : le chevron de la grip bascule', folded.chev === '▸', folded.chev);
+    check('… le corps du sous-lot disparaît', folded.bodyCollapsed === true && folded.membersHidden === true, JSON.stringify(folded));
+    await cdp.evaluate(`document.documentElement.style.overflowY = ''`);
+    check('… et la ligne de tête est STRICTEMENT identique (bords, hauteur, capsule)',
+      ['left', 'right', 'height'].every(k => Math.abs(openShape[k] - foldedShape[k]) < 0.5)
+      && openShape.shadow === foldedShape.shadow && openShape.capLeft === foldedShape.capLeft,
+      JSON.stringify({ openShape, foldedShape }));
+    await pushNest([mkA(), mkB(true)]);
+
+    // (h) Idempotence : le vrai panneau re-place TOUT depuis l'état à chaque
+    // push. Deux rendus du même état doivent donner le même DOM — la maquette,
+    // qui opérait une chirurgie one-shot, fabriquait des chimères au second.
+    const dom1 = await cdp.evaluate(`document.getElementById('flow').innerHTML`);
+    await pushNest([mkA(), mkB(true)]);
+    const dom2 = await cdp.evaluate(`document.getElementById('flow').innerHTML`);
+    check('deux rendus successifs du même état → DOM identique (idempotence structurelle)',
+      dom1 === dom2, `longueurs ${dom1.length} vs ${dom2.length}`);
+
+    // (i) Retour au rendu classique : dès que la filiation tombe (maîtresse
+    // délinquée, sortie de la fenêtre du panneau, cycle…), le sous-lot redevient
+    // un bloc frère AVEC sa grip et sa ligne maîtresse. Rien n'est détruit,
+    // c'est la même paire d'états qui s'inverse (appendChild réclame head/body
+    // — dégradation silencieuse).
+    await pushNest([mkA(), mkB(false)]);
+    const nestBack = await cdp.evaluate(`(() => ({
+      rootBlocks: document.querySelectorAll('#flow > .grp').length,
+      nestGrips: document.querySelectorAll('.grp-head.nest-grip').length,
+      nestBodies: document.querySelectorAll('.grp-body.nest-body').length,
+      grips: Array.from(document.querySelectorAll('#flow .grp-head')).filter(h => getComputedStyle(h).display !== 'none').length,
+      masterHeads: document.querySelectorAll('#flow .grp-master-head').length,
+      hosts: document.querySelectorAll('#flow .member.nest-host').length,
+    }))()`);
+    check('filiation retirée : deux blocs frères, chacun avec sa grip et sa ligne maîtresse, plus aucune trace de nesting',
+      nestBack.rootBlocks === 2 && nestBack.nestGrips === 0 && nestBack.nestBodies === 0
+      && nestBack.grips === 2 && nestBack.masterHeads === 2 && nestBack.hosts === 0,
+      JSON.stringify(nestBack));
+
+    // (j) Chaîne à trois niveaux : C sous B sous A. Chaque cran ajoute 28px, et
+    // il n'y a toujours qu'un seul bloc racine — deux grips et deux corps
+    // imbriqués (B sous A, C sous B).
+    const cConvs = nestConvs.concat([nconv('c1', 'C task one', { groupId: 'C', state: 'busy' })]);
+    const groupC = {
+      id: 'C', name: 'Grandchild batch', hue: 120, collapsed: false, stamp: '16:05',
+      launchedWave: 1, nextWave: null, waveNotice: null, done: false,
+      nestedUnder: { groupId: 'B', memberKey: 'n1' },
+      master: { convId: 'b1', title: 'B task one', listed: true, tabTitle: null, hint: '', status: 'busy' },
+      members: [nmember('o1', 'C task one', 'c1')],
+    };
+    await pushNest([mkA(), mkB(true), groupC], cConvs);
+    const nestChain = await cdp.evaluate(`(() => {
+      const parent = document.querySelector('#flow > .grp');
+      const grips = Array.from(document.querySelectorAll('.grp-head.nest-grip'));
+      const bodies = Array.from(document.querySelectorAll('.grp-body.nest-body'));
+      const left = (n) => n.getBoundingClientRect().left;
+      const base = left(parent.querySelector(':scope > .grp-body'));
+      return {
+        rootBlocks: document.querySelectorAll('#flow > .grp').length,
+        grips: grips.length, bodies: bodies.length,
+        depths: grips.map(g => Math.round(left(g) - base)),
+      };
+    })()`);
+    check('chaîne à 3 niveaux : toujours UN seul bloc racine, deux grips et deux corps imbriqués',
+      nestChain.rootBlocks === 1 && nestChain.grips === 2 && nestChain.bodies === 2, JSON.stringify(nestChain));
+    check('… chaque cran décale de 28px de plus (28 puis 56)',
+      nestChain.depths.sort((a, b) => a - b).join(',') === '28,56', JSON.stringify(nestChain));
+
+    // (k) Rang dans le flux : le bloc parent parle pour TOUT ce qu'il affiche,
+    // sous-lots compris. Ici l'onglet le plus à gauche du bloc appartient au
+    // SOUS-lot — sans la fusion des rangs, le bloc entier tomberait derrière la
+    // ligne plate qui le précède.
+    const rankConvs = [
+      nconv('b1', 'B task one', { groupId: 'B', state: 'busy' }),   // onglet 0
+      nconv('z9', 'Flat conversation'),                              // onglet 1
+      nconv('am', 'A master'),                                       // onglet 2
+      nconv('a2', 'A task two — opens B', { groupId: 'A' }),         // onglet 3
+    ];
+    const rankA = mkA();
+    rankA.members = [nmember('m2', 'A task two — opens B', 'a2')];
+    const rankB = mkB(true);
+    rankB.members = [nmember('n1', 'B task one', 'b1')];
+    await pushNest([rankA, rankB], rankConvs);
+    check('rang du bloc = son onglet le plus à gauche, SOUS-LOT COMPRIS (sinon il passerait derrière la ligne plate)',
+      (await cdp.evaluate(FLOW_ORDER)).join(' | ') === 'GROUPE | Flat conversation',
+      await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
+
+    // (l) Thème sombre : la capsule et la grip doivent se voir. Une teinte
+    // définie en hsl() ne dépend d'aucune variable de thème — ce qu'on vérifie
+    // ici, c'est qu'aucune bande de fond ne se glisse ENTRE la grip et sa
+    // ligne de tête, ni entre la capsule et le corps du sous-lot (visible en
+    // sombre, invisible en clair : c'est exactement le défaut que le plan
+    // interdit).
+    await pushNest([mkA(), mkB(true)]);
+    const darkVars = { '--vscode-sideBar-background': '#252526', '--vscode-editor-background': '#1e1e1e' };
+    await cdp.evaluate(`(() => { ${Object.entries(darkVars).map(([k, v]) => `document.documentElement.style.setProperty('${k}','${v}')`).join(';')} })()`);
+    await sleep(120);
+    const nestDark = await cdp.evaluate(`(() => {
+      const host = Array.from(document.querySelectorAll('#flow .member'))
+        .find(m => (m.querySelector('.title') || {}).textContent === 'A task two — opens B');
+      const bodySub = document.querySelector('.grp-body.nest-body');
+      const gripSub = document.querySelector('.grp-head.nest-grip');
+      const mHeadRect = host.querySelector('.m-head').getBoundingClientRect();
+      const bodyTop = bodySub.getBoundingClientRect().top;
+      const gripBottom = gripSub.getBoundingClientRect().bottom;
+      return {
+        gap: bodyTop - mHeadRect.bottom,
+        gripToHostGap: mHeadRect.top - gripBottom,
+        footVisible: getComputedStyle(host.querySelector('.m-foot')).display !== 'none',
+        capShadow: getComputedStyle(host.querySelector('.m-head'), '::after').boxShadow,
+        gripBorder: getComputedStyle(gripSub).borderColor,
+      };
+    })()`);
+    check('thème sombre : le corps du sous-lot est COLLÉ sous la capsule (aucune bande de fond entre les deux)',
+      nestDark.footVisible === false && Math.abs(nestDark.gap) < 1, JSON.stringify(nestDark));
+    check('… et la grip est COLLÉE au-dessus de la ligne de tête (cadre continu, aucune bande de fond)',
+      Math.abs(nestDark.gripToHostGap) < 1, JSON.stringify(nestDark));
+    check('… capsule et grip restent peintes (teintes hsl, indépendantes du thème)',
+      nestDark.capShadow.indexOf('rgb') !== -1 && nestDark.gripBorder.indexOf('rgb') !== -1, JSON.stringify(nestDark));
+    for (const k of Object.keys(darkVars)) await cdp.evaluate(`document.documentElement.style.removeProperty('${k}')`);
+
+    // ── 20. La maîtresse n'engage que son DERNIER lot ────────────────────
+    // (plan PLAN_maitresse_dernier_lot_2026-08-15.md.) Deux lots revendiquent
+    // la MÊME conversation maîtresse — une conv de cadrage qui enchaîne les
+    // batchs, cas nominal. Il n'y a qu'UN nœud de conversation : les deux
+    // capsules le réclament et l'une reste VIDE.
+    // AUCUN code de rendu n'a été écrit pour ce plan : extension.js envoie
+    // `master: null` au lot qui a cédé, et le webview emprunte sa branche
+    // sans-maîtresse, déjà là depuis le lot 11. Ce qu'on mesure ici, c'est
+    // qu'elle SUFFIT — et que le témoin montre bien le défaut d'avant.
+    console.log('\n20. Deux lots pour une seule maîtresse — le plus ancien cède sa tête');
+    const mkClaimA = (master) => ({
+      id: 'A', name: 'Batch of 03:01', hue: 210, collapsed: false, stamp: '03:01',
+      launchedWave: 1, nextWave: null, waveNotice: null, done: false, nestedUnder: null,
+      master,
+      members: [nmember('m1', 'A task one', 'a1'), nmember('m2', 'A task two', 'a2')],
+    });
+    const claimHead = { convId: 'am', title: 'A master', listed: true, tabTitle: null, hint: '', status: 'idle' };
+    const mkClaimB = () => ({
+      id: 'B', name: 'Batch of 14:34', hue: 30, collapsed: false, stamp: '14:34',
+      launchedWave: 1, nextWave: null, waveNotice: null, done: false, nestedUnder: null,
+      master: claimHead,
+      members: [nmember('n1', 'B task one', 'b1'), nmember('n2', 'B task two', 'b2', { status: 'done', waveStatus: 'done' })],
+    });
+    const CLAIM_PROBE = `(() => {
+      const slots = Array.from(document.querySelectorAll('#flow .grp-master-slot'));
+      const seen = {};
+      Array.from(document.querySelectorAll('.conv .title')).forEach(t => { seen[t.textContent] = (seen[t.textContent] || 0) + 1; });
+      return {
+        masterSlots: slots.length,
+        emptyMasterSlots: slots.filter(s => !s.children.length).length,
+        rootBlocks: document.querySelectorAll('#flow > .grp').length,
+        convNodes: document.querySelectorAll('.conv').length,
+        dupTitles: Object.keys(seen).filter(k => seen[k] > 1),
+      };
+    })()`;
+
+    // (a) Témoin — les deux lots gardent leur maîtresse : le nœud part au
+    // dernier rendu, l'autre capsule reste vide. C'est le bug, mesuré.
+    await pushNest([mkClaimA(claimHead), mkClaimB()]);
+    const claimBefore = await cdp.evaluate(CLAIM_PROBE);
+    check('(témoin) deux capsules pour une seule conversation → une reste VIDE',
+      claimBefore.masterSlots === 2 && claimBefore.emptyMasterSlots === 1, JSON.stringify(claimBefore));
+
+    // (b) Corrigé — le lot le plus ancien reçoit `master: null`.
+    await pushNest([mkClaimA(null), mkClaimB()]);
+    const claimAfter = await cdp.evaluate(CLAIM_PROBE);
+    check('une seule ligne maîtresse rendue, et plus aucune capsule vide',
+      claimAfter.masterSlots === 1 && claimAfter.emptyMasterSlots === 0, JSON.stringify(claimAfter));
+    check('les deux blocs sont toujours là (céder une tête ne dissout rien)',
+      claimAfter.rootBlocks === 2, JSON.stringify(claimAfter));
+    check('la conversation de cadrage est rendue UNE fois, sans doublon de titre',
+      claimAfter.convNodes === claimBefore.convNodes && claimAfter.dupTitles.length === 0, JSON.stringify(claimAfter));
+    const cededShape = await cdp.evaluate(`(() => {
+      const blocks = Array.from(document.querySelectorAll('#flow > .grp'));
+      const ceded = blocks.find(b => ((b.querySelector('.grp-label') || {}).textContent || '').indexOf('03:01') !== -1);
+      return ceded ? {
+        hasMasterHead: !!ceded.querySelector('.grp-master-head'),
+        hasMasterClass: ceded.classList.contains('has-master'),
+        members: ceded.querySelectorAll('.member').length,
+        homeVisible: getComputedStyle(ceded.querySelector('.grp-head .gbtn:not(.g-kill)')).display !== 'none',
+      } : null;
+    })()`);
+    check('le lot qui a cédé se rend comme un lot SANS maîtresse : grip seule, ses membres intacts',
+      !!cededShape && cededShape.hasMasterHead === false && cededShape.hasMasterClass === false && cededShape.members === 2,
+      JSON.stringify(cededShape));
+    check('… et son ⌂ redevient proposable (re-lier fera rebasculer la tête vers lui)',
+      !!cededShape && cededShape.homeVisible === true, JSON.stringify(cededShape));
+
+    console.log('\n21. Bandeau de gel des onglets (plan gel-tabs 2026-08-17) — état d\'erreur, jamais dans les captures de fiche');
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
+    check('état nominal (tabsFrozen absent) : bandeau masqué',
+      await cdp.evaluate(`getComputedStyle(document.querySelector('#tabsFrozenNotice')).display`) === 'none');
+    const frozenState = Object.assign({}, STATE, { tabsFrozen: true });
+    for (const scheme of ['dark', 'light']) {
+      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      await sleep(80);
+      await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: frozenState })}, '*')`);
+      await sleep(120);
+      const shot = await cdp.evaluate(`(() => {
+        const n = document.querySelector('#tabsFrozenNotice');
+        const cs = getComputedStyle(n);
+        return { display: cs.display, color: cs.color, text: n.textContent };
+      })()`);
+      check(`thème ${scheme} : tabsFrozen:true → bandeau visible avec son texte`,
+        shot.display === 'block' && shot.text.length > 0, JSON.stringify(shot));
+      check(`thème ${scheme} : couleur résolue non transparente (${shot.color})`,
+        !!shot.color && shot.color !== 'rgba(0, 0, 0, 0)' && shot.color !== 'transparent');
+    }
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
+    check('retour à tabsFrozen:false → bandeau remasqué (pas de rémanence)',
+      await cdp.evaluate(`getComputedStyle(document.querySelector('#tabsFrozenNotice')).display`) === 'none');
   } finally {
     if (cdp) cdp.close();
     try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore', timeout: 5000 }); } catch {}

@@ -378,9 +378,124 @@ function lastActivityTs(filePath) {
   return null;
 }
 
+// ── Signaux de reprise AUTONOME (incident vagues 2026-08-17) ────────────────
+//
+// « Fin de tour » ≠ « tâche finie » : deux mécanismes du harnais relancent une
+// conversation TOUT SEULS après son hook Stop, et le transcript est le seul
+// endroit qui le sait :
+//  1. Tâche de fond (Agent ou Bash `run_in_background`) : le tool_result du
+//     lancement promet une <task-notification> ultérieure — tant qu'elle n'est
+//     pas arrivée, la conv va être ré-invoquée. Constaté en réel (lot 1 du
+//     batch SNCF, 2026-08-17) : tour fini à 13:37:50, notification-reprise à
+//     13:39:23 — entre les deux, le moteur de vagues lisait « done » et
+//     ouvrait la vague suivante sur un lot qui n'avait PAS fini.
+//  2. ScheduleWakeup (/loop dynamique) : le tool_result porte `scheduledFor` ;
+//     un réveil encore à venir = la conv redémarrera d'elle-même.
+//
+// Détection TEXTUELLE, assumée : les formes ci-dessous sont celles écrites par
+// le CLI (relevées sur transcripts réels, version 2.1.233, 2026-08-17). Si le
+// harnais change son libellé, la détection rend faux → comportement d'AVANT ce
+// correctif (jamais pire). Limite connue, acceptée : une tâche tuée par
+// TaskStop n'émet pas de notification → « pending » à tort ; le blocage ne
+// s'applique qu'aux conversations VIVANTES (cf. effectiveState) et le ▶ manuel
+// reste toujours là — même philosophie que `stale` (l'auto se suspend, jamais
+// le manuel).
+//
+// Fenêtre de scan : 4 Mo de queue (un lancement plus vieux que ça dont la
+// notification n'est toujours pas arrivée est rarissime ; le rater = repli sur
+// le comportement d'avant). Le scan n'est PAS gratuit → l'appelant (state.js)
+// le cache par (mtime, size) et ne le déclenche que sur une entrée `done`,
+// c'est-à-dire une fois par fin de tour, jamais pendant que ça écrit.
+const PENDING_SCAN_BYTES = 4 * 1024 * 1024;
+// ANCRÉS en début de texte, volontairement (faux positif 2026-08-17, trouvé le
+// jour même : la conversation qui a CONSTRUIT cette détection citait ces
+// libellés dans ses sorties de grep — le scan la voyait « en attente d'une
+// tâche de fond » pour toujours, spinner sur une conv terminée). Un VRAI
+// résultat de lancement COMMENCE par son libellé ; une citation vit au milieu
+// d'un texte (préfixe grep, JSON d'un autre transcript, prose). Même logique
+// canal par canal ci-dessous : un signal n'est cru que là où le CLI l'écrit.
+const BG_AGENT_LAUNCH_RE = /^Async agent launched successfully/;
+const BG_AGENT_ID_RE = /agentId:\s*([A-Za-z0-9_-]+)/;
+const BG_BASH_LAUNCH_RE = /^Command running in background with ID:\s*([A-Za-z0-9_.-]+)/;
+const TASK_NOTIF_RE = /^<task-notification>/;
+
+// Tout le texte d'un contenu (string brute ou blocs) — contrairement à
+// firstTextBlock, une notification peut cohabiter avec d'autres blocs.
+function allText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  let out = '';
+  for (const b of content) {
+    if (b && b.type === 'text' && typeof b.text === 'string') out += b.text + '\n';
+  }
+  return out;
+}
+
+function collectTags(text, tag, into) {
+  const re = new RegExp('<' + tag + '>([^<]+)</' + tag + '>', 'g');
+  let m;
+  while ((m = re.exec(text))) into.add(m[1].trim());
+}
+
+// Rend { pendingTask, wakeupAt } ou null (fichier illisible).
+//  - pendingTask : au moins un lancement de fond (agent/bash) sans
+//    <task-notification> correspondante — appariement par task-id (agentId /
+//    ID bash) OU par tool-use-id, les deux figurent dans la notification ;
+//  - wakeupAt   : `scheduledFor` du DERNIER ScheduleWakeup vu (ms epoch), ou
+//    null. C'est l'appelant qui compare à « maintenant » : un réveil passé a
+//    déjà tiré (la reprise est visible ailleurs), seul un réveil FUTUR annonce
+//    une reprise à venir.
+function pendingResumeSignals(filePath) {
+  let entries;
+  try { entries = parseSlice(readSlice(filePath, PENDING_SCAN_BYTES, 'tail')); } catch { return null; }
+  const launches = [];
+  const notifiedTask = new Set();
+  const notifiedToolUse = new Set();
+  let wakeupAt = null;
+  for (const e of entries) {
+    if (!e || e.type !== 'user') continue;
+    if (e.toolUseResult && typeof e.toolUseResult.scheduledFor === 'number') {
+      // Un `stop: true` (fin de /loop) rend `{scheduledFor: 0, stopped: true,
+      // cancelledWakeups: N}` (relevé en réel) : il ANNULE les réveils armés —
+      // explicite ici, même si l'écrasement par 0 aurait suffi par accident.
+      wakeupAt = e.toolUseResult.stopped ? null : e.toolUseResult.scheduledFor;
+    }
+    const content = e.message && e.message.content;
+    // Notification : UNIQUEMENT le texte porté par le message user lui-même
+    // (string brute ou blocs `text` — allText ignore les tool_results). C'est
+    // le canal où le CLI les écrit ; une notification « vue » dans un
+    // tool_result est une citation (grep, cat d'un autre transcript) et ne
+    // doit surtout pas ÉTEINDRE une vraie attente.
+    const plain = allText(content).trim();
+    if (plain && TASK_NOTIF_RE.test(plain)) {
+      collectTags(plain, 'task-id', notifiedTask);
+      collectTags(plain, 'tool-use-id', notifiedToolUse);
+    }
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (!b || b.type !== 'tool_result') continue;
+      // Lancement : UNIQUEMENT un tool_result, et ancré — cf. les regex.
+      const txt = allText(b.content).trim();
+      if (!txt) continue;
+      if (BG_AGENT_LAUNCH_RE.test(txt)) {
+        const m = BG_AGENT_ID_RE.exec(txt);
+        launches.push({ toolUseId: b.tool_use_id || null, taskId: m ? m[1] : null });
+        continue;
+      }
+      const bash = BG_BASH_LAUNCH_RE.exec(txt);
+      if (bash) launches.push({ toolUseId: b.tool_use_id || null, taskId: bash[1] });
+    }
+  }
+  const pendingTask = launches.some((l) =>
+    !(l.taskId && notifiedTask.has(l.taskId)) &&
+    !(l.toolUseId && notifiedToolUse.has(l.toolUseId)));
+  return { pendingTask, wakeupAt };
+}
+
 module.exports = {
   readSlice, parseSlice, usageTokens, extractLastAssistant, extractTitleInfo,
   scanAiTitleIncremental, cleanTitle, firstUserText, TITLE_MAX,
   hasPendingInteractiveTool, wasInterrupted, lastActivityTs, INTERACTIVE_TOOLS,
+  pendingResumeSignals,
   pendingInteractiveAt, interruptedAt,
 };

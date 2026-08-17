@@ -20,7 +20,8 @@ function check(name, cond, detail) {
 function skip(name, why) { skipped++; console.log(`  skip ${name} (${why})`); }
 
 const { createSessionTitles, cleanLabel, CACHE_KEY } = require(path.join(__dirname, '..', 'session-titles.js'));
-const { liveSessionIds, pidAlive } = require(path.join(__dirname, '..', 'live-sessions.js'));
+const { liveSessionIds, foreignSessionIds, isForeignEntrypoint, pidAlive } =
+  require(path.join(__dirname, '..', 'live-sessions.js'));
 
 // ── 1. Registre des sessions vivantes ──────────────────────────────────────
 console.log('\n1. live-sessions : ~/.claude/sessions/<pid>.json');
@@ -50,6 +51,41 @@ check('celle d\'un pid mort est écartée', !ids.has('dead-1'), [...ids].join(',
 check('fichier illisible ignoré sans lever', ids.size === 1, String(ids.size));
 check('les fichiers du CLI ne sont JAMAIS supprimés par nous',
   fs.existsSync(path.join(sessionsDir, `${deadPid}.json`)));
+
+// ── 1bis. Origine de la session : fenêtre VS Code ou ailleurs ───────────────
+// Toutes les sessions vivantes ne naissent pas d'un onglet. Le serveur Remote
+// Control (conversations ouvertes depuis le mobile) exécute les siennes ICI,
+// dans le même dossier de travail : sans ce tri elles s'affichent dans le
+// panneau, sans onglet, indéfiniment. Signalé par l'user le 2026-08-17.
+console.log('\n1bis. live-sessions : origine (entrypoint)');
+const originDir = path.join(SANDBOX, 'sessions-origin');
+fs.mkdirSync(originDir, { recursive: true });
+const writeOrigin = (name, sessionId, entrypoint) => {
+  const body = { pid: process.pid, sessionId, cwd: 'C:\\ws' };
+  if (entrypoint !== undefined) body.entrypoint = entrypoint;
+  fs.writeFileSync(path.join(originDir, `${name}.json`), JSON.stringify(body));
+};
+writeOrigin('a', 'vscode-1', 'claude-vscode');
+writeOrigin('b', 'rc-1', 'sdk-cli');          // Remote Control / agent SDK
+writeOrigin('c', 'term-1', 'cli');            // terminal lancé à la main
+writeOrigin('d', 'remote-1', 'remote_cowork');
+writeOrigin('e', 'nofield-1', undefined);     // champ absent → dégradation
+writeOrigin('f', 'unknown-1', 'entrypoint-du-futur');
+
+const vs = liveSessionIds(originDir);
+const foreign = foreignSessionIds(originDir);
+check('une session VS Code est vivante', vs.has('vscode-1'), [...vs].join(','));
+check('la session du serveur RC (sdk-cli) en est écartée', !vs.has('rc-1'));
+check('… et se retrouve dans l\'ensemble étranger', foreign.has('rc-1'), [...foreign].join(','));
+check('un terminal (cli) est étranger', foreign.has('term-1') && !vs.has('term-1'));
+check('la famille remote* est étrangère', foreign.has('remote-1') && !vs.has('remote-1'));
+check('entrypoint ABSENT → traité comme VS Code, jamais masqué en plus',
+  vs.has('nofield-1') && !foreign.has('nofield-1'));
+check('entrypoint INCONNU → traité comme VS Code (liste fermée, dégradation sûre)',
+  vs.has('unknown-1') && !foreign.has('unknown-1'));
+check('les deux ensembles sont disjoints ici', [...vs].every((id) => !foreign.has(id)));
+check('isForeignEntrypoint ne se déclenche pas sur une valeur vide',
+  !isForeignEntrypoint('') && !isForeignEntrypoint(null) && !isForeignEntrypoint(undefined));
 
 // ── 2. Titres d'onglet réels ───────────────────────────────────────────────
 console.log('\n2. session-titles : state.vscdb (agentSessions.model.cache)');

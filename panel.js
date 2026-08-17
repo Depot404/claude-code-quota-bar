@@ -47,6 +47,12 @@ const vscode = require('vscode');
 //     },
 //     canary: boolean,       // lot 13 §1 : conv(s) busy/waiting mais zéro onglet
 //                             // Claude détecté depuis > 2 min — viewType dérivé ?
+//     tabsFrozen: boolean,   // plan gel-tabs 2026-08-17 : canal RPC des
+//                             // onglets mort pour CETTE fenêtre (copie miroir
+//                             // de l'hôte d'extension figée) — le surlignage
+//                             // suit toujours un clic (l'acte prime), mais
+//                             // l'auto-réparation par lecture fraîche ne joue
+//                             // plus tant que la fenêtre n'est pas rechargée.
 //     batch: {
 //       envConflict: string[],  // nos env vars définies dans claudeCode.environmentVariables
 //                               // → sélecteurs désactivés (elles écraseraient nos choix)
@@ -61,6 +67,14 @@ const vscode = require('vscode');
 //       launchedWave: number,   // vague la plus avancée déjà ouverte
 //       nextWave: number|null,  // vague à proposer au ▶ manuel, null = aucune
 //       waveNotice: string|null,// annonce transitoire (ouverture auto, échec)
+//       nestedUnder: null | { groupId, memberKey },
+//                               // filiation (plan arbre-filiation 2026-08-15,
+//                               // nesting.js) : la maîtresse de ce lot EST le
+//                               // membre `memberKey` du lot `groupId` — ce lot
+//                               // se rend sous CETTE ligne, qui lui tient lieu
+//                               // de tête (il ne rend donc pas sa propre ligne
+//                               // maîtresse : un seul nœud, un seul endroit).
+//                               // null = rendu classique, bloc frère.
 //       members: [{
 //         key: string,          // identité du membre dans son groupe
 //         prompt: string,       // ce qu'on a inséré à l'ouverture
@@ -197,6 +211,14 @@ function renderHtml(webview) {
     --sp-block: 6px;
     --sp-sep: 4px;
     --sp-tight: 2px;
+    /* Décalage d'un sous-lot imbriqué (plan arbre-filiation 2026-08-15) : DEUX
+       gouttières de 14px, l'axe des anneaux. Ce n'est pas un goût, c'est un
+       minimum MESURÉ : le cadre d'un bloc déborde de --grp-bleed (5px) à
+       gauche et le rail du parent a son bord droit à 15,5px — à 14px de
+       décalage le cadre du sous-lot traverse le rail du parent (masqué sur
+       21px au banc de la maquette). Axes qui en résultent : rail parent 14,5 ·
+       rail enfant 42,5, chacun sous ses propres anneaux. */
+    --nest-indent: 28px;
   }
   /* Enregistrée = le moteur interpole un <angle> en douceur (la longueur du
      serpentin croît/décroît au lieu de sauter) — condition pour l'animation
@@ -232,8 +254,9 @@ function renderHtml(webview) {
     background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
   }
   .empty { padding: var(--sp-sep) 2px; color: var(--muted); font-style: italic; }
-  /* Canari viewType (lot 13 §1) : signal discret, jamais de popup. Réutilise
-     la teinte "attention" déjà en place, pas une couleur dédiée. */
+  /* Canari viewType (lot 13 §1) et gel des onglets (plan gel-tabs 2026-08-17) :
+     même famille de signal discret, jamais de popup — même règle pour les
+     deux, teinte "attention" déjà en place, pas de couleur dédiée. */
   .canary {
     display: none;
     margin: 2px 2px var(--sp-sep); padding: 3px 6px; border-radius: 4px;
@@ -691,6 +714,24 @@ function renderHtml(webview) {
     border-bottom-right-radius: 0;
   }
   .grp-head:hover { background: var(--vscode-list-hoverBackground); }
+  /* Identité du lot dans la grip (2026-08-15). L'espace entre le chevron et le
+     compteur était vide alors que RIEN à l'écran ne disait de quel lot il
+     s'agissait : le nom ne vivait qu'en infobulle, et seulement sur un lot sans
+     maîtresse — donc jamais visible dans le cas nominal. Le libellé porte
+     l'heure de création (stamp, posé par extension.js) et non le nom : deux
+     lots peuvent porter le même nom, leur heure les sépare toujours.
+     flex: 0 1 auto + ellipsis = c'est TOUJOURS ce libellé qui cède, jamais le
+     compteur qui bouge. Prouvé au banc avant d'écrire cette règle (bord droit
+     du compteur identique au pixel, libellé court comme libellé long, dans les
+     deux thèmes) : sans cela un nom un peu long pousserait le compteur hors de
+     la grip. Même typographie que les titres de section du panneau (h2) — un
+     lot se lit comme le contenant qu'il est. */
+  .grp-label {
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted);
+  }
   .grp-count { flex: none; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
   /* Chip « ce qui reste à faire » (étape 11) : même variable de thème que le
      glyphe ✓ done des membres. */
@@ -786,6 +827,85 @@ function renderHtml(webview) {
      la grip s'effaçait) — c'était la grip qu'il fallait garder, pas déguiser
      la master en grip. */
   .grp-body.collapsed > *:not(.grp-master-head) { display: none; }
+
+  /* ── Filiation des lots (plan arbre-filiation 2026-08-15, lot 2,
+     AMENDÉ 2026-08-16 « canon de la maîtresse ») ─────────────────────────
+     Un lot B dont la conversation maîtresse est MEMBRE d'un lot A se rend SOUS
+     cette ligne, à l'intérieur du corps de A (nesting.js décide, panel.js
+     range). La ligne, elle, ne bouge pas d'un pixel : elle reste un membre de
+     A, sur le rail de A, au même axe que ses sœurs — c'est le modèle qui le
+     dit (une maîtresse est un POINTEUR vers une conversation qui vit là où
+     elle est). Elle devient simplement la TÊTE du sous-lot.
+     Un lot sans filiation ne change RIEN : aucune de ces règles ne le touche
+     (écart minimal avec le rendu publié — choix A du plan).
+     Le sous-lot réemploie le vocabulaire d'un lot racine AVEC maîtresse
+     (grip qui referme son bas, ligne encadrée sur 3 bords) plutôt que d'en
+     inventer un nouveau : la grip du sous-lot (.grp-head.nest-grip) précède
+     la ligne de tête — qui APPARTIENT au parent — et son corps
+     (.grp-body.nest-body) la suit. Le bloc .grp de l'enfant n'est donc plus un
+     conteneur unique : ses deux moitiés sont posées séparément dans le corps
+     du parent (renderGroups), de part et d'autre d'une ligne qu'il ne possède
+     pas. Le premier jet (chip « ▾ N/M done » dans la ligne .meta) est abandonné
+     : il inventait une grip miniature là où le panneau en a déjà une — décidé
+     par l'user sur planche de captures (« pourquoi pas le même canon que la
+     master ? »). */
+  .grp-head.nest-grip {
+    /* Même cap que .grp.has-master > .grp-head (bas ouvert, coin bas-droit
+       carré) : c'est la ligne du parent, juste en dessous, qui referme le
+       cadre — un seul cadre continu, jamais deux bordures qui se touchent.
+       Marge à 4 valeurs (haut/droite/bas/gauche) : le décalage à
+       --nest-indent (28px) ET l'annulation du bleed s'écrivent en UNE
+       déclaration, jamais deux règles qui pourraient diverger. Bleed annulé
+       des DEUX côtés (pas seulement à gauche) : la capsule de la ligne de
+       tête ci-dessous n'a elle-même jamais bledé (right:0, jamais un lot
+       racine avec master), un bleed résiduel à droite désalignerait les deux
+       bords du cadre — constat visé par le banc « bords gauche/droite
+       alignés au pixel entre les deux ». */
+    margin: 2px 0 0 var(--nest-indent);
+    padding-left: 6px; padding-right: 6px;
+    border-bottom-width: 0;
+    border-bottom-right-radius: 0;
+  }
+  /* Corps du sous-lot : même décalage que sa grip, COLLÉ sous la capsule de
+     tête (aucune marge haute — un interstice y laisse passer une bande du
+     fond du panneau, bien visible en thème sombre) ; marge basse sp-block
+     pour respirer avant ce qui suit dans le corps du parent. AUCUN
+     border-left : le rail du parent longe déjà son flanc gauche (13px), à
+     bonne distance de --nest-indent (28px) — un liseré le doublerait
+     (constaté au banc de la maquette). */
+  .grp-body.nest-body {
+    margin: 0 0 var(--sp-block) var(--nest-indent);
+    padding-top: 0;
+  }
+
+  /* Capsule de tête : la ligne du parent est ENCADRÉE à la couleur du sous-lot
+     qu'elle ouvre, tout en gardant sa bulle et son anneau au parent (« couleur
+     de bulle héritée du parent, encadrée de la couleur de ses enfants »).
+     — Peinte en PSEUDO-élément, jamais en border/padding : une bordure
+       décalerait tout le contenu de la ligne et casserait l'égalité au pixel
+       avec les lignes plates (§16 du banc), qui est l'invariant même de ce
+       panneau. Le pseudo se peint aussi APRÈS les fonds des descendants, donc
+       la sélection/le survol de la ligne ne peut pas passer par-dessus —
+       exactement la leçon de l'étape 19 sur le cadre de la ligne maîtresse.
+     — Elle commence à --nest-indent : l'anneau reste DEHORS, sur le rail du
+       parent. L'englober enfermerait le rail du parent dans le cadre de
+       l'enfant, ce qui dirait le contraire de la structure.
+     — 3 BORDS seulement (gauche/droite/bas), radius bas uniquement — le cadre
+       de .grp-master-head à l'identique (amendement 2026-08-16) : le bord
+       HAUT n'a plus lieu d'être puisque la grip, juste au-dessus, ferme déjà
+       le cadre par le sien. Un 4e bord aurait dessiné une double ligne à la
+       couture grip/tête. Toujours sans aucun fond : dans tout le panneau, une
+       capsule n'encadre qu'un EN-TÊTE, jamais des lignes de conversation. */
+  .member.nest-host > .m-head::after {
+    content: ''; position: absolute; z-index: 2; pointer-events: none;
+    top: 0; right: 0; bottom: 0; left: var(--nest-indent);
+    border-radius: 0 0 6px 6px;
+    box-shadow:
+      inset 1.5px 0 0 0 var(--nest-hue, var(--grp-hue, var(--muted))),
+      inset -1.5px 0 0 0 var(--nest-hue, var(--grp-hue, var(--muted))),
+      inset 0 -1.5px 0 0 var(--nest-hue, var(--grp-hue, var(--muted)));
+  }
+
   /* Rail P1 (« nœuds sur l'axe ») : trait vertical teinté du groupe, centré
      au pixel sur l'axe de la colonne des symboles d'état — le MÊME axe que
      les conversations plates (colonne grille 16px + padding gauche 6px de
@@ -1097,6 +1217,7 @@ function renderHtml(webview) {
     </div>
     <div class="sec-body" id="convBody">
       <div class="canary" id="canary">${vscode.l10n.t('⚠ Claude tabs not detected — viewType changed?')}</div>
+      <div class="canary" id="tabsFrozenNotice">${vscode.l10n.t('VS Code stopped reporting tab changes — highlight may lag. Reloading the window fixes it.')}</div>
       <!-- Conteneur UNIQUE (2026-08-07) : blocs de groupe et lignes plates
            sont frères. Deux conteneurs (#groups puis #convs) rendaient l'ordre
            STRUCTUREL — un groupe passait forcément avant toute conversation
@@ -1143,6 +1264,7 @@ function renderHtml(webview) {
   const countEl = document.getElementById('convCount');
   const soundsToggleEl = document.getElementById('soundsToggle');
   const canaryEl = document.getElementById('canary');
+  const tabsFrozenEl = document.getElementById('tabsFrozenNotice');
   const convHeadEl = document.getElementById('convHead');
   const convChevronEl = document.getElementById('convChevron');
   const convBodyEl = document.getElementById('convBody');
@@ -1369,6 +1491,12 @@ function renderHtml(webview) {
   // puis les lignes plates. Le classement d'un bloc par « dernière activité »
   // ou par « état » demanderait de choisir laquelle de ses conversations parle
   // pour lui ; ce n'est pas ce lot.
+  //
+  // FILIATION (2026-08-15) : la liste des blocs ne contient que les RACINES — un
+  // sous-lot imbriqué a déjà été rangé dans le corps de son parent, et son
+  // rang est fondu dans celui de ce parent (renderGroups). layoutFlow n'a donc
+  // rien de particulier à savoir de la filiation : il place des blocs, comme
+  // avant, et il y en a simplement moins.
   function layoutFlow(blocks, flat, convs, order, seen) {
     countEl.textContent = convs.length ? String(convs.length) : '';
 
@@ -1445,9 +1573,10 @@ function renderHtml(webview) {
   // avant que la restauration ne stabilise le texte des titres) — la hauteur
   // posée à cet instant reste alors fausse (déjà vue à 0) jusqu'au push
   // suivant, potentiellement longtemps. measureRail() est donc appelée à la
-  // fois par renderGroups() ET par un ResizeObserver sur <body> : toute
-  // largeur qui change (restauration, redimensionnement de la sidebar)
-  // re-mesure sans attendre un nouveau postMessage.
+  // fois APRÈS layoutFlow() (un passage sur tous les groupes, une fois les
+  // blocs posés dans le flux — un nœud détaché mesure 0) ET par un
+  // ResizeObserver sur <body> : toute largeur qui change (restauration,
+  // redimensionnement de la sidebar) re-mesure sans attendre un postMessage.
   function measureRail(node) {
     // ÉTAPE 19 — le rail ne se dessine JAMAIS À L'INTÉRIEUR du cadre de la
     // capsule : quand une master est rendue, il part du bord BAS de sa ligne.
@@ -1508,6 +1637,11 @@ function renderHtml(webview) {
     // d'autre en nominal (décision actée sur maquette v5).
     const head = el('div', 'grp-head');
     const chev = el('span', 'chevron');
+    // Identité du lot (2026-08-15) : « BATCH 14:12 », l'heure de création que
+    // extension.js a déjà formatée (stamp). Elle occupe la place restée vide
+    // entre le chevron et le compteur — le seul endroit de la grip qui ne
+    // portait aucune information.
+    const label = el('span', 'grp-label');
     const count = el('span', 'grp-count');
     // « Ce qui reste à faire » (étape 11) : visible dès que tous les MEMBRES
     // (pas forcément la maîtresse) sont finis, onglet fermé — un groupe où
@@ -1536,10 +1670,17 @@ function renderHtml(webview) {
     const kill = el('button', 'gbtn g-kill', '✕');
     kill.type = 'button';
     kill.title = t('Dissolve this group (conversations are kept, nothing is closed)');
+    // Ordre de la grip (2026-08-15) : chevron, identité du lot, PUIS le vide
+    // élastique, PUIS le compteur et les boutons. Le compteur passe donc à
+    // droite, où sa colonne de chiffres s'aligne d'une grip à l'autre au lieu
+    // de flotter au milieu. Réalisé par l'ordre DOM seul — aucune règle CSS
+    // order, qui ferait diverger l'ordre lu du fichier de l'ordre vu à l'écran
+    // et piégerait la prochaine lecture.
     head.appendChild(chev);
+    head.appendChild(label);
+    head.appendChild(spacer);
     head.appendChild(count);
     head.appendChild(done);
-    head.appendChild(spacer);
     head.appendChild(mas);
     head.appendChild(kill);
     const body = el('div', 'grp-body');
@@ -1581,20 +1722,25 @@ function renderHtml(webview) {
     // waveCtrl : la zone « ▶ lancer la vague suivante » / bannière, une par
     // groupe, repositionnée juste après la vague courante à chaque rendu.
     // Ligne fantôme « + nouvelle vague » (plan ajout-tache 2026-07-24) :
-    // TOUJOURS présente en fin de groupe, groupe fini compris (décision 2
-    // du design) — un clic crée la vague max+1, jamais une vague existante.
+    // présente en fin de groupe, groupe fini compris (décision 2 du design)
+    // — un clic crée la vague max+1, jamais une vague existante. Masquée par
+    // défaut : elle dépose le prompt COURANT du formulaire (activeTasks(),
+    // cf. refreshGhostVisibility) — sans texte à déposer, le clic ne ferait
+    // que rendre le focus au champ (addTaskAtWave), donc rien à proposer ni
+    // à faire briller à l'œil (constat user 2026-08-15). Le rail continue de
+    // mesurer sa hauteur sur ghostRow.offsetTop, jamais masqué lui : ghostRow
+    // reste dans le flux, seuls ses enfants (ghostNew, addRow) basculent.
     // Lot B densité (2026-08-09) : ghostRow n'est plus la cellule elle-même
     // mais la RANGÉE qui l'accueille — la ligne d'ajout de la dernière vague
     // en file vient s'y ranger à sa gauche (renderGroups) au lieu d'occuper
-    // une deuxième rangée pleine largeur juste au-dessus. Le rail continue de
-    // mesurer sa hauteur sur ghostRow.offsetTop : la rangée a la même origine
-    // verticale que la cellule qu'elle remplace, measureRail est inchangé.
+    // une deuxième rangée pleine largeur juste au-dessus.
     const ghostRow = el('div', 'ghost-line');
     const ghostNew = el('div', 'wave-ghost wave-new', t('+ new wave'));
     ghostNew.title = t('Add a task in a new wave after the last one');
+    ghostNew.style.display = 'none';
     ghostRow.appendChild(ghostNew);
     const node = {
-      root, head, chev, count, done, body, members: new Map(), id: g.id,
+      root, head, chev, label, count, done, body, members: new Map(), id: g.id,
       mas, kill, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
       rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow, ghostNew,
       masterHead, masterSlot, masterOut, masterFallback: null,
@@ -1755,18 +1901,81 @@ function renderHtml(webview) {
   // à jour les nœuds, puis rend la liste des BLOCS (dans l'ordre du store) avec
   // les conversations que chacun affiche. C'est layoutFlow() qui décide où ils
   // tombent — sans quoi les groupes seraient toujours au-dessus, par structure.
+  //
+  // FILIATION (plan arbre-filiation 2026-08-15, lot 2) : un lot imbriqué
+  // ne produit PAS de bloc de flux — il est rangé dans le corps de son parent,
+  // juste après la ligne qui lui sert de tête, à CHAQUE rendu. Rien n'est
+  // « déplacé une fois pour toutes » : place() ne bouge que ce qui est mal
+  // placé, donc l'idempotence est structurelle (la maquette, elle, opérait une
+  // chirurgie one-shot et fabriquait des chimères au deuxième rendu).
   function renderGroups(groups, convById, seen) {
     const live = new Set();
     const blocks = [];
-    groups.filter(function (g) { return !g.done; }).forEach(function (g) {
+    const rendered = groups.filter(function (g) { return !g.done; });
+    const byId = new Map();
+    rendered.forEach(function (g) { byId.set(g.id, g); });
+    // Tous les nœuds AVANT la boucle : un sous-lot est placé par son parent,
+    // qui peut le précéder dans la liste — son nœud doit donc déjà exister
+    // quand le parent le range. createGroupNode ne lit que g.id, aucune donnée
+    // de rendu n'est figée ici.
+    rendered.forEach(function (g) {
+      if (!groupNodes.has(g.id)) groupNodes.set(g.id, createGroupNode(g));
+    });
+    // Sous-lots par ligne d'accueil. Le champ nestedUnder arrive tout résolu de
+    // nesting.js (côté extension) : le webview ne DÉDUIT aucune filiation, il
+    // range. Le garde sur byId n'est qu'une ceinture — un parent fini n'a
+    // aucun membre à rendre, donc nesting.js ne lui donne jamais d'enfant ;
+    // sans lui, un sous-lot partirait dans un nœud détaché du document.
+    // Clé = groupId du parent + un séparateur NUL + memberKey (le NUL ne peut
+    // apparaître dans ni l'un ni l'autre, donc aucune collision possible).
+    const kidsOf = new Map();
+
+    const nestedIds = new Set();
+    rendered.forEach(function (g) {
+      const n = g.nestedUnder;
+      if (!n || !n.groupId || !n.memberKey || !byId.has(n.groupId)) return;
+      nestedIds.add(g.id);
+      const k = n.groupId + '\\u0000' + n.memberKey;
+      if (!kidsOf.has(k)) kidsOf.set(k, []);
+      kidsOf.get(k).push(g);
+    });
+    const convIdsOf = new Map();       // groupId → convIds affichés par CE lot
+    rendered.forEach(function (g) {
       live.add(g.id);
       // Conversations RÉELLEMENT affichées par ce bloc (maîtresse listée +
       // membres liés encore rendus) : c'est sur elles, et rien d'autre, que se
       // calcule son rang d'onglet.
       const convIds = [];
-      let node = groupNodes.get(g.id);
-      if (!node) { node = createGroupNode(g); groupNodes.set(g.id, node); }
+      convIdsOf.set(g.id, convIds);
+      const node = groupNodes.get(g.id);
       node.id = g.id;
+      // Imbriqué (canon de la maîtresse, amendement 2026-08-16) : la grip et
+      // le corps sont deux moitiés posées SÉPARÉMENT dans le corps du parent
+      // (plus bas, boucle des membres de A) — la ligne de tête, elle,
+      // appartient au parent, un seul nœud de conversation à un seul endroit
+      // du DOM. .grp n'est alors plus le conteneur des deux moitiés.
+      const nested = nestedIds.has(g.id);
+      node.root.classList.toggle('nested', nested);
+      node.head.classList.toggle('nest-grip', nested);
+      node.body.classList.toggle('nest-body', nested);
+      // Un lot qui redevient autonome (filiation tombée) recompose son propre
+      // .grp : appendChild réclame head/body où qu'ils soient partis (le
+      // rendu du parent d'hier les avait placés dans SON corps), sans effet
+      // s'ils y sont déjà — l'idempotence structurelle du lot 2 vaut aussi
+      // dans ce sens.
+      if (!nested) {
+        node.root.appendChild(node.head);
+        node.root.appendChild(node.body);
+      } else {
+        // node.root n'est plus qu'une coquille (ses deux enfants viennent
+        // d'en être — ou d'y avoir été — extraits) : si un rendu PRÉCÉDENT
+        // l'avait placé tel quel dans le flux (le lot venait de perdre sa
+        // filiation, ou n'en avait encore aucune), il y traînerait vide sans
+        // ce retrait — un second « bloc racine » fantôme, jamais repris par
+        // layoutFlow puisqu'il n'est plus dans blocks[]. remove() est un
+        // no-op sûr s'il est déjà détaché.
+        node.root.remove();
+      }
 
       // Comptages et vagues parlent le vocabulaire du moteur (waveStatus),
       // pas le statut d'affichage : « terminée, onglet fermé » compte comme
@@ -1787,9 +1996,21 @@ function renderHtml(webview) {
       // façons de diverger (la classe d'erreur corrigée à l'étape 12 sur le
       // fond anneau/panneau).
       const hueBorder = 'hsl(' + g.hue + ', 45%, 55%)';
-      node.root.style.setProperty('--grp-hue', hueBorder);
-      node.root.style.setProperty('--grp-tint', 'hsla(' + g.hue + ', 45%, 55%, .08)');
+      const tint = 'hsla(' + g.hue + ', 45%, 55%, .08)';
+      // Posée sur la grip ET le corps (2026-08-16), jamais seulement sur
+      // .grp : un sous-lot imbriqué sort ses deux moitiés du DOM de node.root
+      // (ci-dessus), qui perdrait alors la teinte si elle n'était posée que là.
+      node.head.style.setProperty('--grp-hue', hueBorder);
+      node.head.style.setProperty('--grp-tint', tint);
+      node.body.style.setProperty('--grp-hue', hueBorder);
+      node.body.style.setProperty('--grp-tint', tint);
       setText(node.count, doneCount + '/' + g.members.length + ' done');
+      // Identité du lot : absente sur un groupe legacy sans createdAt
+      // (extension.js envoie alors null) — on masque le nœud plutôt que
+      // d'afficher une heure inventée ou un libellé vide qui mangerait une
+      // gouttière de la grip.
+      setText(node.label, g.stamp ? t('batch {0}', g.stamp) : '');
+      node.label.style.display = g.stamp ? '' : 'none';
       node.done.style.display = allMembersDone ? '' : 'none';
       setText(node.chev, g.collapsed ? '▸' : '▾');
       node.body.classList.toggle('collapsed', !!g.collapsed);
@@ -1798,11 +2019,23 @@ function renderHtml(webview) {
       // fabrique rowFor() que la liste plate) quand elle est listée, fallback
       // dégradé sinon (titre persisté + tooltip, jamais de nœud manquant) —
       // toujours le premier enfant de flux du corps. Sans master : le
-      // conteneur est simplement absent du DOM, la grip seule porte le nom du
-      // groupe (en tooltip) et le ⌂-focus.
-      const hasMaster = !!g.master;
-      node.mas.style.display = hasMaster ? 'none' : '';
-      node.head.title = hasMaster ? '' : g.name;
+      // conteneur est simplement absent du DOM, la grip seule porte le ⌂-focus.
+      // … et JAMAIS quand le lot est imbriqué : sa maîtresse est déjà rendue,
+      // en tant que MEMBRE de son parent, sur la ligne qui lui sert de tête.
+      // La rendre ici en ferait un second nœud pour la même conversation —
+      // très exactement le bug que la filiation corrige (l'un des deux blocs
+      // gardait un emplacement vide, emptySlots:1 au banc de la maquette).
+      const hasMaster = !!g.master && !nested;
+      // ⌂ masqué pour un sous-lot (amendement 2026-08-16) : il propose de lier
+      // l'onglet actif comme maîtresse, or le sous-lot EN A une — c'est la
+      // ligne juste en dessous de sa grip (défaut vu sur capture, variante C).
+      node.mas.style.display = (hasMaster || nested) ? 'none' : '';
+      // Nom du lot en infobulle TOUJOURS (2026-08-15) : il n'apparaît plus
+      // nulle part à l'écran depuis que la grip affiche l'heure de création à
+      // sa place. Le conditionner à l'absence de maîtresse, comme avant, le
+      // rendait introuvable dans le cas nominal — pour une information que
+      // l'utilisateur a lui-même écrite dans son bloc collé.
+      node.head.title = g.name;
       // Capsule englobante (étape 13) : avec une master, la grip n'est que la
       // rangée haute du cadre — c'est la ligne master qui le referme en bas
       // (CSS .grp.has-master). Sans master, la grip EST le cadre entier.
@@ -1912,6 +2145,7 @@ function renderHtml(webview) {
         const queued = w > g.launchedWave;
         const addRow = node.waveAddRows.get(w) || (function () {
           const r = el('div', 'wave-ghost wave-add-row', t('+ this wave'));
+          r.style.display = 'none';
           r.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(g.id, w); });
           r.addEventListener('mouseenter', function () { highlightPromptField(true); });
           r.addEventListener('mouseleave', function () { highlightPromptField(false); });
@@ -1931,16 +2165,30 @@ function renderHtml(webview) {
           if (!mn) { mn = createMemberNode(g.id, m.key); node.members.set(m.key, mn); }
           const c = m.convId ? convById[m.convId] : null;
           mn.conv = c || null;
+          let rw = null;
           if (c) {
             seen.add(c.id);
             convIds.push(c.id);
-            place(mn.slot, 0, rowFor(c).root);
+            rw = rowFor(c);
+            place(mn.slot, 0, rw.root);
             // La ligne de conv occupe la place : tout ce qui traîne d'un rendu
             // précédent (ligne « en attente ») doit partir.
             while (mn.slot.children.length > 1) mn.slot.lastChild.remove();
           } else {
             mn.slot.replaceChildren(pendingLine(m));
           }
+          // Filiation : les sous-lots dont CETTE ligne est la tête. La capsule
+          // n'est posée que maintenant, après rowFor() — c'est lui qui remet
+          // la ligne à nu (updateRow), et il ne sait rien des lots. La teinte
+          // de la capsule est celle du PREMIER enfant : une ligne qui ouvre
+          // deux sous-lots (deux lots lancés depuis la même conversation, cas
+          // rare mais constructible) porte alors une seule couture, à la
+          // couleur du premier — chacun garde sa propre grip/corps, à sa
+          // couleur, juste au-dessus/en-dessous d'elle.
+          const kids = kidsOf.get(g.id + '\\u0000' + m.key) || null;
+          mn.root.classList.toggle('nest-host', !!kids);
+          if (kids) mn.root.style.setProperty('--nest-hue', 'hsl(' + kids[0].hue + ', 45%, 55%)');
+          else mn.root.style.removeProperty('--nest-hue');
           // Lot 10 — plus AUCUNE déduction de statut ici : canClose,
           // canLink et note viennent de member-truth.js, la table de
           // vérité unique. Le webview ne voit qu'une VUE (convById) ; c'est
@@ -1968,7 +2216,19 @@ function renderHtml(webview) {
           // est visible, que son repli se décide. Sans ça, une ligne de membre
           // reste plus haute qu'une ligne plate même quand elle n'affiche rien.
           mn.foot.style.display = (noteText || m.canLink || m.canRelaunch) ? '' : 'none';
+          // Canon de la maîtresse (amendement 2026-08-16) : grip du sous-lot
+          // → ligne d'accueil → corps du sous-lot, même vocabulaire qu'un lot
+          // racine avec master (grip → ligne → corps) — jamais un conteneur
+          // qui engloberait la ligne de A. Le rail du parent continue de
+          // longer le tout (il va du premier au dernier de SES anneaux, un
+          // bloc imbriqué entre deux membres ne l'interrompt pas).
+          if (kids) kids.forEach(function (child) {
+            place(node.body, idx++, groupNodes.get(child.id).head);
+          });
           place(node.body, idx++, mn.root);
+          if (kids) kids.forEach(function (child) {
+            place(node.body, idx++, groupNodes.get(child.id).body);
+          });
         });
         // APRÈS le dernier membre de la vague EN FILE (jamais sur vague
         // lancée/terminée — remplace l'ancien petit « + » du séparateur,
@@ -2030,21 +2290,39 @@ function renderHtml(webview) {
         node.members.delete(key);
       });
 
-      // Rail P1 : mesuré APRÈS placement de tous les enfants du corps —
-      // offsetTop force un reflow, sans coût perceptible vu la cadence des
-      // pushes (30 s mini). Du haut du corps jusqu'au sommet de la ligne
-      // fantôme, jamais plus bas (§3 du plan) : ghostRow, jamais addRow —
-      // depuis le lot B densité, une ligne d'ajout FUSIONNÉE est un enfant de
-      // ghostRow, donc à la même altitude : le pied du rail ne bouge pas.
-      // Re-mesurée aussi par le ResizeObserver ci-dessus (measureRail) —
-      // cette ligne couvre le rendu normal, lui couvre les largeurs qui
-      // bougent SANS nouveau postMessage (cf. commentaire à sa définition).
-      measureRail(node);
-
-      blocks.push({ id: g.id, root: node.root, convIds: convIds });
+      // Un lot imbriqué ne produit PAS de bloc de flux : son parent l'a déjà
+      // rangé dans son corps. L'y laisser en produirait un second, et
+      // layoutFlow le remonterait aussitôt dans le flux général — le sous-lot
+      // sauterait d'un rendu à l'autre.
+      if (!nested) blocks.push({ id: g.id, root: node.root, convIds: convIds });
+    });
+    // Rang d'un bloc dans le flux : il parle pour TOUT ce qu'il affiche,
+    // sous-lots compris — sans quoi un onglet rendu à l'intérieur d'un
+    // sous-lot ne compterait pour personne et le bloc entier pourrait passer
+    // derrière une ligne plate pourtant plus à droite. On remonte la chaîne de
+    // filiation jusqu'au bloc racine (chaîne finie : nesting.js a déjà cassé
+    // les cycles, la borne n'est qu'une ceinture).
+    const blockById = new Map();
+    blocks.forEach(function (b) { blockById.set(b.id, b); });
+    rendered.forEach(function (g) {
+      if (!nestedIds.has(g.id)) return;
+      let cur = g;
+      for (let hop = 0; cur && nestedIds.has(cur.id) && hop < 100; hop++) {
+        cur = byId.get(cur.nestedUnder.groupId);
+      }
+      const root = cur ? blockById.get(cur.id) : null;
+      if (!root) return;
+      (convIdsOf.get(g.id) || []).forEach(function (id) { root.convIds.push(id); });
     });
     groupNodes.forEach(function (node, id) {
       if (live.has(id)) return;
+      // Un groupe dissous peut avoir ses deux moitiés détachées de node.root
+      // (imbriqué au rendu précédent, placées dans le corps de son parent) —
+      // retirer head et body explicitement, node.root seul ne suffit plus
+      // (amendement 2026-08-16). remove() est un no-op sûr sur un nœud déjà
+      // détaché, l'ordre ne compte pas.
+      node.head.remove();
+      node.body.remove();
       node.root.remove();
       groupNodes.delete(id);
     });
@@ -2337,7 +2615,24 @@ function renderHtml(webview) {
     return !m || (m !== 'haiku' && !effectiveEffort(t));
   }
 
+  // Visibilité des lignes fantômes « + new wave » / « + this wave » (2026-08-15) :
+  // les deux déposent le prompt courant du formulaire (addTaskAtWave) — sans
+  // tâche active à déposer, un clic ne fait rien d'autre que rendre le focus
+  // au champ. Les masquer économise l'espace ET n'attire plus l'œil vers un
+  // bouton inutile tant qu'aucun texte n'est tapé. Même critère que Create
+  // (activeTasks().length), pour rester cohérent avec ce qui serait réellement
+  // envoyé. Appelée à chaque changement de saisie (refreshCreateBtn) et à
+  // chaque (re)création de nœud de groupe, où les deux naissent masqués.
+  function refreshGhostVisibility() {
+    const has = activeTasks().length > 0;
+    groupNodes.forEach(function (node) {
+      node.ghostNew.style.display = has ? '' : 'none';
+      node.waveAddRows.forEach(function (r) { r.style.display = has ? '' : 'none'; });
+    });
+  }
+
   function refreshCreateBtn() {
+    refreshGhostVisibility();
     if (!createBtn) return;
     const tasks = activeTasks();
     const n = tasks.length;
@@ -2846,13 +3141,30 @@ function renderHtml(webview) {
     renderUi(msg.state && msg.state.ui);
     const order = (msg.state && msg.state.ui && msg.state.ui.sortOrder) || 'tabOrder';
     const blocks = renderGroups(groups, convById, seen);
+    // Rails P1 : mesurés en UN SEUL passage, APRÈS layoutFlow — cf. l'appel
+    // plus bas. Le mesurer par groupe, en fin de sa propre boucle, était juste
+    // tant que chaque bloc ne contenait que ses propres lignes ; depuis la
+    // filiation, un lot peut recevoir un sous-lot APRÈS avoir été mesuré (rien
+    // n'ordonne le parent avant l'enfant dans la liste), et son rail resterait
+    // alors à la hauteur d'avant.
+    // Nœuds de groupe (re)créés à l'instant : ghostNew/addRow naissent masqués
+    // (cf. createGroupNode) — les remettre à l'état courant du champ, sinon un
+    // groupe qui apparaît pendant que l'user a déjà tapé un prompt affiche des
+    // boutons masqués à tort jusqu'à la prochaine frappe.
+    refreshGhostVisibility();
     const flat = convs.filter(function (c) { return !c.groupId && !masterIds.has(c.id); });
     layoutFlow(blocks, flat, convs, order, seen);
+    // … ici, et pas avant : les blocs viennent seulement d'être posés dans le
+    // flux. offsetTop/offsetHeight d'un nœud DÉTACHÉ du document valent 0 —
+    // au tout premier rendu, mesurer depuis renderGroups posait donc un rail
+    // de hauteur nulle, que seul le ResizeObserver rattrapait après coup.
+    groupNodes.forEach(measureRail);
     pruneRows(seen);
     lastQuota = (msg.state && msg.state.quota) || {};
     renderQuota(lastQuota);
     renderSoundsToggle(!!(msg.state && msg.state.sounds && msg.state.sounds.enabled));
     canaryEl.classList.toggle('show', !!(msg.state && msg.state.canary));
+    tabsFrozenEl.classList.toggle('show', !!(msg.state && msg.state.tabsFrozen));
     renderBatch(msg.state && msg.state.batch);
   });
 

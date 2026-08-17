@@ -12,12 +12,18 @@ const { spawn } = require('child_process');
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'qb-tabs-'));
 os.homedir = () => SANDBOX;                       // AVANT le require de tabs.js
 fs.mkdirSync(path.join(SANDBOX, '.claude'), { recursive: true });
+process.env.QUOTABAR_FREEZE_DETECT_MS = '150';     // AVANT le require de tabs.js
 
 let GROUPS = [];
 let onDidChangeTabs = null;
 let onDidChangeTabGroups = null;
+let onDidChangeWindowState = null;
 const stub = {
   window: {
+    onDidChangeWindowState: (cb) => {
+      onDidChangeWindowState = cb;
+      return { dispose() { onDidChangeWindowState = null; } };
+    },
     tabGroups: {
       get all() { return GROUPS; },
       get activeTabGroup() { return GROUPS.find((g) => g.isActive) || null; },
@@ -212,7 +218,67 @@ async function run() {
   check('onglet fichier sélectionné → le dernier onglet Claude reste mémorisé',
     tracker.getTabs().activeLabel === 'Conv B sélectionnée', String(tracker.getTabs().activeLabel));
 
-  console.log('\n7. dispose');
+  // Cœur du correctif 2026-08-15. L'onglet actif change sans qu'AUCUN événement
+  // ne tire : getTabs() doit dire la vérité quand même. Un souvenir alimenté par
+  // les seuls événements suppose que ceux-ci couvrent tous les chemins
+  // d'activation ; dès qu'un chemin échappe, le surlignage se fige sur une conv
+  // quittée — et le clic sur la bonne ligne ne le répare PAS, puisque son onglet
+  // est déjà actif, donc il n'y a rien à rattraper.
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabA, tabs: [tabA, tabB, tabFile] }];
+  check('onglet actif changé SANS aucun événement → getTabs() le voit (auto-réparation)',
+    tracker.getTabs().activeLabel === 'Conv A sélectionnée', String(tracker.getTabs().activeLabel));
+
+  // Lire frais ne suffit pas : encore faut-il que QUELQU'UN redemande. Au retour
+  // d'un alt-tab, aucun onglet n'a bougé, donc aucun événement d'onglet ne tire
+  // — sans ce signal, le panneau attend le tick d'horloge du moteur (30 s) alors
+  // que c'est l'instant précis où l'utilisateur le regarde.
+  changesBefore = changes;
+  onDidChangeWindowState({ focused: true });
+  check('retour de focus sur la fenêtre → recompute (sans attendre le tick de 30 s)',
+    changes > changesBefore, `changes=${changes} avant=${changesBefore}`);
+  changesBefore = changes;
+  onDidChangeWindowState({ focused: false });
+  check('perte de focus → aucun recompute inutile', changes === changesBefore);
+
+  console.log('\n7. Acte vs API — la preuve la plus fraîche gagne (2026-08-17)');
+  // L'API dit encore « Conv B » (rien n'a bougé côté vscode.window.tabGroups) :
+  // c'est exactement la signature d'une activation qu'on vient de commander
+  // (focusTab() a réussi) mais dont l'événement n'est pas encore arrivé — ou
+  // n'arrivera jamais, fenêtre gelée.
+  tracker.reportActivation('Conv X activée par acte');
+  check('acte rapporté, divergent de l\'API, AUCUN événement encore reçu → il prime tout de suite',
+    tracker.getTabs().activeLabel === 'Conv X activée par acte', String(tracker.getTabs().activeLabel));
+
+  // Un événement d'onglet POSTÉRIEUR arrive — et dit autre chose que l'acte
+  // (cas volontairement retors : prouve que ce n'est pas l'acte qui reste
+  // collé, c'est bien la DATE qui arbitre).
+  const tabY = claude('Conv Y — après l\'événement');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabY, tabs: [tabY] }];
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('événement postérieur à l\'acte, même divergent de lui → l\'API reprend la main',
+    tracker.getTabs().activeLabel === 'Conv Y — après l\'événement', String(tracker.getTabs().activeLabel));
+
+  console.log('\n8. Détecteur de gel (2026-08-17, QUOTABAR_FREEZE_DETECT_MS=150 pour ce banc)');
+  check('état initial : pas gelé', tracker.getTabs().frozen === false);
+  let changesBeforeGel = changes;
+  // L'API reste sur « Conv Y » (posée au §7) : cette activation-ci diverge et
+  // ne sera JAMAIS confirmée par un événement dans ce test.
+  tracker.reportActivation('Conv gelée — jamais confirmée');
+  check('juste après l\'acte divergent : pas encore gelé (le délai n\'est pas écoulé)',
+    tracker.getTabs().frozen === false);
+  await sleep(250);   // > QUOTABAR_FREEZE_DETECT_MS (150 ms)
+  check('silence total après le délai → frozen:true', tracker.getTabs().frozen === true);
+  check('le gel se publie via onChange (le panneau doit pousser le bandeau)', changes > changesBeforeGel);
+
+  changesBefore = changes;
+  const tabA2 = claude('Conv A — canal réveillé');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabA2, tabs: [tabA2] }];
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('un événement d\'onglet reçu → frozen:false (le canal a reparlé)',
+    tracker.getTabs().frozen === false);
+  check('la levée du gel pousse aussi (bandeau retiré)', changes > changesBefore);
+
+  console.log('\n9. dispose');
   tracker.dispose();
   check('notre fichier est retiré (nos onglets ne comptent plus ailleurs)',
     !fs.existsSync(tabsMod.OWN_FILE));

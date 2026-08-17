@@ -88,7 +88,40 @@ function canForceLaunch(members) {
   return nextWave(members, launchedWave(members));
 }
 
+// ── Verrou de stabilisation (incident 2026-08-17) ──────────────────────────
+// Un hook Stop à FEEDBACK (exit 2 — ex. doc-commit-reminder, qui tire à
+// presque chaque fin de tour sur ce poste) pose `done` PUIS relance le tour :
+// pendant les ~2-4 s qui précèdent la première écriture de reprise, la
+// correction isResuming de state.js n'a encore rien à voir (elle exige une
+// écriture postérieure de 2 s au tampon) et la vague se lit « terminée ».
+// Constaté en réel : vague 3 du batch SNCF ouverte à 13:48:40 pendant que le
+// lot 2, relancé par le hook, travaillait jusqu'à 13:52:41. Un lancement est
+// IRRÉVERSIBLE — donc on ne lance plus sur une lecture instantanée : la vague
+// doit rester « prête » STABLE_MS d'affilée, et toute rechute (reprise
+// détectée, membre redevenu busy) remet le compteur à zéro.
+//
+// Fonction PURE, une décision par appel : l'appelant (extension.js) garde
+// l'armement précédent et rappelle à chaque recompute + à l'échéance (timer).
+// Le ▶ manuel ne passe PAS par ici — forcer reste immédiat, décision 5.
+// L'env var ne sert qu'aux BANCS (attendre 15 s réelles par test serait
+// absurde) — jamais documentée côté utilisateur, jamais lue ailleurs.
+const WAVE_STABLE_MS = Number(process.env.CLAUDE_QUOTA_WAVE_STABLE_MS) > 0
+  ? Number(process.env.CLAUDE_QUOTA_WAVE_STABLE_MS)
+  : 15000;
+
+// `prev` = armement précédent ({ wave, since }) ou null ; `wave` = résultat de
+// waveToAutoLaunch à l'instant `now`. Rend :
+//  - launch  : numéro de vague à ouvrir MAINTENANT, ou null ;
+//  - pending : armement à conserver pour le prochain appel, ou null.
+function advanceGate(prev, wave, now, stableMs = WAVE_STABLE_MS) {
+  if (wave == null) return { launch: null, pending: null };
+  if (!prev || prev.wave !== wave) return { launch: null, pending: { wave, since: now } };
+  if (now - prev.since < stableMs) return { launch: null, pending: prev };
+  return { launch: wave, pending: null };
+}
+
 module.exports = {
   waveNumbers, tasksInWave, waveStatus, launchedWave, nextWave,
   waveToAutoLaunch, canForceLaunch,
+  advanceGate, WAVE_STABLE_MS,
 };

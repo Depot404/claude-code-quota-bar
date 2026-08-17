@@ -7,6 +7,10 @@ const { isClaudeTab, claudeTabLabels } = require('./labels');
 // aussi bien de l'union des onglets ici que de la présence d'une session dans
 // state.js) — cf. live-sessions.js.
 const { pidAlive } = require('./live-sessions');
+// Le gel de la copie miroir (cf. section « acte vs API » plus bas) laisse une
+// trace dans le même journal que l'ack : c'est déjà le canal qui a servi à
+// PROUVER l'incident du 2026-08-17 (fenêtre SalaireADC, 3 h de gel).
+const { logEvent } = require('./ack-journal');
 
 // ============================================================================
 // Suivi des onglets de conversation (lot 5).
@@ -54,6 +58,19 @@ const OWN_FILE = path.join(TABS_DIR, `${process.pid}.json`);
 // 150 ms est invisible à l'œil et laisse ~850 ms de marge sur l'exigence « la
 // conv disparaît en moins d'une seconde ».
 const CLOSE_CONFIRM_MS = 150;
+
+// Délai avant de déclarer la copie miroir des onglets GELÉE (2026-08-17,
+// diagnostic prouvé sur une fenêtre restée figée 3 h : voir
+// PLAN_gel_tabs_api_2026-08-17.md). Une activation que NOUS venons de commander
+// (clic panneau → focusTab()) DOIT produire un onDidChangeTabs — VS Code met à
+// jour son modèle de rendu de façon synchrone, l'événement suit en quelques ms
+// sur une fenêtre saine. Si rien n'arrive dans ce délai, le canal RPC de cette
+// fenêtre est mort : ni un tick de plus ni une nouvelle lecture ne le
+// réveilleront, seul un reload de fenêtre ressuscite le canal.
+// Override de banc (même motif que CLAUDE_QUOTA_CANARY_MS, extension.js) :
+// attendre 2 s pour de vrai à chaque run serait un coût de banc, pas une
+// preuve de plus.
+const FREEZE_DETECT_MS = Number(process.env.QUOTABAR_FREEZE_DETECT_MS) || 2000;
 
 function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
 
@@ -151,11 +168,72 @@ function createTabTracker(handlers = {}) {
   // actif), sinon il ne matcherait plus aucun titre après renommage.
   let lastActiveLabel = localActiveLabel();
 
+  // ── Acte vs API : la preuve la plus fraîche gagne (2026-08-17) ────────────
+  // Quand NOUS activons un onglet (clic panneau → focusTab()), on SAIT qui
+  // devient actif sans avoir besoin de relire l'API — utile en soi (moins un
+  // aller-retour) et vital quand la copie miroir de l'hôte d'extension est
+  // GELÉE : lire frais relit alors le gel, recomputer relit le gel, un seul
+  // signal reste vrai : ce qu'on vient de commander. `actReport` porte cette
+  // preuve ; `lastTabsEventAt` porte la preuve concurrente (l'API a bien
+  // parlé DEPUIS). Celle des deux qui est la plus récente gagne (cf. getTabs).
+  //
+  // Compteur monotone, PAS `Date.now()`, pour arbitrer l'ordre : deux appels
+  // synchrones (un événement suivi dans la même passe par un `reportActivation`)
+  // peuvent tomber dans la même milliseconde — l'horloge ne distinguerait plus
+  // « avant » de « après » et l'acte perdrait la main à tort. Même motif que
+  // `createVerdictFilter` (ack-journal.js).
+  let seq = 0;
+  let actReport = null;             // { label, at } | null
+  let lastTabsEventAt = 0;
+  let frozen = false;
+  let freezeTimer = null;
+
+  // Un événement d'onglet RÉEL (onDidChangeTabs ou onDidChangeTabGroups) est
+  // la seule preuve que le canal RPC est vivant — l'un ou l'autre suffit, les
+  // deux meurent ensemble dans l'incident constaté. Toute réception éteint le
+  // détecteur de gel en cours ET lève le gel s'il était posé : le canal vient
+  // de prouver qu'il répond, même si aucun autre champ n'a changé.
+  function noteTabsEventReceived() {
+    lastTabsEventAt = ++seq;
+    if (freezeTimer) { clearTimeout(freezeTimer); freezeTimer = null; }
+    if (frozen) {
+      frozen = false;
+      logEvent('tabs-freeze-cleared', {});
+      onChange();
+    }
+  }
+
   function refreshActiveLabel() {
     const l = localActiveLabel();
     if (!l || l === lastActiveLabel) return false;
     lastActiveLabel = l;
     return true;
+  }
+
+  // Point d'entrée de la moitié « acte » : appelé par extension.js juste après
+  // avoir fait activer un onglet, ici (focus.js `focusConversation`) ou dans
+  // une AUTRE fenêtre qui répond au relais (`createFocusRelay` `onActivated`).
+  // `label` = celui réellement activé (jamais deviné : focusTab() a déjà
+  // trouvé l'onglet par correspondance, cf. focus.js `findTab`).
+  //
+  // Armement du détecteur de gel UNIQUEMENT si l'activation vient de diverger
+  // de ce que l'API dit là, maintenant : sur une fenêtre saine, VS Code met à
+  // jour son modèle de façon SYNCHRONE lors de l'activation — `localActiveLabel()`
+  // renvoie donc déjà `label`, aucune divergence, rien à armer (l'événement,
+  // lui, suivra de toute façon dans la foulée). Une divergence ne peut venir
+  // que d'un canal mort : c'est exactement le signal qu'on cherche.
+  function reportActivation(label) {
+    if (disposed || !label) return;
+    actReport = { label, at: ++seq };
+    if (label === localActiveLabel()) return;
+    clearTimeout(freezeTimer);
+    freezeTimer = setTimeout(() => {
+      freezeTimer = null;
+      if (disposed || frozen) return;
+      frozen = true;
+      logEvent('tabs-freeze-detected', { label });
+      onChange();
+    }, FREEZE_DETECT_MS);
   }
 
   publish(localLabels());
@@ -184,6 +262,9 @@ function createTabTracker(handlers = {}) {
 
   const sub = vscode.window.tabGroups.onDidChangeTabs((e) => {
     if (disposed) return;
+    // Preuve de vie du canal AVANT tout le reste : cet événement, quel que
+    // soit son contenu, désarme le détecteur de gel et lève un gel en cours.
+    noteTabsEventReceived();
     // Republier AVANT tout le reste : les autres fenêtres doivent voir la
     // nouvelle réalité tout de suite. `changed` compte aussi — c'est par lui que
     // passe « le libellé vient de basculer du prompt au vrai ai-title » ; sans
@@ -210,8 +291,38 @@ function createTabTracker(handlers = {}) {
   try {
     groupSub = vscode.window.tabGroups.onDidChangeTabGroups(() => {
       if (disposed) return;
+      // Même preuve de vie que onDidChangeTabs ci-dessus : les deux canaux
+      // meurent ensemble dans l'incident constaté, l'un ou l'autre suffit à
+      // prouver que celui-ci répond encore.
+      noteTabsEventReceived();
       if (refreshActiveLabel()) onChange();
     }) || groupSub;
+  } catch {}
+
+  // Retour de focus sur la fenêtre — alt-tab depuis un autre programme, ou
+  // bascule entre deux fenêtres VS Code.
+  //
+  // AUCUN événement d'onglet ne tire dans ce cas, et c'est logique : rien n'a
+  // bougé dans la barre d'onglets. Mais c'est précisément l'instant où
+  // l'utilisateur REGARDE le panneau — s'il a quitté VS Code depuis une
+  // conversation et y revient sur une autre, ou si l'onglet actif a changé
+  // pendant l'absence, le surlignage doit être juste TOUT DE SUITE. Sans ce
+  // signal, la lecture fraîche de getTabs() est bien correcte mais personne ne
+  // la demande : le panneau attend le tick d'horloge du moteur (30 s,
+  // state.js) pour se remettre d'aplomb, et 30 s après un alt-tab c'est
+  // exactement la fenêtre de temps pendant laquelle on regarde.
+  //
+  // `focused` absent (API plus ancienne) → on recompute quand même : un
+  // recompute de trop est invisible (il ne pousse au webview que si le rendu
+  // change vraiment), un surlignage faux ne l'est pas.
+  // Why : 2026-08-15, 2e signalement — après le passage à la lecture fraîche,
+  // le surlignage restait faux au retour d'alt-tab jusqu'au tick suivant.
+  let focusSub = { dispose() {} };
+  try {
+    focusSub = vscode.window.onDidChangeWindowState((e) => {
+      if (disposed || (e && e.focused === false)) return;
+      onChange();
+    }) || focusSub;
   } catch {}
 
   // Les autres fenêtres republient sur leurs propres changements d'onglets :
@@ -226,16 +337,63 @@ function createTabTracker(handlers = {}) {
   return {
     // Contrat consommé par state.js (buildSnapshot) : `known` dit si l'on sait
     // quelque chose des onglets. À false, AUCUNE conv n'est masquée.
-    // `activeLabel` : dernier onglet Claude sélectionné ICI (le surlignage est
-    // par fenêtre — chaque instance surligne ce que SA fenêtre regarde).
+    //
+    // `activeLabel` : onglet Claude sélectionné ICI (le surlignage est par
+    // fenêtre — chaque instance surligne ce que SA fenêtre regarde). LU À CHAQUE
+    // APPEL, jamais servi depuis le seul souvenir. Le moteur d'état appelle
+    // getTabs() à chaque recompute (extension.js, `tabs:`) : lire la vérité ici
+    // rend le surlignage AUTO-RÉPARABLE. Un souvenir mis à jour uniquement par
+    // événements suppose que ces événements couvrent TOUS les chemins par
+    // lesquels un onglet devient actif — hypothèse déjà démentie une fois (la
+    // bascule de groupe, rattrapée plus haut par onDidChangeTabGroups), et
+    // impossible à prouver exhaustive sur une API qu'on ne maîtrise pas. La
+    // lecture fraîche rend la question sans objet : même si AUCUN événement ne
+    // tire, le prochain recompute (tick de 30 s, ou n'importe quel hook) remet
+    // le surlignage d'aplomb tout seul.
+    //
+    // Le souvenir garde son unique rôle, inchangé : REPLI quand l'onglet actif
+    // n'est pas une conversation Claude — basculer sur un fichier ne doit pas
+    // éteindre le surlignage.
+    //
+    // Why : 2026-08-15, signalé sur capture — le panneau surlignait une
+    // conversation quittée depuis un moment alors qu'un autre onglet était
+    // sélectionné. Aggravant : cliquer sur la BONNE ligne ne réparait rien,
+    // puisque son onglet était déjà actif — donc aucun événement à rattraper,
+    // et le souvenir faux survivait au geste censé le corriger.
+    //
+    // Amendement 2026-08-17 — la lecture fraîche elle-même peut mentir : sur
+    // une fenêtre dont le canal RPC est mort, `localActiveLabel()` relit la
+    // MÊME copie miroir gelée, encore et encore. `actReport` (posé par
+    // `reportActivation`) est alors la preuve la plus fraîche tant qu'AUCUN
+    // événement d'onglet postérieur ne l'a supplanté — comparaison d'ORDRE
+    // (compteur monotone, jamais l'horloge), jamais un timer arbitraire : si
+    // un événement arrive, il reprend la main
+    // (fenêtre saine, ou fenêtre qui se dégèle) ; s'il n'arrive jamais, l'acte
+    // reste vrai indéfiniment (fenêtre gelée). `frozen` : cf. reportActivation
+    // et noteTabsEventReceived — indicateur de gel, publié tel quel.
     getTabs() {
-      return { known: !disposed, labels: allLabels(), activeLabel: disposed ? null : lastActiveLabel };
+      if (disposed) return { known: false, labels: allLabels(), activeLabel: null, frozen: false };
+      const fresh = localActiveLabel();
+      if (fresh) lastActiveLabel = fresh;
+      let activeLabel = fresh || lastActiveLabel;
+      if (actReport && actReport.at > lastTabsEventAt) {
+        activeLabel = actReport.label;
+        lastActiveLabel = actReport.label;
+      }
+      return { known: true, labels: allLabels(), activeLabel, frozen };
     },
+    // Câblage : extension.js appelle ceci juste après avoir fait activer un
+    // onglet — ici (focus.js `focusConversation`) ou dans une autre fenêtre
+    // qui répond au relais (`createFocusRelay` `onActivated`), sur SA propre
+    // instance du tracker.
+    reportActivation,
     dispose() {
       disposed = true;
       clearTimeout(confirmTimer);
+      clearTimeout(freezeTimer);
       try { sub.dispose(); } catch {}
       try { groupSub.dispose(); } catch {}
+      try { focusSub.dispose(); } catch {}
       try { if (watcher) watcher.close(); } catch {}
       // Notre fenêtre s'en va : ses onglets ne doivent plus compter dans l'union
       // des autres. En cas de crash, otherLabels() nettoie via pidAlive().

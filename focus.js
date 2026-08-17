@@ -142,7 +142,13 @@ async function closeTab(match) {
 }
 
 // Réponse au relais : on ne remonte la fenêtre QUE si l'onglet est chez nous.
-function createFocusRelay() {
+// `handlers.onActivated(label)` (2026-08-17, plan gel-tabs) : appelé après un
+// focus réussi (jamais après une fermeture), sur CETTE instance — c'est ELLE
+// qui possède l'onglet et dont le tracker doit savoir qu'un acte vient de s'y
+// produire, cf. tabs.js `reportActivation`. La fenêtre d'origine (celle qui a
+// écrit la requête) n'a rien activé chez elle : rien à lui rapporter.
+function createFocusRelay(handlers = {}) {
+  const onActivated = typeof handlers.onActivated === 'function' ? handlers.onActivated : () => {};
   let watcher = null;
   let lastTs = 0;
 
@@ -164,6 +170,7 @@ function createFocusRelay() {
       else {
         await focusTab(match);
         raiseWindow(match.label);
+        try { onActivated(match.label); } catch {}
       }
     } catch (e) {
       log('relay %s failed: %s', req.action || 'focus', e && e.message);
@@ -181,15 +188,22 @@ function createFocusRelay() {
   return { dispose() { try { if (watcher) watcher.close(); } catch {} } };
 }
 
-// Point d'entrée du clic panneau (message `focusConv` du webview).
+// Point d'entrée du clic panneau (message `focusConv` du webview). Retourne le
+// libellé RÉELLEMENT activé (2026-08-17, plan gel-tabs) quand l'onglet est
+// chez nous — null sinon (rien trouvé ici, relayé à une autre fenêtre : c'est
+// elle qui activera, et donc elle qui rapportera, cf. createFocusRelay
+// `onActivated`). extension.js s'en sert pour prévenir tabs.js
+// (`reportActivation`) qu'une activation vient de se produire, sans attendre
+// que l'API le confirme — la seule preuve qui reste vraie si sa copie miroir
+// des onglets est gelée.
 async function focusConversation(msg) {
   const title = msg && msg.title;
   const tabTitle = (msg && msg.tabTitle) || null;
-  if (!norm(title) && !norm(tabTitle)) return;
+  if (!norm(title) && !norm(tabTitle)) return null;
   const match = findTab(title, tabTitle);
   if (match) {
     await focusTab(match);
-    return;
+    return match.label;
   }
   // Introuvable ici : l'onglet vit peut-être dans une autre fenêtre VS Code.
   // On journalise les libellés vus : c'est exactement ce qui manquait pour
@@ -204,6 +218,7 @@ async function focusConversation(msg) {
     ts: Date.now(),
     origin_pid: process.pid,
   });
+  return null;
 }
 
 // PLUS AUCUN ÉMETTEUR DE FERMETURE ICI (2026-08-07). Le panneau n'agit que sur

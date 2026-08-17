@@ -47,10 +47,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
-const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, pendingInteractiveAt, interruptedAt, lastActivityTs, firstUserText } = require('./hooks/transcript.js');
+const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, pendingInteractiveAt, interruptedAt, lastActivityTs, firstUserText, pendingResumeSignals } = require('./hooks/transcript.js');
 const { labelMatches, convMatchesLabel } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
-const { liveSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
+const { liveSessionIds, foreignSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
 const { cleanLabel } = require('./session-titles.js');
 const { computeSupersededBy } = require('./supersede.js');
 
@@ -165,7 +165,21 @@ function isResuming(since, activity, now) {
 // transcript illisible, message non daté) → repli mtime = comportement d'avant.
 // busy→stale reste sur le mtime : là, N'IMPORTE QUELLE écriture est un signe de
 // vie, et le doute doit profiter à `busy`.
-function effectiveState(entry, mtime, now, isLive, activityTs) {
+// `resumeSignals` (optionnel, incident vagues 2026-08-17) : THUNK vers
+// pendingResumeSignals du transcript — « la conv va-t-elle reprendre TOUTE
+// SEULE ? » (tâche de fond sans notification, réveil ScheduleWakeup à venir).
+// Un `done` dans cette situation est un mensonge du point de vue de la TÂCHE :
+// le tour est fini, pas le travail — le lot 1 du batch SNCF a rendu la main à
+// 13:37:50 en attendant son agent de fond, le moteur de vagues a lu « done »
+// et a ouvert la vague 2 sur un lot inachevé. On corrige donc en `busy`, ce
+// qui est vrai au sens utile (« elle avance seule, pas la peine d'y aller »),
+// et TOUT s'aligne d'un coup : ligne, compteur du chip, moteur de vagues, son
+// de fin (différé jusqu'à la VRAIE fin). SEULEMENT si la session est VIVANTE :
+// un CLI mort ne recevra jamais sa notification — la conclure « en cours »
+// gèlerait la vague pour l'éternité, exactement le travers que member-truth.js
+// interdit. Thunk et pas valeur : le scan (4 Mo) ne doit tourner que si on en
+// arrive là — jamais pendant qu'une conv écrit (elle est `busy` bien avant).
+function effectiveState(entry, mtime, now, isLive, activityTs, resumeSignals) {
   if (!entry || !entry.state) return 'idle';
   const since = entry.since || entry.updated_at || 0;
   const activity = activityTs || mtime;
@@ -174,8 +188,14 @@ function effectiveState(entry, mtime, now, isLive, activityTs) {
       return activity > since + RESUME_GRACE_MS ? busyOrStale(mtime, now, isLive) : 'waiting';
     case 'busy':
       return busyOrStale(mtime, now, isLive);
-    case 'done':
-      return isResuming(since, activity, now) ? 'busy' : 'done';
+    case 'done': {
+      if (isResuming(since, activity, now)) return 'busy';
+      if (isLive && typeof resumeSignals === 'function') {
+        const rs = resumeSignals();
+        if (rs && (rs.pendingTask || (rs.wakeupAt && rs.wakeupAt > now))) return 'busy';
+      }
+      return 'done';
+    }
     default:
       return 'idle';
   }
@@ -293,8 +313,24 @@ const TAB_OPEN_MISS_TOLERANCE = 2; // 1 manque toléré, 2 consécutifs = perdu
 // misses : Map<sessionId, count> tenue par l'appelant (créée fraîche à chaque
 // buildSnapshot() isolé — les bancs restent déterministes — ou tenue par
 // l'engine à travers ses recomputes, seul cas où la tolérance s'exerce vraiment).
-function resolveTabOpen(sessionId, rawOpen, misses) {
+// isLive (lot gel-tabs 2026-08-17, invariant « vivante ⇒ ouverte ») : une
+// session NÉE D'UNE FENÊTRE VS CODE (liveSessionIds, jamais foreignSessionIds —
+// cf. isGone) dont le process CLI tourne ENCORE ne peut PAS avoir son onglet
+// fermé : fermer l'onglet tue le CLI (même constat que isGone). La tolérance
+// ci-dessus ne protège que d'un bruit de matching PASSAGER ; elle s'épuise si le
+// titre du transcript (ai-title) ne matche durablement aucun libellé — cas réel
+// d'une conv de cadrage tout juste devenue maîtresse d'un groupe, dont
+// session-titles.js (state.vscdb, écrit par le renderer AVEC latence) n'a pas
+// encore la paire sessionId→titre-onglet réel. `tabOpen` retombait alors à
+// `false` ~30 s, et panel.js (rendu STANDARD, même fabrique pour un membre plat
+// et pour la ligne maîtresse) barrait le titre comme « terminée · onglet fermé »
+// sur une conversation dont l'onglet était grand ouvert à l'écran. Une session
+// vivante ne descend donc plus JAMAIS à false, quel que soit le nombre de
+// ratés — le doute n'a plus lieu d'être, la preuve de vivacité est plus forte
+// que n'importe quel manque de libellé.
+function resolveTabOpen(sessionId, rawOpen, misses, isLive) {
   if (rawOpen) { misses.delete(sessionId); return true; }
+  if (isLive) return true;
   const n = (misses.get(sessionId) || 0) + 1;
   misses.set(sessionId, n);
   return n < TAB_OPEN_MISS_TOLERANCE;
@@ -307,8 +343,10 @@ function resolveTabOpen(sessionId, rawOpen, misses) {
 const MATCHABLE_TITLE_SOURCES = new Set(['ai-title', 'tab-store']);
 
 // c : { sessionId, title, tabTitle, titleSource, state, mtime }
-// live : Set des sessionId dont le process CLI tourne (live-sessions.js)
-function isGone(c, tabs, closedAt, live = NO_LIVE) {
+// live    : Set des sessionId dont le process CLI tourne DANS UNE FENÊTRE VS CODE
+// foreign : Set des sessionId vivants dont l'origine prouve le contraire
+//           (Remote Control/mobile, terminal, agent SDK…) — cf. live-sessions.js
+function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE) {
   if (!tabs.known) return false;
   // Ouverte ici ou dans une autre fenêtre (union publiée par tabs.js).
   if (hasOpenTab(c, tabs)) return false;
@@ -330,10 +368,26 @@ function isGone(c, tabs, closedAt, live = NO_LIVE) {
   // officielle, plus aucun titre ne matche, conv ouverte et au travail masquée.
   if (live.has(c.sessionId)) return false;
 
-  // Sans onglet mais vivante = session CLI/terminal légitime → on garde.
-  // `stale` n'en est pas : c'est « plus rien d'écrit depuis 5 min », donc on ne
-  // peut pas la dire vivante — et c'est justement l'état où atterrit une conv
-  // fermée pendant que VS Code était éteint (SessionEnd n'ayant pas tiré).
+  // …mais vivante AILLEURS n'est pas vivante ICI (2026-08-17). Une session du
+  // serveur Remote Control (ouverte depuis le mobile, exécutée sur ce PC dans
+  // le même dossier de travail, donc le même dossier de transcripts), un
+  // terminal, un agent SDK : aucun onglet ne les portera jamais. Sans ce test
+  // elles restaient affichées en permanence — le process vit tant que le serveur
+  // RC tient la session — sur une ligne où cliquer ne mène nulle part, et en
+  // consommant une des `maxItems` places d'une vraie conversation.
+  // Placé APRÈS hasOpenTab et après `live` : les deux preuves d'un onglet d'ici
+  // l'emportent, notamment quand une conv mobile est REPRISE dans VS Code (même
+  // sessionId, deux process au registre).
+  // C'est une preuve POSITIVE, pas un défaut de correspondance : entrypoint
+  // absent ou inconnu ⇒ l'ensemble ne la contient pas ⇒ rien ne change.
+  if (foreign.has(c.sessionId)) return true;
+
+  // Sans onglet mais au travail : on garde, faute de savoir. Ce filet ne couvre
+  // plus que les sessions ABSENTES du registre (process mort alors que les hooks
+  // disent encore busy) — celles dont on connaît l'origine ont déjà tranché
+  // ci-dessus. `stale` n'en est pas : c'est « plus rien d'écrit depuis 5 min »,
+  // donc on ne peut pas la dire vivante — et c'est justement l'état où atterrit
+  // une conv fermée pendant que VS Code était éteint (SessionEnd n'ayant pas tiré).
   if (c.state === 'busy' || c.state === 'waiting') return false;
 
   // Titre de repli : il ne peut PAS matcher un libellé d'onglet de façon fiable,
@@ -385,7 +439,7 @@ function createTranscriptReader() {
   // (aucun assistant encore écrit) reste « — » quelques secondes : rien à
   // mémoriser tant que le premier tour n'a pas produit de réponse.
   const lastAssistant = new Map();
-  return function read(filePath) {
+  function read(filePath) {
     let stat;
     try { stat = fs.statSync(filePath); } catch { return null; }
     const key = `${stat.mtimeMs}:${stat.size}`;
@@ -437,7 +491,29 @@ function createTranscriptReader() {
 
     cache.set(filePath, { key, value });
     return value;
+  }
+  // Scan des signaux de reprise autonome (incident vagues 2026-08-17) : cache
+  // SÉPARÉ, même clé (mtime, size), mais calculé À LA DEMANDE — effectiveState
+  // ne le tire que sur une entrée `done` non-resuming, donc une fois par fin
+  // de tour (le fichier ne bouge plus → une seule lecture de 4 Mo, cachée).
+  // L'accrocher au lecteur (plutôt qu'un paramètre de plus à buildSnapshot)
+  // préserve la signature publique — les bancs qui injectent leur reader
+  // continuent de passer, et un reader nu (sans la propriété) dégrade en
+  // silence, règle du projet.
+  const resumeCache = new Map();
+  read.resumeSignals = function (filePath) {
+    if (!filePath) return null;
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { return null; }
+    const key = `${stat.mtimeMs}:${stat.size}`;
+    const hit = resumeCache.get(filePath);
+    if (hit && hit.key === key) return hit.value;
+    let value = null;
+    try { value = pendingResumeSignals(filePath); } catch { value = null; }
+    resumeCache.set(filePath, { key, value });
+    return value;
   };
+  return read;
 }
 
 // Une session appartient au workspace si son transcript vit dans le dossier
@@ -501,6 +577,9 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
 
   // Identités STABLES, indépendantes des libellés (lot 2026-07-22).
   const live = (typeof opts.liveSessions === 'function' && opts.liveSessions()) || NO_LIVE;
+  // Sessions vivantes qui n'appartiennent PAS à une fenêtre VS Code (cf. isGone).
+  // Absente des opts (bancs d'avant ce lot) ⇒ ensemble vide ⇒ comportement d'avant.
+  const foreign = (typeof opts.foreignSessions === 'function' && opts.foreignSessions()) || NO_LIVE;
   const titles = (typeof opts.sessionTitles === 'function' && opts.sessionTitles()) || new Map();
 
   if (projectDir) {
@@ -579,7 +658,14 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     const t = c.transcript ? readTranscript(c.transcript) : null;
     // `live.has` : process CLI vivant ⇒ un `busy` muet reste `busy` (travail en
     // cours), jamais `stale` par simple vieillissement du mtime.
-    let state = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId), t && t.activityTs);
+    let state = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId), t && t.activityTs,
+      // Reprise autonome (tâche de fond, réveil programmé) : thunk — le scan ne
+      // tourne que si effectiveState en a besoin (entrée `done` d'une session
+      // vivante), et le lecteur le cache par (mtime, size). Reader de banc sans
+      // la propriété → undefined → dégradation silencieuse, comportement d'avant.
+      typeof readTranscript.resumeSignals === 'function'
+        ? () => readTranscript.resumeSignals(c.transcript)
+        : undefined);
     // Interruption manuelle (bouton Stop / Échap) et question interactive en
     // attente : deux faits qu'AUCUN hook ne signale, donc que seul le transcript
     // connaît — cf. applyTranscriptTruth, qui arbitre par la DATE des preuves.
@@ -604,7 +690,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     const title = picked.title;
     const gone = isGone(
       { sessionId: c.sessionId, title, tabTitle, titleSource: picked.titleSource, state, mtime: c.mtime },
-      tabs, closedAt, live
+      tabs, closedAt, live, foreign
     );
     if (gone) {
       // Jamais rendue — mais son identité reste candidate à la supplantation
@@ -632,7 +718,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // passe par resolveTabOpen (lot « bascule au focus ») pour absorber un
       // manque isolé plutôt que de le croire tout de suite.
       tabOpen: tabs.known
-        ? resolveTabOpen(c.sessionId, hasOpenTab({ title, tabTitle }, tabs), tabOpenMisses)
+        ? resolveTabOpen(c.sessionId, hasOpenTab({ title, tabTitle }, tabs), tabOpenMisses, live.has(c.sessionId))
         : false,
       // Le consommateur (focus.js, extension.js) rematche des libellés
       // d'onglets contre ces DEUX titres — cf. convMatchesLabel.
@@ -778,7 +864,10 @@ function createStateEngine(options = {}) {
   // `liveSessions` a un défaut RÉEL : le registre est du Node pur, lisible d'ici
   // (contrairement au state.vscdb, dont seul l'hôte d'extension connaît le
   // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
-  const opts = { liveSessions: liveSessionIds, ...DEFAULTS, ...options, closedAt, tabOpenMisses };
+  const opts = {
+    liveSessions: liveSessionIds, foreignSessions: foreignSessionIds,
+    ...DEFAULTS, ...options, closedAt, tabOpenMisses,
+  };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
   // Part de la clé de rendu qui N'EST PAS dans les conversations (2026-08-06).
   //

@@ -58,10 +58,12 @@ async function run() {
   check('onglet trouvé dans un groupe NON actif', !!m && m.index === 1, m ? `index=${m.index}` : 'aucun match');
 
   COMMANDS = [];
-  await focus.focusConversation({ title: 'Add invoice PDF export button', id: 'x' });
+  let activated = await focus.focusConversation({ title: 'Add invoice PDF export button', id: 'x' });
   check('focus du 2e groupe puis openEditorAtIndex(1)',
     COMMANDS.join(' + ') === 'workbench.action.focusSecondEditorGroup + workbench.action.openEditorAtIndex(1)',
     COMMANDS.join(' + '));
+  check('focusConversation retourne le libellé RÉELLEMENT activé (plan gel-tabs 2026-08-17)',
+    activated === 'Add invoice PDF expor…', String(activated));
 
   console.log('\n3. Ambiguïté : deux groupes, même préfixe → le groupe actif gagne');
   GROUPS = [
@@ -76,8 +78,10 @@ async function run() {
   try { fs.unlinkSync(focus.REQUEST_PATH); } catch {}
   GROUPS = [group(1, [claude('Rien à voir')], true)];
   COMMANDS = [];
-  await focus.focusConversation({ title: 'Conv ouverte dans une autre fenêtre', id: 'sess-42' });
+  activated = await focus.focusConversation({ title: 'Conv ouverte dans une autre fenêtre', id: 'sess-42' });
   check('aucune commande VS Code émise', COMMANDS.length === 0, COMMANDS.join(','));
+  check('rien trouvé ICI → focusConversation retourne null (rien à rapporter sur CE tracker)',
+    activated === null, String(activated));
   const req = JSON.parse(fs.readFileSync(focus.REQUEST_PATH, 'utf8'));
   check('requête déposée avec titre/session/pid/ts',
     req.title === 'Conv ouverte dans une autre fenêtre' && req.session_id === 'sess-42'
@@ -106,6 +110,32 @@ async function run() {
   check('le relais transporte AUSSI le titre d\'onglet (sinon la voisine ne trouve rien)',
     req2.tab_title === 'Titre d\'onglet réel', JSON.stringify(req2));
   try { fs.unlinkSync(focus.REQUEST_PATH); } catch {}
+
+  console.log('\n6. Le relais rapporte l\'activation (plan gel-tabs 2026-08-17)');
+  // Cette instance POSSÈDE l'onglet demandé : c'est donc ELLE qui doit
+  // rapporter l'acte à son propre tracker (extension.js branche
+  // `tabTracker.reportActivation` sur ce hook) — jamais la fenêtre d'origine,
+  // qui n'a rien activé chez elle.
+  const activatedLabels = [];
+  const relay = focus.createFocusRelay({ onActivated: (label) => activatedLabels.push(label) });
+  try {
+    GROUPS = [group(1, [claude('Onglet possédé ici')], true)];
+    try { fs.unlinkSync(focus.REQUEST_PATH); } catch {}
+    const tmp = `${focus.REQUEST_PATH}.test.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({
+      title: 'Onglet possédé ici', ts: Date.now(), origin_pid: process.pid + 1,
+    }));
+    fs.renameSync(tmp, focus.REQUEST_PATH);
+    // fs.watch est asynchrone : laisser le relais réagir (même marge que
+    // test-relay.js pour ce genre d'attente).
+    await new Promise((r) => setTimeout(r, 700));
+    check('onActivated appelé avec le libellé de l\'onglet focusé',
+      activatedLabels.length === 1 && activatedLabels[0] === 'Onglet possédé ici',
+      JSON.stringify(activatedLabels));
+  } finally {
+    relay.dispose();
+    try { fs.unlinkSync(focus.REQUEST_PATH); } catch {}
+  }
 
   console.log(`\n${pass} ok, ${fail} fail`);
   process.exit(fail ? 1 : 0);

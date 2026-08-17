@@ -216,10 +216,35 @@ function run() {
   check('unsetMaster sur un groupe sans maîtresse : sans effet', s11.unsetMaster('gm') === false);
   check('setMaster sur un groupe inconnu : sans effet', s11.setMaster('nope', 'x', 'y') === false);
 
+  // ── Instant du lien (plan « la maîtresse n'engage que son dernier lot ») ──
+  // C'est LUI qui départage deux groupes revendiquant la même conversation :
+  // sans lui, le rendu tranchait par l'ordre du store, et re-lier une vieille
+  // maîtresse à la main restait sans effet visible.
+  const stLink = fakeStorage();
+  let clockLink = 5000;
+  let sLink = createGroupStore({ load: stLink.load, save: stLink.save, now: () => clockLink, newId: () => 'gLink' });
+  sLink.create('Chantier', [{ prompt: 'a' }]);
+  check('un groupe naît sans lien de maîtresse daté', sLink.get('gLink').masterLinkedAt === 0);
+  sLink.setMaster('gLink', 'sess-m', 'Cadrage');
+  check('setMaster stampe l\'instant du lien', sLink.get('gLink').masterLinkedAt === 5000);
+  clockLink = 9000;
+  sLink.setMaster('gLink', 'sess-autre', 'Autre cadrage');
+  check('… et le re-stampe à chaque lien accepté (le geste doit avoir un effet)',
+    sLink.get('gLink').masterLinkedAt === 9000);
+  check('… et il persiste', stLink.raw()[0].masterLinkedAt === 9000);
+  sLink = createGroupStore({ load: stLink.load, save: stLink.save, now: () => clockLink });
+  check('… et survit au reload', sLink.get('gLink').masterLinkedAt === 9000);
+
   // Stockage écrit AVANT ce lot : aucun champ master, aucune migration.
   const legacy = sanitizeGroup({ id: 'old', name: 'Ancien', members: [{ key: 'm1' }] });
   check('stockage antérieur au lot 11 : masterSessionId null, masterTitle vide',
     legacy.masterSessionId === null && legacy.masterTitle === '');
+  check('stockage antérieur au plan « dernier lot » : masterLinkedAt = createdAt du groupe',
+    sanitizeGroup({ id: 'old', name: 'Ancien', createdAt: 777, members: [] }).masterLinkedAt === 777);
+  check('… et 0 quand même le createdAt manque (jamais NaN, jamais undefined)',
+    legacy.masterLinkedAt === 0);
+  check('masterLinkedAt illisible dans le stockage : repli createdAt, jamais interprété',
+    sanitizeGroup({ id: 'x', name: 'X', createdAt: 555, masterLinkedAt: 'hier', members: [] }).masterLinkedAt === 555);
   check('masterSessionId non-string dans le stockage : jeté, jamais interprété',
     sanitizeGroup({ id: 'x', name: 'X', masterSessionId: 42, masterTitle: {}, members: [] }).masterSessionId === null);
 

@@ -167,7 +167,11 @@ function member(key, wave, prompt, sessionId, launchedAt) {
 // AUTRE groupe — teste le refus « maîtresse déjà revendiquée ».
 WORKSPACE_STORE.set('batchGroups', [
   { id: 'gOther', name: 'Other', createdAt: now, collapsed: false, masterSessionId: null, masterTitle: '', members: [member('m1', 1, 'x', 'claimedMember', now)] },
-  { id: 'gOtherMaster', name: 'OtherMaster', createdAt: now, collapsed: false, masterSessionId: 'claimedMaster', masterTitle: 'Déjà maîtresse d’un autre groupe', members: [member('m1', 1, 'x', null, null)] },
+  // `createdAt` reculé d'une minute : c'est le repli de `masterLinkedAt` pour
+  // un stockage antérieur au plan « dernier lot » (groups.js), donc la date que
+  // §4b compare au lien posé pendant le test — elle doit être strictement plus
+  // ancienne pour que le verdict soit un fait, pas une course d'horloge.
+  { id: 'gOtherMaster', name: 'OtherMaster', createdAt: now - 60 * 1000, collapsed: false, masterSessionId: 'claimedMaster', masterTitle: 'Déjà maîtresse d’un autre groupe', members: [member('m1', 1, 'x', null, null)] },
 ]);
 
 async function waitFor(pred, label) {
@@ -259,13 +263,27 @@ async function run() {
     JSON.stringify((lastState().groups.find((g) => g.id === 'gOther') || {}).members) === JSON.stringify(gOtherMembersBefore));
   check('message affiché', infoCalls.length === 1, JSON.stringify(infoCalls));
 
-  console.log('\n4b. Refus — l’onglet actif désigne une conv déjà maîtresse d’un AUTRE groupe → no-op + message');
+  console.log('\n4b. ACCEPTÉ — l’onglet actif est déjà maîtresse d’un AUTRE groupe (plan « dernier lot »)');
+  // C'était un refus jusqu'au 2026-08-15. Une conv de cadrage qui enchaîne les
+  // lots est revendiquée par plusieurs groupes : c'est légitime, et la règle
+  // donne la tête au lien le PLUS RÉCENT — ici celui qu'on vient de poser. Le
+  // lot précédent ne perd pas son lien (rien n'est réécrit dans le store), il
+  // cède sa ligne de tête AU RENDU. Refuser ici privait le geste de son seul
+  // usage : re-pointer une maîtresse.
   setActiveTab(tabClaimedMaster);
   infoCalls.length = 0;
   receiveHandler({ type: 'linkConvToActiveMaster', id: 'target' });
-  await waitFor(() => infoCalls.length > 0, 'message déjà revendiquée (maîtresse)');
-  check('aucun groupe créé', groupCount(lastState()) === groupsAtStart, groupCount(lastState()));
-  check('message affiché', infoCalls.length === 1, JSON.stringify(infoCalls));
+  await waitFor(() => groupCount(lastState()) === groupsAtStart + 1, 'groupe créé malgré la maîtresse déjà revendiquée');
+  const gClaim = groupWithMaster(lastState(), 'claimedMaster');
+  check('un groupe est né, avec cette conv pour maîtresse', !!gClaim && gClaim.id !== 'gOtherMaster', JSON.stringify(lastState().groups.map((x) => [x.id, x.master && x.master.convId])));
+  check('la cible en est l’unique membre',
+    !!gClaim && gClaim.members.length === 1 && gClaim.members[0].convId === 'target', JSON.stringify(gClaim && gClaim.members));
+  check('le lot précédent a CÉDÉ sa tête (master null au rendu, jamais deux capsules pour une conv)',
+    (lastState().groups.find((x) => x.id === 'gOtherMaster') || {}).master === null,
+    JSON.stringify((lastState().groups.find((x) => x.id === 'gOtherMaster') || {}).master));
+  check('… mais il est toujours là, rien n’a été délié ni dissous',
+    !!lastState().groups.find((x) => x.id === 'gOtherMaster'));
+  check('aucun message d’erreur', infoCalls.length === 0, JSON.stringify(infoCalls));
 
   console.log('\n5. Succès — résolution unique, ni onglet ni cible déjà revendiqués → groupe créé, master posée');
   setActiveTab(tabSuccessMaster);

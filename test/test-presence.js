@@ -42,7 +42,7 @@ check('done sans onglet → MASQUÉE',
   gone(conv({ state: 'done' }), noTabs) === true);
 check('stale sans onglet → MASQUÉE (fermeture survenue extension éteinte)',
   gone(conv({ state: 'stale' }), noTabs) === true);
-check('busy sans onglet → affichée (session CLI/terminal légitime)',
+check('busy sans onglet, origine INCONNUE → affichée (filet, cf. 3quinquies)',
   gone(conv({ state: 'busy' }), noTabs) === false);
 check('waiting sans onglet → affichée',
   gone(conv({ state: 'waiting' }), noTabs) === false);
@@ -92,6 +92,31 @@ check('stale + session vivante → affichée',
 closed = new Map([['s1', Date.now()]]);
 check('fermeture observée pendant la grâce → MASQUÉE malgré la session vivante',
   gone(conv({ state: 'busy' }), noTabs, closed, live) === true);
+
+// ── 3quinquies. Vivante AILLEURS (Remote Control / mobile, terminal, SDK) ────
+// Le serveur RC exécute ses sessions ICI, dans le même dossier de travail : même
+// dossier de transcripts, donc mêmes candidates. Aucun onglet ne les portera
+// jamais → masquées, quel que soit leur état. Signalé par l'user le 2026-08-17.
+console.log('\n3quinquies. Session vivante hors VS Code (RC/mobile, terminal, SDK)');
+const foreign = new Set(['s1']);
+const goneF = (c, t, closed = new Map(), live = new Set(), f = foreign) =>
+  state.isGone(c, t, closed, live, f);
+check('busy sans onglet + origine étrangère → MASQUÉE (le filet ne joue plus)',
+  goneF(conv({ state: 'busy' }), noTabs) === true);
+check('waiting sans onglet + origine étrangère → MASQUÉE',
+  goneF(conv({ state: 'waiting' }), noTabs) === true);
+check('titre de repli (1er message, cas réel du mobile) → MASQUÉE',
+  goneF(conv({ state: 'busy', titleSource: 'first-user' }), noTabs) === true);
+check('idle + origine étrangère → MASQUÉE',
+  goneF(conv({ state: 'idle' }), noTabs) === true);
+check('reprise dans VS Code : onglet matchant → affichée malgré l\'origine',
+  goneF(conv({ state: 'busy' }), tabs('Implement part 5 closed…')) === false);
+check('reprise dans VS Code : process VS Code vivant → affichée malgré l\'origine',
+  goneF(conv({ state: 'busy' }), noTabs, new Map(), new Set(['s1'])) === false);
+check('une AUTRE conv étrangère ne masque pas celle-ci',
+  goneF(conv({ state: 'busy' }), noTabs, new Map(), new Set(), new Set(['autre'])) === false);
+check('ensemble vide (entrypoint absent/inconnu) → comportement d\'avant le lot',
+  goneF(conv({ state: 'busy' }), noTabs, new Map(), new Set(), new Set()) === false);
 
 console.log('\n3ter. Titre d\'onglet divergent (state.vscdb)');
 const divergent = {
@@ -327,6 +352,23 @@ console.log('\n7. resolveTabOpen : tolère un manque isolé, pas deux consécuti
     resolve('s2', false, new Map()) === true);
 }
 
+// ── Lot gel-tabs (2026-08-17) : vivante ⇒ ouverte, JAMAIS de tolérance épuisée
+console.log('\n7bis. resolveTabOpen : session vivante née VS Code → jamais false, même après N ratés');
+{
+  const resolve = state.resolveTabOpen;
+  const missesLive = new Map();
+  check('premier raté, session vivante → true (comme sans le fix)',
+    resolve('s1', false, missesLive, true) === true);
+  check('deuxième raté CONSÉCUTIF, session vivante → true quand même (le fix)',
+    resolve('s1', false, missesLive, true) === true);
+  check('dixième raté d\'affilée, toujours vivante → toujours true',
+    Array.from({ length: 8 }).every(() => resolve('s1', false, missesLive, true) === true));
+  const missesDead = new Map();
+  resolve('s1', false, missesDead, false);
+  check('… mais la MÊME séquence sans preuve de vivacité retombe à false au 2e raté (comportement d\'avant)',
+    resolve('s1', false, missesDead, false) === false);
+}
+
 console.log('\n8. buildSnapshot : un recompute isolé sans match ne fait pas tomber le chip');
 {
   // 'e' : préfixe partagé avec d'autres membres d'un même groupe (« Implement
@@ -356,6 +398,61 @@ console.log('\n8. buildSnapshot : un recompute isolé sans match ne fait pas tom
   snap = snapshot(() => noTabs, { tabOpenMisses: misses });
   check('deux manques consécutifs → le chip finit par disparaître',
     findE(snap).tabOpen === false);
+}
+
+console.log('\n8bis. buildSnapshot : le cas témoin « master barrée au collage » (lot gel-tabs 2026-08-17)');
+{
+  // Reproduit l'incident : une conv de cadrage VIVANTE vient d'être désignée
+  // maîtresse d'un batch. Son ai-title (le seul titre que le transcript
+  // connaît) ne matche PAS l'onglet réel — VS Code n'a pas encore renommé
+  // l'onglet depuis le premier prompt — et session-titles.js (state.vscdb,
+  // écrit par le renderer avec latence) n'a pas encore la paire non plus :
+  // AUCUNE des deux sources de titre matchable ne trouve son onglet, deux
+  // recomputes consécutifs plus tard. panel.js rend la maîtresse avec la même
+  // fabrique qu'une ligne plate (rowFor) et barre `state==='done' && !tabOpen`
+  // — c'est ce `tabOpen` que ce banc vérifie, membre ou maîtresse confondus
+  // (les deux lisent le même champ du même objet conv).
+  const MASTER_WS = 'C:\\Users\\Test\\Projets VSCODE\\MasterBug';
+  const dir = state.projectDirFor(MASTER_WS);
+  fs.mkdirSync(dir, { recursive: true });
+  const mFile = path.join(dir, 'm.jsonl');
+  fs.writeFileSync(mFile, [userMsg('peu importe'), assistant, { type: 'ai-title', aiTitle: 'Fix tab focus mismatch with Claude convs' }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const existingState = JSON.parse(fs.readFileSync(path.join(SANDBOX, '.claude', 'sessions-state.json'), 'utf8'));
+  existingState.sessions.m = { state: 'done', since: Date.now(), updated_at: Date.now(), transcript: mFile };
+  fs.writeFileSync(path.join(SANDBOX, '.claude', 'sessions-state.json'), JSON.stringify(existingState));
+
+  // L'onglet réel, tel qu'affiché à l'écran : le premier prompt, pas l'ai-title.
+  const realTab = () => tabs('tojours et encore le meme souci…');
+  const findM = (snap) => snap.conversations.find((c) => c.sessionId === 'm');
+  const build = (live, misses) => state.buildSnapshot({
+    workspacePath: MASTER_WS, recentMs: 4 * 3600 * 1000, maxItems: 12, tabs: realTab,
+    liveSessions: () => new Set(live), sessionTitles: () => new Map(), tabOpenMisses: misses,
+  }, state.createTranscriptReader());
+
+  // Session VIVANTE (née d'une fenêtre VS Code) : deux recomputes consécutifs
+  // sans aucun match de titre — le titre réel de l'onglet n'arrivera que plus
+  // tard (session-titles.js rattrape son retard, cf. plan).
+  let misses = new Map();
+  build(['m'], misses);
+  let snap = build(['m'], misses);
+  check('conv done, vivante, AUCUN titre ne matche, 2 recomputes consécutifs → tabOpen reste true',
+    findM(snap).tabOpen === true, JSON.stringify(findM(snap)));
+  check('… donc pas de rendu barré (panel.js : state===done && !tabOpen)',
+    !(findM(snap).state === 'done' && !findM(snap).tabOpen));
+
+  // Même conv, mais SESSION MORTE (CLI déjà éteint) : comportement d'avant —
+  // isGone() (mécanisme SÉPARÉ, cf. plus haut §1) masque déjà entièrement une
+  // conv `done` sans process vivant dont aucun titre matchable ne matche un
+  // onglet, avant même que tabOpen entre en jeu — elle sort donc de la liste,
+  // ce qui est le comportement voulu (rien à barrer, rien à afficher). La
+  // comparaison au niveau de `resolveTabOpen` seul (avec/sans preuve de
+  // vivacité) est déjà faite au §7bis.
+  misses = new Map();
+  build([], misses);
+  snap = build([], misses);
+  check('même conv, session MORTE, aucun titre ne matche → masquée entièrement (isGone, inchangé)',
+    findM(snap) === undefined, JSON.stringify(snap.conversations.map((c) => c.sessionId)));
 }
 
 console.log('\n9. renderKey : tabOpen fait partie de la clé de rendu');

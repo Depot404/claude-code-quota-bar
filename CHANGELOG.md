@@ -1,5 +1,69 @@
 # Changelog
 
+## [2.40.1] - 2026-08-17
+
+### Fixed
+- **"Create" from a conversation that's already heading a live batch now joins that batch instead of starting a rival one.** Pasting a block whose framing conversation already leads a batch still in progress, then clicking Create, used to spin up a second, separate batch — and since a conversation can only visibly head one batch at a time, the new one stole the header right out from under the batch already running, which was left looking empty. The new tasks now queue onto the end of the existing batch instead, opening at the wave engine's own pace, with a short notice confirming where they landed. A batch that has already finished is untouched by this and still starts a fresh one, as before.
+
+## [2.40.0] - 2026-08-17
+
+### Fixed
+- **The highlight now follows the row you click even when VS Code stops reporting tab changes; a small notice tells you when that happens.** VS Code keeps the extension's copy of "which tabs are open" in sync through background events — and on rare occasions that channel dies for an entire window, hours at a time, with no error of its own: every read, fresh or cached, just returns the last thing it heard. Clicking a row to focus its tab used to rely entirely on that channel noticing the switch, so the click itself did nothing. The panel now also remembers what *it* just activated, and trusts that over the API until a genuinely newer tab event arrives to update it — so clicking a row now fixes the highlight even on a window whose tab-reporting has gone silent. A small notice appears when that silence is detected, so it doesn't look like the panel simply forgot; reloading the window is what actually restores VS Code's own channel.
+- **A batch's master row no longer flashes as closed for ~30 seconds right after pasting a block.** The conversation that frames a new batch is known only by its own generated title at that instant — VS Code hasn't renamed its tab from the first prompt yet, and the panel's separate record of real tab titles hasn't caught up either. For a few seconds neither title matches any open tab, and a conversation that's actually front and centre on screen briefly rendered with its title struck through, as if finished and closed. A conversation whose process is confirmed alive in a VS Code window can no longer be shown as tab-closed on this kind of title mismatch — closing a tab kills that process, so a live one always has a tab open somewhere, full stop.
+
+## [2.39.3] - 2026-08-17
+
+### Fixed
+- **A conversation that merely *quotes* a background-task launch no longer spins forever.** 2.39.2 taught the panel to treat "ended its turn but a background task hasn't reported back" as still running — but it recognized those launches by their text anywhere in a tool result, so a conversation whose output *quoted* such a line (a grep through transcripts, a pasted log) was mistaken for one with a task of its own, and kept its spinner after it had genuinely finished. A real launch message *starts* the tool result it lives in, and a real completion notification arrives as its own message, never inside a tool result — the detection now honours both, so quotes neither create a phantom wait nor silence a real one.
+
+## [2.39.2] - 2026-08-17
+
+### Fixed
+- **The next wave no longer opens while the current one is still working.** "Done" used to mean "the conversation ended a turn" — but a turn also ends when the conversation hands work to a background agent and waits to be woken, and a Stop hook that immediately relaunches the turn (a commit reminder, say) leaves a few seconds during which the state reads "done" before the resume is visible. Both cases were observed on a real batch: the next wave's tab opened, prompt ready, while the previous lot was demonstrably still running. Two locks close this. A conversation that is going to resume *by itself* — a background agent or command whose completion notification has not arrived yet, a scheduled wakeup still in the future — is now shown and counted as running, everywhere at once: its row, the batch counter, the wave engine, and the end-of-turn sound all wait for the *real* end. And the automatic advance no longer trusts an instantaneous reading: a wave must stay finished for 15 uninterrupted seconds before the next one opens — any resume in between rearms the clock. The manual ▶ button is untouched and remains immediate. If a background task dies without ever sending its notification, the block only holds while the conversation's process is alive, and ▶ always remains as the way through.
+
+## [2.39.1] - 2026-08-17
+
+### Added
+- **The demo mode now shows a nested batch.** Launch VS Code with `CLAUDE_QUOTA_PANEL_DEMO=1` and the fictional panel includes a batch whose master conversation is itself a member of another batch — rendered nested under that row, counter chip included. The demo data goes through the same derivation as real batches (nothing hand-written), so it exercises the actual nesting logic.
+
+## [2.39.0] - 2026-08-17
+
+### Fixed
+- **A conversation that launched several batches now heads only the latest one — the earlier batches stop holding an empty header, and disappear once they are done.** Planning batch after batch from the same conversation is the normal way to run a long piece of work, and each batch rightly recorded it as its master. But a conversation has a single row in the panel, so the batches were fighting over it: the last one drawn took it and every earlier batch kept an empty frame where its header should have been. Worse, a batch only vanishes once everything in it is finished — its master conversation included — so as long as that conversation was still alive driving the *next* batch, every batch it had ever launched stayed on screen, permanently showing "3/3 done". The most recently linked batch now keeps the header and the finished-or-not question; the earlier ones simply render as batches without a master, and fold away by themselves once their own tasks are done. Nothing is unlinked behind your back: link the conversation to an older batch again and the header moves back to it, immediately. As a result, linking a conversation that already heads another batch is no longer refused — it just becomes that batch's master, and the previous one steps back.
+
+## [2.38.0] - 2026-08-17
+
+### Fixed
+- **The list is back to being about your tabs: conversations running outside this window no longer appear in it.** A Claude Code session started somewhere other than a VS Code tab — from the phone or the web through a Remote Control server running on this machine, from a terminal, or from an agent SDK — often runs in the same working directory as your window, so the panel saw it as one of its own. And because the panel never hides a conversation whose process is still alive, such a session stayed in the list for as long as its server held it: a row that no click could take you anywhere from, occupying one of the twelve slots a real conversation could have used. The panel now checks how a live session was started, and only a session born of a VS Code tab keeps that protection. Nothing changes for your own conversations, including the case that protection was written for — a tab renamed by Claude Code so that no title matches any more. A conversation picked up again inside VS Code comes back to the list as soon as its tab is there.
+
+## [2.37.0] - 2026-08-17
+
+### Added
+- **A batch opened from inside another batch's own conversation now nests under it, instead of splitting into two disconnected groups.** Planning wave 2 from wave 1's own conversation is common — and until now the panel had no way to say "this conversation is both a member of A and the master of B": one of the two groups would claim the row, the other would keep an empty slot where it should have been. The row now stays exactly where it was — a member of its own batch, on that batch's rail — and simply grows a second batch hanging under it: same grip-then-members shape as a top-level batch with a master conversation, indented and framed in its own colour, folding and dissolving independently of the batch that hosts it. Nesting can go several levels deep, and it un-nests on its own, with nothing lost, the moment the link that created it disappears. See [Nested batches](README.md#nested-batches) in the README.
+
+## [2.36.2] - 2026-08-15
+
+### Fixed
+- **The highlight catches up the moment you come back to the window.** 2.36.1 made the panel read the selected tab afresh rather than trust a remembered one — right, but nobody was asking for it. Coming back to VS Code from another application moves no tab, so no tab event fires, and the list only recomputed on its 30-second clock tick — exactly the stretch of time during which you are looking at it. Regaining window focus now triggers a recompute, so the highlight is correct as soon as the window is.
+
+## [2.36.1] - 2026-08-15
+
+### Fixed
+- **The highlighted row now follows the tab you are actually on.** The panel kept the selected conversation in a memory that was only refreshed when VS Code announced a tab event. Any path that made a tab active without firing one left the highlight stuck on a conversation you had already left — and clicking the correct row did not repair it, because that tab was *already* active, so there was no event to catch up on and the wrong row stayed lit. The selected tab is now read fresh on every refresh, so the highlight puts itself right on the next tick whether or not an event ever arrives. Switching to a non-conversation tab still keeps the last conversation highlighted, as before.
+
+## [2.36.0] - 2026-08-15
+
+### Changed
+- **A batch header now shows which batch it is, and its counter moved to the right.** The row held nothing but a chevron and a counter floating in the middle of an empty line, while nothing on screen said *which* batch you were looking at — the batch name only ever appeared as a tooltip, and only on a batch with no master conversation, so in the usual case it was invisible. The header now reads `BATCH 14:12` on the left, from the batch's creation time, and the `N/M done` counter sits on the right where it lines up from one batch to the next. The creation time rather than the name: two batches can carry the same `group:` line (or none at all), their time always tells them apart. The name is back as a tooltip in every case.
+
+### Fixed
+- **A batch that was given no name no longer reports the wrong time.** The fallback name (`Batch HH:MM`, used when the pasted block has no `group:` line) was derived from the UTC clock, so a batch created at 14:11 in Paris was called "Batch 12:11". It follows the machine's time zone now, like every other time the panel displays.
+
+## [2.35.1] - 2026-08-15
+
+### Changed
+- **"+ new wave" and "+ this wave" now only show up once there's a prompt to add.** Both buttons file the batch form's current prompt into an existing group; with the field empty, clicking either did nothing but focus it. They stayed visible either way, taking up space in the sidebar and catching the eye of anyone who hadn't yet learned what they're for. They're now hidden until a task is actually typed in, and reappear the moment it is.
+
 ## [2.35.0] - 2026-08-15
 
 ### Changed
