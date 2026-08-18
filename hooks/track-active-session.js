@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-// UserPromptSubmit hook. Trois effets :
+// UserPromptSubmit hook. Quatre effets :
 //  1) ~/.claude/sessions-state.json : la session passe à `busy` (le panneau
 //     sidebar l'affiche en train de travailler, via fs.watch → instantané).
 //  2) ~/.claude/active-session.json : modèle de la session active (legacy,
 //     consommé par l'affichage du modèle).
 //  3) prompt `/handoffs` UNIQUEMENT : injection du session_id en
 //     additionalContext (lot 11 — jeton de conversation maîtresse, cf. plus bas).
+//  4) une seule fois par conversation, quand le dernier tour a dépassé le seuil
+//     `costTurnRedDollars` : notice de relais, également en additionalContext
+//     (turn-cost.js). Elle PROPOSE une reprise en conversation neuve, elle
+//     n'agit pas.
 //
 // Source canonique : ce fichier est versionné dans le repo Octopus
 // (Tools/ClaudeCodeQuotaBar/hooks/). Déployé vers ~/.claude/scripts/ par
@@ -18,6 +22,7 @@ const path = require('path');
 const { updateSession, readHookInput } = require('./sessions-state.js');
 const { modelIdToDisplay } = require('./model-id.js');
 const { extractLastAssistant } = require('./transcript.js');
+const { relayNotice } = require('./turn-cost.js');
 
 const ACTIVE_SESSION_PATH = path.join(os.homedir(), '.claude', 'active-session.json');
 
@@ -30,22 +35,30 @@ const ACTIVE_SESSION_PATH = path.join(os.homedir(), '.claude', 'active-session.j
 // (master.js : la session doit exister et son transcript contenir le bloc), un
 // jeton faux ou périmé est donc sans conséquence.
 //
-// Seul cas où ce hook écrit sur stdout — pour tout autre prompt il reste
-// strictement silencieux (un output serait injecté dans le contexte de la
-// conversation, cf. sessions-state.js). Contrat : exit 0 + un unique objet JSON
-// (doc « Hooks reference », hookSpecificOutput/additionalContext).
+// Un des DEUX seuls cas où ce hook écrit sur stdout (l'autre étant la notice
+// de relais) — pour tout autre prompt il reste strictement silencieux (un
+// output serait injecté dans le contexte de la conversation, cf.
+// sessions-state.js). Contrat : exit 0 + un UNIQUE objet JSON (doc « Hooks
+// reference », hookSpecificOutput/additionalContext) : les deux messages
+// possibles sont donc concaténés et émis ensemble, jamais l'un après l'autre.
 const HANDOFFS_RE = /^\s*\/handoffs\b/;
 
-function emitSessionToken(sessionId) {
+function sessionTokenText(sessionId) {
+  return [
+    'claude-convs-session: ' + sessionId,
+    'If you emit a ```claude-convs block, copy that identifier verbatim as the',
+    'block\'s first line, in the form `session: ' + sessionId + '`.',
+    'Never invent or alter it; if you are not emitting a block, ignore this.',
+  ].join('\n');
+}
+
+function emitContext(parts) {
+  const text = parts.filter(Boolean).join('\n\n');
+  if (!text) return;
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'UserPromptSubmit',
-      additionalContext: [
-        'claude-convs-session: ' + sessionId,
-        'If you emit a ```claude-convs block, copy that identifier verbatim as the',
-        'block\'s first line, in the form `session: ' + sessionId + '`.',
-        'Never invent or alter it; if you are not emitting a block, ignore this.',
-      ].join('\n'),
+      additionalContext: text,
     },
   }));
 }
@@ -54,9 +67,14 @@ readHookInput((data) => {
   const sessionId = data.session_id;
   if (!sessionId) return;
 
-  if (HANDOFFS_RE.test(String(data.prompt || ''))) {
-    try { emitSessionToken(sessionId); } catch {}
-  }
+  // Contexte injecté (au plus un objet JSON, cf. emitContext). La notice de
+  // relais lit le transcript de CETTE session seulement, en incrémental, et
+  // rend `null` à la moindre anomalie : elle ne peut ni ralentir ni faire
+  // échouer la saisie.
+  const parts = [];
+  if (HANDOFFS_RE.test(String(data.prompt || ''))) parts.push(sessionTokenText(sessionId));
+  try { parts.push(relayNotice(data)); } catch {}
+  try { emitContext(parts); } catch {}
 
   // `busy` d'abord, et INCONDITIONNELLEMENT : l'état de la conv ne dépend pas
   // de notre capacité à résoudre le modèle. (Piège : la résolution échoue au

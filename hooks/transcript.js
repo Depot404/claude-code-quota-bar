@@ -393,19 +393,40 @@ function lastActivityTs(filePath) {
 //     un réveil encore à venir = la conv redémarrera d'elle-même.
 //
 // Détection TEXTUELLE, assumée : les formes ci-dessous sont celles écrites par
-// le CLI (relevées sur transcripts réels, version 2.1.233, 2026-08-17). Si le
-// harnais change son libellé, la détection rend faux → comportement d'AVANT ce
-// correctif (jamais pire). Limite connue, acceptée : une tâche tuée par
-// TaskStop n'émet pas de notification → « pending » à tort ; le blocage ne
+// le CLI (relevées sur transcripts réels, versions 2.1.233 → 2.1.234,
+// 2026-08-17/18). Si le harnais change son libellé, la détection rend faux →
+// comportement d'AVANT ce correctif — MAIS ce « jamais pire » ne vaut que si
+// les DEUX moitiés de la paire cassent ENSEMBLE. Incident spinner éternel n°2
+// (2026-08-18, le soir même de 2.44.0) : une tâche qui finit EN PLEIN TOUR ne
+// passe pas par un message user — le CLI 2.1.234 met sa notification en FILE
+// D'ATTENTE (`queue-operation`, puis `attachment` à la livraison). Le
+// lancement restait donc vu, la notification plus jamais → moitié de paire
+// cassée seule, attente éternelle sur une conv VIVANTE que la borne
+// `startedAt` de 2.44.0 ne pouvait pas sauver (lancement plus récent que le
+// process, process toujours là). Parade : reconnaître la notification sous
+// TOUTES ses formes de livraison (cf. collectNotifTags dans
+// pendingResumeSignals) — et pour toute future détection appariée, tester la
+// panne asymétrique (une moitié muette). Limite connue, acceptée : une tâche tuée par
+// TaskStop n'émet pas de notification → « pending » à tort — le blocage ne
 // s'applique qu'aux conversations VIVANTES (cf. effectiveState) et le ▶ manuel
-// reste toujours là — même philosophie que `stale` (l'auto se suspend, jamais
-// le manuel).
+// reste toujours là, même philosophie que `stale` (l'auto se suspend, jamais
+// le manuel). Le gel n'est plus PERMANENT depuis la datation ci-dessous
+// (incident spinner éternel, 2026-08-18) : un lancement/réveil n'est cru que
+// s'il est postérieur au `startedAt` du process VIVANT qui le lit — dès que ce
+// process meurt et respawn (reload, crash, resume), la fausse attente expire
+// d'elle-même. Elle ne s'efface pas plus tôt : DANS le même process encore
+// vivant, un lancement stoppé sans notification reste indiscernable d'un
+// lancement toujours en cours — même trou qu'avant, juste borné à la durée de
+// vie du process au lieu de l'éternité.
 //
 // Fenêtre de scan : 4 Mo de queue (un lancement plus vieux que ça dont la
 // notification n'est toujours pas arrivée est rarissime ; le rater = repli sur
 // le comportement d'avant). Le scan n'est PAS gratuit → l'appelant (state.js)
 // le cache par (mtime, size) et ne le déclenche que sur une entrée `done`,
 // c'est-à-dire une fois par fin de tour, jamais pendant que ça écrit.
+//
+// Un signal daté (`pendingTaskAt`, `wakeupSetAt`) n'est une preuve de reprise
+// QUE pour le process qui l'a posé — cf. l'amendement ci-dessous.
 const PENDING_SCAN_BYTES = 4 * 1024 * 1024;
 // ANCRÉS en début de texte, volontairement (faux positif 2026-08-17, trouvé le
 // jour même : la conversation qui a CONSTRUIT cette détection citait ces
@@ -437,14 +458,28 @@ function collectTags(text, tag, into) {
   while ((m = re.exec(text))) into.add(m[1].trim());
 }
 
-// Rend { pendingTask, wakeupAt } ou null (fichier illisible).
-//  - pendingTask : au moins un lancement de fond (agent/bash) sans
+// Rend { pendingTask, pendingTaskAt, wakeupAt, wakeupSetAt } ou null (fichier
+// illisible).
+//  - pendingTask   : au moins un lancement de fond (agent/bash) sans
 //    <task-notification> correspondante — appariement par task-id (agentId /
-//    ID bash) OU par tool-use-id, les deux figurent dans la notification ;
-//  - wakeupAt   : `scheduledFor` du DERNIER ScheduleWakeup vu (ms epoch), ou
+//    ID bash) OU par tool-use-id, les deux figurent dans la notification,
+//    cherchée sous ses TROIS formes de livraison (cf. collectNotifTags) ;
+//  - pendingTaskAt : instant (ms epoch) du plus RÉCENT de ces lancements
+//    orphelins, `0` s'il y en a un mais non datable, `null` si `pendingTask`
+//    est faux. C'est CETTE date, pas `wakeupAt`, que l'appelant compare au
+//    `startedAt` du process vivant (cf. state.js effectiveState) : un
+//    lancement plus vieux que la naissance du process courant ne peut PAS
+//    recevoir sa notification — ce process n'était pas né pour la recevoir.
+//  - wakeupAt      : `scheduledFor` du DERNIER ScheduleWakeup vu (ms epoch), ou
 //    null. C'est l'appelant qui compare à « maintenant » : un réveil passé a
 //    déjà tiré (la reprise est visible ailleurs), seul un réveil FUTUR annonce
 //    une reprise à venir.
+//  - wakeupSetAt   : instant (ms epoch) où CE réveil a été armé (timestamp de
+//    l'entrée qui porte `scheduledFor`), `0` si présent mais non datable,
+//    `null` si `wakeupAt` est null. Même rôle que `pendingTaskAt` : un réveil
+//    armé par un process mort ne réveillera jamais le process courant — c'est
+//    le harnais qui relance une conversation à l'heure dite, pas le vieux
+//    process qui se souvient de son propre minuteur.
 function pendingResumeSignals(filePath) {
   let entries;
   try { entries = parseSlice(readSlice(filePath, PENDING_SCAN_BYTES, 'tail')); } catch { return null; }
@@ -452,25 +487,50 @@ function pendingResumeSignals(filePath) {
   const notifiedTask = new Set();
   const notifiedToolUse = new Set();
   let wakeupAt = null;
+  let wakeupSetAt = null;
+  // Une seule définition de « ceci est une notification de fin de tâche »,
+  // partagée par ses TROIS formes de livraison (relevées en réel) :
+  //   1. message user (string brute ou blocs `text`) — tâche finie pendant que
+  //      la conversation était AU REPOS : le harnais ouvre un tour qui porte
+  //      la notification (CLI 2.1.233, 2026-08-17) ;
+  //   2. `queue-operation` (champ `content`) — tâche finie EN PLEIN TOUR : la
+  //      notification passe par la file d'attente (`enqueue` puis `remove`,
+  //      les deux portent le texte — Sets, donc idempotent) ;
+  //   3. `attachment` avec `commandMode: 'task-notification'` (champ
+  //      `attachment.prompt`) — la même, au moment de sa LIVRAISON dans le
+  //      contexte (CLI 2.1.234, 2026-08-18, incident spinner éternel n°2).
+  // L'ancrage ^<task-notification> reste la garde partout : un prompt USER mis
+  // en file (c'est aussi une `queue-operation`) qui ne ferait que CITER ces
+  // balises n'éteint rien.
+  const collectNotifTags = (raw) => {
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    if (!TASK_NOTIF_RE.test(text)) return;
+    collectTags(text, 'task-id', notifiedTask);
+    collectTags(text, 'tool-use-id', notifiedToolUse);
+  };
   for (const e of entries) {
-    if (!e || e.type !== 'user') continue;
+    if (!e) continue;
+    if (e.type === 'queue-operation') { collectNotifTags(e.content); continue; }
+    if (e.type === 'attachment') {
+      if (e.attachment && e.attachment.commandMode === 'task-notification') collectNotifTags(e.attachment.prompt);
+      continue;
+    }
+    if (e.type !== 'user') continue;
+    const parsedTs = Date.parse(e.timestamp || '');
+    const entryTs = Number.isFinite(parsedTs) ? parsedTs : 0;
     if (e.toolUseResult && typeof e.toolUseResult.scheduledFor === 'number') {
       // Un `stop: true` (fin de /loop) rend `{scheduledFor: 0, stopped: true,
       // cancelledWakeups: N}` (relevé en réel) : il ANNULE les réveils armés —
       // explicite ici, même si l'écrasement par 0 aurait suffi par accident.
       wakeupAt = e.toolUseResult.stopped ? null : e.toolUseResult.scheduledFor;
+      wakeupSetAt = e.toolUseResult.stopped ? null : entryTs;
     }
     const content = e.message && e.message.content;
-    // Notification : UNIQUEMENT le texte porté par le message user lui-même
-    // (string brute ou blocs `text` — allText ignore les tool_results). C'est
-    // le canal où le CLI les écrit ; une notification « vue » dans un
-    // tool_result est une citation (grep, cat d'un autre transcript) et ne
-    // doit surtout pas ÉTEINDRE une vraie attente.
-    const plain = allText(content).trim();
-    if (plain && TASK_NOTIF_RE.test(plain)) {
-      collectTags(plain, 'task-id', notifiedTask);
-      collectTags(plain, 'tool-use-id', notifiedToolUse);
-    }
+    // Forme 1 : le texte porté par le message user lui-même (string brute ou
+    // blocs `text` — allText ignore les tool_results). Une notification
+    // « vue » dans un tool_result est une CITATION (grep, cat d'un autre
+    // transcript) et ne doit surtout pas ÉTEINDRE une vraie attente.
+    collectNotifTags(allText(content));
     if (!Array.isArray(content)) continue;
     for (const b of content) {
       if (!b || b.type !== 'tool_result') continue;
@@ -479,17 +539,21 @@ function pendingResumeSignals(filePath) {
       if (!txt) continue;
       if (BG_AGENT_LAUNCH_RE.test(txt)) {
         const m = BG_AGENT_ID_RE.exec(txt);
-        launches.push({ toolUseId: b.tool_use_id || null, taskId: m ? m[1] : null });
+        launches.push({ toolUseId: b.tool_use_id || null, taskId: m ? m[1] : null, ts: entryTs });
         continue;
       }
       const bash = BG_BASH_LAUNCH_RE.exec(txt);
-      if (bash) launches.push({ toolUseId: b.tool_use_id || null, taskId: bash[1] });
+      if (bash) launches.push({ toolUseId: b.tool_use_id || null, taskId: bash[1], ts: entryTs });
     }
   }
-  const pendingTask = launches.some((l) =>
+  const pendingLaunches = launches.filter((l) =>
     !(l.taskId && notifiedTask.has(l.taskId)) &&
     !(l.toolUseId && notifiedToolUse.has(l.toolUseId)));
-  return { pendingTask, wakeupAt };
+  const pendingTask = pendingLaunches.length > 0;
+  const pendingTaskAt = pendingTask
+    ? pendingLaunches.reduce((latest, l) => Math.max(latest, l.ts || 0), 0)
+    : null;
+  return { pendingTask, pendingTaskAt, wakeupAt, wakeupSetAt };
 }
 
 module.exports = {

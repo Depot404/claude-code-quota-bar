@@ -19,13 +19,21 @@ Most Claude Code usage trackers on the Marketplace stop at a status-bar percenta
 
 > **Unofficial.** This extension is not affiliated with, endorsed by, or supported by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, PBC.
 
+## Installing and opening the panel
+
+The panel docks in VS Code's **Secondary Side Bar** — the right-hand sidebar. Since VS Code 1.104 that sidebar opens by itself when you open a folder, so the panel is usually right there after installing. **If you see nothing at all**, it is almost always because that sidebar is closed — it stays hidden in an empty window, and it stays closed if you closed it once:
+
+1. **Install the extension.** It activates on its own; there is nothing to configure to see the panel.
+2. **Open the Secondary Side Bar** — press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>. (Same thing from the menu: **View → Appearance → Secondary Side Bar**; or **View: Toggle Secondary Side Bar Visibility** in the Command Palette, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>.)
+3. **Claude Convs is what you get**, under its own `CLAUDE CONVS` header, when it is the only thing docked in that sidebar. If you keep other panels there — Chat, for instance — a narrow strip of icons runs along the right edge instead: click the Claude Convs one.
+
+It stays docked from then on: you will not have to do any of this again.
+
+An **empty conversation list** in a workspace where no Claude Code conversation is open is normal, not a failure — rows appear as you start conversations. If the sidebar opens but Claude Convs is nowhere in it, the extension has not activated yet: run **Claude Code Quota: Open Usage Page** once from the Command Palette. The Secondary Side Bar itself needs **VS Code 1.106 or newer**, which is the extension's minimum anyway.
+
 ## Why
 
 VS Code's own Claude Code extension doesn't show which of your open conversations are actually working — only a blue dot for a pending permission, orange for a finished hidden tab (Anthropic feature request [#34309](https://github.com/anthropics/claude-code/issues/34309)). And the CLI's quota is only visible on request. This panel keeps both visible at all times, reactively.
-
-## Opening the panel
-
-The Secondary Side Bar is a VS Code 1.106+ feature. If the **Claude Convs** icon isn't visible in the right sidebar, open it via **View → Appearance → Secondary Side Bar**, then find "Claude Convs" in the activity bar that appears on the right — or run the command **Claude Code Quota: Open Usage Page** once to trigger activation, then look for the icon. It stays docked once opened.
 
 ## Launching conversations — one, or a whole batch
 
@@ -94,6 +102,29 @@ The denominator (200k vs 1M) is **auto-detected** by `hooks/model-id.js`, most-c
 4. **`[1m]` alias** in `settings.json` `model` (e.g. `"sonnet[1m]"`) → 1M. Covers the Sonnet / Opus 4.6 opt-in.
 5. **Family heuristic** (`opus-4-7/4-8`, `fable-5`) — last resort, hardcoded and doomed to age. It only matters in the first turns of a conversation (usage still under 200k) on a model whose id carries no `[1m]` tag; guessing wrong there only understates `ctx:%` until usage crosses 200k.
 6. Otherwise **200k**.
+
+## Estimated cost per conversation
+
+`ctx NN%` is a **snapshot** — how full the context is right now. It says nothing about what the conversation has *spent*: a conversation sitting at 20% after three compactions has cost far more than one at 70% opened ten minutes ago. So each row also shows, to the right of its title, the **estimated dollar cost consumed since that conversation started** — the integral, next to the snapshot.
+
+- **No tokens are spent to compute it, and no network call is made.** Every assistant entry of the transcript already carries `message.usage` (`input_tokens`, `cache_read_input_tokens`, `cache_creation.ephemeral_5m/1h_input_tokens`, `output_tokens`, `server_tool_use.web_search_requests`); the cost is that data multiplied by the public list price of the model **of each message** — a conversation that switched models mid-way mixes rates, which is the correct answer. Cache is priced at the standard ratios (read 0.1×, 5-minute write 1.25×, 1-hour write 2×), and `usage.speed: "fast"` is billed at the fast-mode rate.
+- **Reading is incremental.** Transcripts routinely reach tens of megabytes and the engine recomputes at least every 30 seconds, so the file is never re-read: an accumulator keeps the byte offset it stopped at and parses only the appended bytes (a partially written last line is left for the next pass; a file that shrank is recounted from zero).
+- **One assistant message spans several transcript lines** (thinking, text, tool call) carrying the same `message.id` and the same `usage` — they are counted once, not three times.
+- **It is an estimate, hence the `≈` in the tooltip**, which also breaks the amount down into input / cache / output. List prices are used (never a promotional rate), and a model family this version doesn't know is priced at the middle of the range rather than dropped.
+- **A conversation with no usage data yet shows nothing** — never a `$0.00` that would suggest it was free.
+- **The colour answers a different question than the number.** The amount is the running total; its colour is the cost of the **last completed turn** (everything the assistant did between two of your prompts), against the absolute thresholds `costTurnYellowDollars` / `costTurnRedDollars`. A total that has already been spent is not something you can act on; the next turn is, and the last one predicts it — context only grows, and every turn is re-billed for all of it. A turn still in progress never colours anything, so a row doesn't flicker while you work. Hovering the amount spells the whole thing out: total, number of replies, last-turn cost, then the input / cache / output breakdown.
+- `costYellowDollars` / `costRedDollars` (the thresholds on the total) still exist but no longer colour anything, kept one release for anyone who wants the old behaviour back.
+
+### When a turn gets expensive, Claude offers to hand over
+
+Past a certain cost per turn, the cheapest thing you can do is start a fresh conversation: a long one re-pays for its entire context on every reply. So when the last turn crossed `relayNoticeDollars` (default $5), the `UserPromptSubmit` hook adds three lines to that turn's context, asking Claude to **offer** — never to act on its own — to commit what is done and hand the rest over to a new conversation, with a `claude-convs` block ready to paste (see [Launching conversations](#launching-conversations--one-or-a-whole-batch)).
+
+- **Never on a young conversation.** The notice waits until it has seen at least **two complete turns**. An expensive turn early on proves nothing — it is usually one big tool call over a still-small context, and handing over there would save nothing while making the notice cheap. What is worth reacting to is a *rhythm*, and a rhythm takes more than one turn to observe.
+- **Its threshold is its own** (`relayNoticeDollars`), deliberately higher than the one that colours the row (`costTurnRedDollars`, $2): a colour is a passive signal you look at or not, a notice interrupts to suggest stopping and starting over. Set it to `0` to switch the notice off entirely.
+- **Once per conversation, ever.** A reminder repeated every turn would waste exactly the context it claims to save; the marker lives in `~/.claude/quotabar-turns/` and survives window reloads.
+- **It reads its own transcript only**, incrementally, with the byte offset kept between calls — measured on this machine: 8 ms on the first prompt of a 20 MB resumed conversation (only the tail is read), 1–2 ms after that. It never scans the transcript folder.
+- **It can never break your prompt**: everything is wrapped, and any anomaly — missing transcript, unreadable state, unparsable settings — results in silence, never an error.
+- Nothing is sent anywhere: the cost comes from the same local `message.usage` data as everything else on this page.
 
 ## Conversation state engine
 
@@ -303,7 +334,7 @@ This configures:
 
 The installer always appends **its own** `matcher: ""` group rather than joining an existing one: on `Notification`/`SessionEnd` an existing group may carry a restrictive matcher (`permission_prompt`), and grafting onto it would silently narrow the hook. Existing hooks are never touched.
 
-Deployed files: the three hooks (`usage-statusline.js`, `track-active-session.js`, `hook-session-state.js`) plus the libs they `require` — `sessions-state.js` (locked atomic writes), `model-id.js` (model id → display name, window detection), `transcript.js` (JSONL tail/head reads). `state.js` requires the same libs from `hooks/`, so both sides always agree on what a model id means.
+Deployed files: the three hooks (`usage-statusline.js`, `track-active-session.js`, `hook-session-state.js`) plus the libs they `require` — `sessions-state.js` (locked atomic writes), `model-id.js` (model id → display name, window detection), `transcript.js` (JSONL tail/head reads), `turn-cost.js` (last-turn cost, [handover notice](#when-a-turn-gets-expensive-claude-offers-to-hand-over)) and `cost.js`, which `turn-cost.js` requires so that price list and turn boundary are defined in exactly one place. `state.js` requires the same libs from `hooks/`, so both sides always agree on what a model id means.
 
 Edit the hooks in `hooks/` (not the deployed copies in `~/.claude/scripts/`), then re-run `install.ps1`.
 
@@ -323,6 +354,13 @@ Edit the hooks in `hooks/` (not the deployed copies in `~/.claude/scripts/`), th
 | `claudeCodeQuotaBar.refreshIntervalMinutes` | `5` | How often to refresh the usage data (minutes). Only affects the network quota fetch — conversation state is event-driven, never polled. |
 | `claudeCodeQuotaBar.burnRateGreenMax` | `0.85` | Burn-rate pace at or below which a quota bar is green. |
 | `claudeCodeQuotaBar.burnRateYellowMax` | `1.0` | Burn-rate pace at or below which a quota bar is yellow (above it, red). |
+| `claudeCodeQuotaBar.ctxRedMin` | `50` | Percent of a conversation's context window at or above which its `ctx:%` bar is red. |
+| `claudeCodeQuotaBar.ctxYellowMin` | `40` | Percent of a conversation's context window at or above which its `ctx:%` bar is yellow (below `ctxRedMin`). |
+| `claudeCodeQuotaBar.costTurnRedDollars` | `2` | Estimated cost of a conversation's **last completed turn**, in US dollars, at or above which the amount on its row is red. See [Estimated cost per conversation](#estimated-cost-per-conversation). |
+| `claudeCodeQuotaBar.costTurnYellowDollars` | `0.5` | Last-turn cost at or above which the amount is yellow (below `costTurnRedDollars`; below this, grey). |
+| `claudeCodeQuotaBar.relayNoticeDollars` | `5` | Last-turn cost at or above which Claude is asked — once per conversation, and only after two complete turns — to offer handing the work over to a fresh conversation. `0` disables the notice. Requires the hooks. See [When a turn gets expensive](#when-a-turn-gets-expensive-claude-offers-to-hand-over). |
+| `claudeCodeQuotaBar.costRedDollars` | `5` | *Deprecated* — threshold on a conversation's **total**, which no longer colours anything since the colour moved to the last turn. |
+| `claudeCodeQuotaBar.costYellowDollars` | `2` | *Deprecated* — same, for the yellow step. |
 | `claudeCodeQuotaBar.sounds.enabled` | `false` | Play a system sound on `done`/`waiting` transitions. See [Sounds](#sounds). |
 | `claudeCodeQuotaBar.braveUserDataDir` | `""` | Path to a Brave user-data directory with a `claude.ai` session logged in, for the faster cookie-based quota fetch. Empty (default) disables that path cleanly — no browser spawn, no error — and the OAuth fallback is used instead. Set `BRAVE_EXE` too if `brave.exe` isn't in the standard install location. |
 
@@ -351,6 +389,15 @@ Below each bar, a small ▲ sits at **% of the window already elapsed** — the 
 It's masked (no arrow) under the same conditions as the colour: no reset time, reset already past, or the window barely started. It's capped at 100%.
 
 The arrow **repositions on its own**, without waiting for the next network poll: since its position is pure function of the current clock and the reset time (no data to fetch), the webview re-evaluates it locally every 30 seconds and pauses that timer while the panel isn't visible. Same for the colour — both stay accurate between the 5-minute quota fetches.
+
+### What actually filled the window
+
+The percentage says how much of a window is gone; it never said what went into it. So each quota line also carries, between its label and its percentage, the **measured dollar value of what was consumed inside that window** — its reset time minus its length, no date heuristic.
+
+- The period is account-wide, so the measurement is too: it sums **every** transcript under `~/.claude/projects/`, not just the conversations this panel lists. Candidates are filtered by file mtime, then read incrementally through the same accumulator that prices each conversation row — the same bytes are never parsed twice, and nothing is fetched over the network.
+- A **model-scoped** weekly line counts only that family's messages. The scope's `model.id` is `null` in practice, so the match is made on `display_name`; when it matches nothing, the line shows **no amount at all** rather than a misleading `$0`.
+- Above `$100` the figure rounds to the dollar. `≈` marks the estimate; the tooltip carries the two caveats the line must not: the measurement is local (Claude Code on this PC — whatever goes through claude.ai or the mobile app counts toward the percentage but not toward this amount), and the figure is the value of that usage at API list prices, which a subscription covers rather than a spend.
+- The first full pass is **deferred until the panel is actually visible**: a VS Code window whose panel stays closed reads nothing. Later passes are incremental (a few milliseconds) and run once a minute.
 
 ### Model-scoped weekly limits
 
@@ -407,6 +454,7 @@ Regression bench, plain Node — `node test/test-sounds.js` (debounce, the Stop�
 - `~/.claude/sound-claims.json` (sounds, off by default) holds which window already played the sound for a given conversation transition — a session id, a state (`done`/`waiting`), and a timestamp. No prompt or chat content. Pruned after 24 h.
 - `~/.claude/quota-session-key.json` holds a **live `claude.ai` `sessionKey` cookie in clear text** — the same trust level as `.credentials.json`. It grants full account access for as long as the cookie is valid, not just usage-page reads. Treat it accordingly (same filesystem ACLs as the rest of `~/.claude`, never copied out, never logged). Only written when `claudeCodeQuotaBar.braveUserDataDir` is configured (empty by default) — see [Configuration](#configuration).
 - `~/.claude/quota-org-id.json` and `~/.claude/quota-brave-pid.json` hold, respectively, a cached Claude organization UUID and the PID of an ephemeral Brave Octopus process while it's running (used to shut it back down). No prompt or chat content. Same `braveUserDataDir` opt-in as above.
+- `~/.claude/quotabar-turns/<session>.json` (one small file per conversation, written by the `UserPromptSubmit` hook) holds the byte offset reached in that conversation's transcript, the running cost figures, and whether the [handover notice](#when-a-turn-gets-expensive-claude-offers-to-hand-over) has already been shown. Numbers and an offset — no prompt, no chat content. Files untouched for 7 days are deleted automatically.
 - `~/.claude/sessions-state.json` is written **by the hooks** (not by this extension, except for `ack_ts` — see [Read receipts](#read-receipts)): per-conversation state, a working directory, a transcript path, and — for `waiting` — the text of the `Notification` hook payload (typically "Claude is waiting for your input" or similar, not your prompt). Only present if you've run [Setup](#setup); without it, every conversation just shows `idle`.
 - **Every file above lives under `~/.claude/`.** Nothing this extension writes goes anywhere else on disk, and nothing leaves the machine except the two network calls in the first bullet (quota fetch) and the "install hooks" command in [Setup](#setup), which itself only ever touches `~/.claude/scripts/` and `~/.claude/settings.json` — never silently, always behind an explicit confirmation dialog listing what will be written.
 

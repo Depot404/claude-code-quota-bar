@@ -16,22 +16,36 @@ $srcHooks     = Join-Path $PSScriptRoot 'hooks'
 $srcCommands  = Join-Path $PSScriptRoot 'commands'
 
 # usage-statusline.js / track-active-session.js / hook-session-state.js sont des
-# hooks ; sessions-state.js, model-id.js et transcript.js sont des libs require()
-# par les precedents (meme dossier de deploiement obligatoire).
+# hooks ; sessions-state.js, model-id.js, transcript.js et turn-cost.js sont des
+# libs require() par les precedents (meme dossier de deploiement obligatoire).
 $hookFiles = @(
     'usage-statusline.js',
     'track-active-session.js',
     'hook-session-state.js',
     'sessions-state.js',
     'model-id.js',
-    'transcript.js'
+    'transcript.js',
+    'turn-cost.js'
 )
+
+# cost.js vit a la RACINE du repo (module de l'extension) et turn-cost.js le
+# require : la grille tarifaire et la definition d'une borne de tour n'existent
+# qu'a un seul endroit. Il est donc deploye lui aussi, a plat, aux cotes des
+# hooks -- turn-cost.js resout './cost.js' en priorite, '../cost.js' en repli
+# (execution depuis le repo).
+$rootLibs = @('cost.js')
 
 # --- 1. Copie des hooks vers ~/.claude/scripts/ ---
 if (-not (Test-Path $scriptsDir)) { New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null }
 foreach ($f in $hookFiles) {
     $src = Join-Path $srcHooks $f
     if (-not (Test-Path $src)) { throw "Hook source introuvable : $src" }
+    Copy-Item $src (Join-Path $scriptsDir $f) -Force
+    Write-Host "Copie : $f -> $scriptsDir"
+}
+foreach ($f in $rootLibs) {
+    $src = Join-Path $PSScriptRoot $f
+    if (-not (Test-Path $src)) { throw "Lib source introuvable : $src" }
     Copy-Item $src (Join-Path $scriptsDir $f) -Force
     Write-Host "Copie : $f -> $scriptsDir"
 }

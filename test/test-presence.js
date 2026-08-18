@@ -271,6 +271,45 @@ console.log('\n4ter. Transcript plus vieux que recentMs mais session vivante');
     build(['zz']).conversations.some((c) => c.title === 'Conv ouverte ce matin'));
 }
 
+// Le cas témoin du 2026-08-18 : conversation de cadrage d'un lot, terminée dans
+// la nuit (CLI éteint, plus rien d'écrit depuis 8 h) mais ONGLET grand ouvert.
+// Avant ce lot elle sortait de la liste sur son seul âge, et la ligne maîtresse
+// de son groupe la rendait alors BARRÉE « terminée · onglet fermé » —
+// member-truth conclut `done-closed` de « pas dans la liste », ce qui suppose
+// l'invariant « onglet ouvert ⇒ listée ».
+console.log('\n4quater. Transcript vieux, session MORTE, mais onglet resté ouvert');
+{
+  const kept = 'C:\\Users\\Test\\Projets VSCODE\\Kept';
+  const dir = state.projectDirFor(kept);
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, 'mm.jsonl');
+  fs.writeFileSync(f, [userMsg('p'), assistant, { type: 'ai-title', aiTitle: 'Master conv of a batch' }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const when = (Date.now() - 8 * 3600 * 1000) / 1000;        // 8 h → hors recentMs
+  fs.utimesSync(f, when, when);
+  const build = (tabProvider, store) => state.buildSnapshot({
+    workspacePath: kept, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: tabProvider, liveSessions: () => new Set(), sessionTitles: () => store,
+  }, state.createTranscriptReader());
+  // Le store VS Code connaît la paire sessionId → libellé d'onglet, et l'onglet
+  // ouvert porte ce libellé TRONQUÉ, comme le fait l'extension officielle.
+  const store = new Map([['mm', 'Master conv of a batch']]);
+  const open = () => tabs('Master conv of a bat…');
+
+  const shown = build(open, store).conversations;
+  check('vieille conv, CLI mort, onglet ouvert → reste listée',
+    shown.length === 1 && shown[0].title === 'Master conv of a batch',
+    JSON.stringify(shown.map((c) => c.title)));
+  check('…et son onglet est reconnu ouvert (donc jamais barrée)',
+    shown.length === 1 && shown[0].tabOpen === true);
+  check('store connu mais AUCUN onglet ouvert → hors candidats (inchangé)',
+    build(() => noTabs, store).conversations.length === 0);
+  check('onglet ouvert mais store muet → hors candidats (dégradation silencieuse)',
+    build(open, new Map()).conversations.length === 0);
+  check('onglets inconnus (tracker mort) → hors candidats (comportement d\'avant)',
+    build(() => unknown, store).conversations.length === 0);
+}
+
 // ── Les convs masquées ne doivent pas manger les places de la liste ────────
 console.log('\n5. Une conv ouverte reste listée même derrière maxItems convs fermées');
 {
@@ -301,6 +340,43 @@ console.log('\n5. Une conv ouverte reste listée même derrière maxItems convs 
   }, state.createTranscriptReader());
   check('sans info d\'onglets : toujours borné à maxItems (perf du lot 2 intacte)',
     all.conversations.length === 12, String(all.conversations.length));
+}
+
+// L'autre moitié de l'invariant « onglet ouvert ⇒ listée » (2026-08-18) :
+// entrer dans les candidats ne suffit pas, il faut entrer dans les maxItems
+// places. Douze conversations plus fraîches et VISIBLES (titre de repli, donc
+// jamais masquées) suffisaient à évincer la seule dont l'onglet est ouvert.
+console.log('\n5bis. Une conv à onglet ouvert passe devant maxItems convs plus fraîches');
+{
+  const race = 'C:\\Users\\Test\\Projets VSCODE\\Race';
+  const dir = state.projectDirFor(race);
+  fs.mkdirSync(dir, { recursive: true });
+  // 12 conversations fraîches, sans onglet mais VISIBLES : leur titre est un
+  // repli (pas d'ai-title), donc isGone ne peut rien conclure de l'absence de
+  // correspondance — elles occupent bel et bien les 12 places.
+  for (let i = 0; i < 12; i++) {
+    const f = path.join(dir, `r${i}.jsonl`);
+    fs.writeFileSync(f, [userMsg(`Sans ai-title numero ${i}`), assistant]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+    const when = (Date.now() - i * 60000) / 1000;
+    fs.utimesSync(f, when, when);
+  }
+  // La 13e : ancienne (8 h), CLI mort, mais son onglet est ouvert.
+  const old = path.join(dir, 'rz.jsonl');
+  fs.writeFileSync(old, [userMsg('p'), assistant, { type: 'ai-title', aiTitle: 'Old conv with an open tab' }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const when = (Date.now() - 8 * 3600 * 1000) / 1000;
+  fs.utimesSync(old, when, when);
+
+  const snap = state.buildSnapshot({
+    workspacePath: race, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => tabs('Old conv with an open t…'), liveSessions: () => new Set(),
+    sessionTitles: () => new Map([['rz', 'Old conv with an open tab']]),
+  }, state.createTranscriptReader());
+  const shown = snap.conversations.map((c) => c.title);
+  check('la conv à onglet ouvert est listée malgré 12 convs plus fraîches',
+    shown.includes('Old conv with an open tab'), shown.length + ' listées');
+  check('… et la liste reste bornée à maxItems', shown.length === 12, String(shown.length));
 }
 
 // ── Moteur : markClosed retire sans attendre la purge du fichier d'état ────

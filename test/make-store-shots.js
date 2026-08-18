@@ -43,8 +43,14 @@ const BRAVE_CANDIDATES = [
 ].filter(Boolean);
 const USER_DATA_DIR = 'C:\\OctopusData\\BraveOctopus';
 const PORT = 9223;
-const OUT_DIR = process.argv[2]
-  ? path.resolve(process.argv[2])
+const { FINGERPRINT_FILE, writeFingerprint } = require(path.join(__dirname, 'shots-fingerprint.js'));
+// `--fingerprint-only` : réenregistre l'empreinte SANS toucher aux images —
+// la seule sortie de secours du banc de fraîcheur (test-store-shots-fresh.js),
+// à n'employer qu'après avoir REGARDÉ et constaté qu'aucun pixel ne change.
+const FINGERPRINT_ONLY = process.argv.includes('--fingerprint-only');
+const OUT_ARG = process.argv.slice(2).find((a) => !a.startsWith('--'));
+const OUT_DIR = OUT_ARG
+  ? path.resolve(OUT_ARG)
   : path.join(__dirname, '..', 'images');
 
 // Panel width in CSS px (a typical secondary-sidebar width), captured at 2×.
@@ -119,11 +125,14 @@ const THEME_DARK = {
 // ── Fictional data ─────────────────────────────────────────────────────────
 // Quota windows arrive pre-resolved (pace/elapsedPct are computed by
 // extension.js in the real flow) — hand-written here, same as the DEMO set.
+// `cost` is the per-window amount shipped in 2.45.0 and headlined in the
+// README: without it the store shot showed bare percentages and hid the
+// feature the page advertises. Fictional figures, like every value here.
 const QUOTA = {
   windows: [
-    { label: '5h window', pct: 34, resetsAt: null, resetLabel: '19:00', windowMs: 5 * 3600e3, pace: 'green', elapsedPct: 52 },
-    { label: '7d window', pct: 61, resetsAt: null, resetLabel: 'Wed 13:00', windowMs: 7 * 86400e3, pace: 'yellow', elapsedPct: 63 },
-    { label: 'Fable (7d)', pct: 74, resetsAt: null, resetLabel: 'Wed 13:00', windowMs: 7 * 86400e3, pace: 'red', elapsedPct: 41 },
+    { label: '5h window', pct: 34, cost: 18.4, resetsAt: null, resetLabel: '19:00', windowMs: 5 * 3600e3, pace: 'green', elapsedPct: 52 },
+    { label: '7d window', pct: 61, cost: 962, resetsAt: null, resetLabel: 'Wed 13:00', windowMs: 7 * 86400e3, pace: 'yellow', elapsedPct: 63 },
+    { label: 'Fable (7d)', pct: 74, cost: 311, resetsAt: null, resetLabel: 'Wed 13:00', windowMs: 7 * 86400e3, pace: 'red', elapsedPct: 41 },
   ],
   burnRate: { greenMax: 0.85, yellowMax: 1.0 },
   ageMin: 2,
@@ -139,26 +148,47 @@ const BATCH = {
 
 const UI = { collapsedConversations: false, collapsedQuota: false, sortOrder: 'tabOrder' };
 
+// Estimated cost of a conversation, as state.js/cost.js publishes it. The
+// split (a little fresh input, a lot of cache, output carrying most of the
+// price) mirrors what a real transcript looks like — the listing screenshots
+// must show a panel a user can actually get, tooltip included. Amounts are
+// fictional, like every other value in this fixture, and are picked to show the
+// three colour bands (grey below costYellowDollars, yellow, red).
+const cost = (total) => ({
+  total,
+  input: +(total * 0.06).toFixed(4),
+  cacheRead: +(total * 0.4).toFixed(4),
+  cacheWrite: +(total * 0.15).toFixed(4),
+  output: +(total * 0.39).toFixed(4),
+  tools: 0,
+  messages: 24,
+});
+
 // Flat conversations — one of each state the panel can show.
 const FLAT_CONVS = [
-  { id: 'c1', title: 'Refactor auth middleware for session rotation', model: 'Opus 4.8', effort: 'high', ctx: { pct: 41, tokens: 410000, denom: 1000000 }, state: 'busy', acked: true, active: true, tabOpen: true },
-  { id: 'c2', title: 'Add pagination to the orders API', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 63, tokens: 126000, denom: 200000 }, state: 'waiting', acked: true, active: false, tabOpen: true },
-  { id: 'c3', title: 'Fix flaky checkout integration test', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 22, tokens: 44000, denom: 200000 }, state: 'done', acked: false, active: false, tabOpen: true },
-  { id: 'c4', title: 'Write onboarding docs for the CLI', model: 'Haiku 4.5', effort: null, ctx: { pct: 8, tokens: 16000, denom: 200000 }, state: 'done', acked: true, active: false, tabOpen: true },
-  { id: 'c5', title: 'Investigate memory leak in worker pool', model: 'Opus 4.8', effort: 'high', ctx: { pct: 77, tokens: 770000, denom: 1000000 }, state: 'interrupted', acked: true, active: false, tabOpen: true },
+  { id: 'c1', title: 'Refactor auth middleware for session rotation', model: 'Opus 4.8', effort: 'high', ctx: { pct: 41, tokens: 410000, denom: 1000000 }, cost: cost(6.42), state: 'busy', acked: true, active: true, tabOpen: true },
+  { id: 'c2', title: 'Add pagination to the orders API', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 63, tokens: 126000, denom: 200000 }, cost: cost(2.18), state: 'waiting', acked: true, active: false, tabOpen: true },
+  { id: 'c3', title: 'Fix flaky checkout integration test', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 22, tokens: 44000, denom: 200000 }, cost: cost(0.84), state: 'done', acked: false, active: false, tabOpen: true },
+  { id: 'c4', title: 'Write onboarding docs for the CLI', model: 'Haiku 4.5', effort: null, ctx: { pct: 8, tokens: 16000, denom: 200000 }, cost: cost(0.09), state: 'done', acked: true, active: false, tabOpen: true },
+  { id: 'c5', title: 'Investigate memory leak in worker pool', model: 'Opus 4.8', effort: 'high', ctx: { pct: 77, tokens: 770000, denom: 1000000 }, cost: cost(3.75), state: 'interrupted', acked: true, active: false, tabOpen: true },
 ];
 
 // The group a pasted claude-convs block creates: master capsule on top, wave 1
 // running, wave 2 queued.
 const GROUP_CONVS = [
-  { id: 'm0', title: 'Plan the payment refactor', model: 'Opus 4.8', effort: 'high', ctx: { pct: 52, tokens: 520000, denom: 1000000 }, state: 'done', acked: true, active: false, tabOpen: true },
-  { id: 'g1a', title: 'Extract the billing client into packages/billing', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 34, tokens: 68000, denom: 200000 }, state: 'busy', acked: true, active: false, tabOpen: true, groupId: 'g1' },
-  { id: 'g1b', title: 'Add a PDF export button to the invoice page', model: 'Haiku 4.5', effort: null, ctx: { pct: 12, tokens: 24000, denom: 200000 }, state: 'done', acked: false, active: false, tabOpen: true, groupId: 'g1' },
+  { id: 'm0', title: 'Plan the payment refactor', model: 'Opus 4.8', effort: 'high', ctx: { pct: 52, tokens: 520000, denom: 1000000 }, cost: cost(1.62), state: 'done', acked: true, active: false, tabOpen: true },
+  { id: 'g1a', title: 'Extract the billing client into packages/billing', model: 'Sonnet 5', effort: 'medium', ctx: { pct: 34, tokens: 68000, denom: 200000 }, cost: cost(0.93), state: 'busy', acked: true, active: false, tabOpen: true, groupId: 'g1' },
+  { id: 'g1b', title: 'Add a PDF export button to the invoice page', model: 'Haiku 4.5', effort: null, ctx: { pct: 12, tokens: 24000, denom: 200000 }, cost: cost(0.21), state: 'done', acked: false, active: false, tabOpen: true, groupId: 'g1' },
 ];
 
 const GROUPS = [{
   id: 'g1',
   name: 'Payment refactor',
+  // Creation time shown on the grip since 2.36.0 — every real batch carries one
+  // (it comes from `createdAt`), so a fixture without it produces a listing
+  // screenshot of an empty header: a panel no user has. Fictional, like the
+  // rest of this file.
+  stamp: '14:12',
   hue: 262,
   collapsed: false,
   launchedWave: 1,
@@ -374,12 +404,25 @@ async function run() {
       fs.writeFileSync(out, Buffer.from(shot.data, 'base64'));
       console.log(`  wrote ${out}  (${Math.round(clip.width)}x${Math.round(clip.height)} css px @${SCALE}x)`);
     }
+    // Empreinte des sources qui DESSINENT ces captures (cf. shots-fingerprint.js).
+    // C'est elle qui permet à un banc de dire « la fiche a pris du retard »
+    // sans que personne n'ait à s'en souvenir : le drapeau de la 2.32 à la
+    // 2.40 a duré huit versions parce que la règle était une phrase, pas un
+    // contrôle qui tombe en rouge.
+    writeFingerprint(OUT_DIR);
+    console.log(`  wrote ${path.join(OUT_DIR, FINGERPRINT_FILE)}`);
   } finally {
     if (cdp) cdp.close();
     if (child) { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore', timeout: 5000 }); } catch {} }
     else if (tabId) { try { await httpPut(`http://127.0.0.1:${PORT}/json/close/${tabId}`); } catch {} }
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   }
+}
+
+if (FINGERPRINT_ONLY) {
+  writeFingerprint(OUT_DIR);
+  console.log(`  fingerprint only — wrote ${path.join(OUT_DIR, FINGERPRINT_FILE)} (images untouched)`);
+  process.exit(0);
 }
 
 run().then(() => console.log('done')).catch((e) => {

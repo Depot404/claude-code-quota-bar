@@ -1,5 +1,73 @@
 # Changelog
 
+## [2.47.2] - 2026-08-18
+
+### Fixed
+- **Second half of the same rule: an open tab now also wins a place in the list.** 2.47.1 stopped the list from dropping a conversation whose tab is still open, but the list is capped at twelve rows, and that cap was filled in order of "most recently written" — so twelve fresher conversations could still evict the one you have open, and everything the hierarchy infers from a conversation being listed fell over with it (a master line struck through, a member's row vanishing from its wave, a nested batch detaching from its parent). Conversations with an open tab are now picked first, freshest-first among themselves; the cap and the display order are unchanged. With no tab store available, everything stays exactly as before.
+
+## [2.47.1] - 2026-08-18
+
+### Fixed
+- **A conversation whose tab was still open could be struck through as "done · closed".** The panel drops a conversation from its list once nothing has been written to it for four hours and its CLI process is gone — a sensible rule for the list itself, but one the rest of the extension reads as *proof*: a group's master line renders struck through, and a wave member's row disappears altogether, purely because the conversation is not listed (`member-truth.js` concludes `done-closed` from it). Four hours after a batch was launched, the conversation that framed it — finished overnight, its process shut down, but its tab wide open on screen — was therefore crossed out as though its tab had been closed. A conversation whose tab is provably still open is now kept in the list whatever its age: VS Code's own session→tab-label store, crossed with the tabs actually open, proves it without reading a single transcript. Either source missing degrades to the previous behaviour, never to more hiding. Worth knowing: an old conversation you keep a tab open for now takes one of the list's slots again.
+
+## [2.47.0] - 2026-08-18
+
+### Added
+- **When a turn gets expensive, Claude now offers to hand the work over to a fresh conversation.** Colouring the row (2.46.0) tells you the next reply will be costly, but only if you happen to be looking at the panel — and the moment that matters is the one where you're typing. So once the last completed turn crosses `relayNoticeDollars` (default $5), the `UserPromptSubmit` hook adds three lines to that turn's context: what the last turn cost, and a request that Claude **offer** — never decide on its own — to commit what's done and continue in a new conversation, handing over with a `claude-convs` block you can paste straight into the panel's batch launcher. You stay in charge of the switch; you just stop having to notice the right moment yourself. Set the setting to `0` to turn the notice off.
+- **Never on a young conversation, and once per conversation, ever.** The notice waits until it has observed at least two complete turns: an expensive turn early on is usually one big tool call over a still-small context, and offering to hand over there would save nothing while teaching you to ignore the message. The threshold is its own setting rather than the one that colours the row ($2), because a colour is a passive signal and a notice interrupts — measured on the machine this was built on, $2 per turn would have fired on three working conversations out of four. A reminder repeated on every prompt would burn exactly the context it exists to save. The marker is persisted (`~/.claude/quotabar-turns/`) and survives window reloads.
+- The hook reads **only its own conversation's transcript**, incrementally, keeping the byte offset between prompts: 8 ms on the first prompt of a 20 MB resumed conversation (only the tail is parsed), 1–2 ms afterwards. It never scans the transcript folder, sends nothing anywhere, and is wrapped end to end — a missing transcript, an unreadable state file or an unparsable `settings.json` all resolve to silence, never to a failed prompt. It reuses the same price list and the same turn definition as the panel (`cost.js`), so a figure quoted in the chat and a colour shown in the sidebar can never disagree.
+- Requires the hooks to be installed (**Claude Convs: Install Hooks**, or `install.ps1`); re-run it after updating, since the hooks that run are the deployed copies.
+
+## [2.46.0] - 2026-08-18
+
+### Changed
+- **A conversation row's amount now colors by the cost of its LAST completed turn, not its running total.** The total shown never changes — it is still the full-conversation cumulative estimate — but the color behind it used to answer "has this been expensive so far?", a question you can no longer act on once it's true. It now answers "is the next reply likely to be expensive?": a turn is everything the assistant did between two of your prompts, and the color only ever reflects the most recent one that actually finished (a turn still in progress is never colored, so the row does not flicker while you're mid-task). The two settings governing conversation-total color (`costYellowDollars`/`costRedDollars`) still exist but no longer color anything; two new ones, `costTurnYellowDollars` (default $0.50) and `costTurnRedDollars` (default $2.00), take over — set an order of magnitude below the total thresholds, since a single turn on this machine has ranged from $0.03 to $27.20. Hovering the amount now always shows the reply count and last-turn cost alongside the usual input/cache/output breakdown once at least one turn has completed, since a color that no longer matches the number next to it needs the explanation more than ever.
+
+## [2.45.0] - 2026-08-18
+
+### Added
+- **Every quota window now shows what actually filled it, in dollars** — on its top line, between the label and the percentage. The percentage says how much of a window is gone; it never said what went into it. The amount is measured over the window's exact period (its reset time minus its length) across **every** Claude Code transcript on the machine, not just the conversations the panel happens to be listing: a quota window is account-wide, so the figure has to be too. A model-scoped weekly window counts only that family's messages, and shows nothing at all rather than a misleading zero when it cannot tell which family a scope refers to.
+- Same convention as a conversation row: `≈` marks the estimate, and hovering carries the two caveats the line itself must not — the measurement is local (Claude Code on this PC, so whatever goes through claude.ai or the mobile app counts toward the percentage but not toward this amount), and it is the value of that usage at API list prices, something a subscription covers rather than a spend. Above $100 the figure rounds to the dollar: two decimals on four digits, in a 300 px sidebar, are noise.
+- Reading it costs no tokens and no network call, and reuses the accumulator that already prices each conversation — the same bytes are never parsed twice. The first full pass over the transcript folder is deferred until the panel is actually **visible**, and only then: a window whose panel stays closed reads nothing, which matters when several VS Code windows are open at once. Later passes are incremental and take a few milliseconds.
+
+## [2.44.2] - 2026-08-18
+
+### Fixed
+- **The spinner could still stay on forever — second cause, found the same evening.** A live, finished conversation shows a spinner when the transcript proves it is about to resume on its own: every background launch is paired with its completion notification. 2.44.0 taught that pairing to survive window reloads, but the notification itself was only recognized in the one shape observed until then — a user-turn message, which is how it lands when the task finishes while the conversation is *idle*. When the task finishes *mid-turn*, the CLI delivers it through its message queue instead (`queue-operation`, then an `attachment` marked `task-notification`) — entries the detector never read. The launch stayed visible, the completion invisible: half of the pair broke alone, and the row spun forever on a conversation that had long answered. All three delivery shapes are now recognized, and a notification merely *quoted* somewhere (a grep, a pasted prompt mentioning the tags) still extinguishes nothing.
+
+## [2.44.1] - 2026-08-18
+
+### Fixed
+- **"1 conversation not sent yet — press Enter in its tab." could stay on screen long after that tab had started.** The banner is recomputed on every refresh from what is actually true — a tab still open with nothing sent — but the sentence produced at launch time was also kept as a fallback, and that copy was frozen. The moment the batch it described went away (its group dissolved, or no session left to recount), the recompute fell back to that frozen sentence, and the panel went on prescribing an Enter press for a conversation that had answered hours earlier. The fallback now carries only what no recompute could reproduce — tasks that were never identified, a batch that stopped part-way: a stale statement of fact goes quiet, where a stale instruction sends you hunting for a tab that no longer exists.
+
+## [2.44.0] - 2026-08-18
+
+### Changed
+- **The listing now opens on how to actually see the panel.** The panel docks in VS Code's Secondary Side Bar, which is open by default on a folder but hidden in an empty window — and stays hidden once you close it, at which point installing the extension appears to do nothing at all. What used to be a troubleshooting note halfway down the README is now its first section: a three-step walkthrough with the keyboard shortcut (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>) and the Command Palette entry, not just the menu path, and it no longer claims there is always an icon to click — when Claude Convs is the only panel docked there, it simply *is* the sidebar.
+
+### Fixed
+- **A finished conversation could spin forever after a window reload.** Reloading VS Code kills every CLI process; when one had a background agent or a `run_in_background` command still outstanding at that moment, its notification could never arrive — yet the row kept reading that as "about to resume on its own" and stayed busy for good, since nothing was ever going to write to the transcript again. A pending background launch or a scheduled wakeup now only counts as a reason to stay busy when it's newer than the currently running CLI process — one it could actually still hear back from. Anything older is a leftover from a process the reload already ended.
+
+## [2.43.0] - 2026-08-18
+
+### Added
+- **Each conversation row now shows what it has cost, in dollars, since it started** — to the right of its title, next to the `ctx:%` that only ever said how full the context is *right now*. A conversation sitting at 20% after three compactions has spent far more than one at 70% opened ten minutes ago; the amount is that missing half of the picture. Hovering it breaks the estimate down into input / cache / output.
+- The figure costs **nothing to produce**: no network call and no tokens, just the `usage` data every assistant entry of the transcript already carries, priced at the public list rate of the model **of each message** (so a conversation that switched models mid-way mixes rates, as it should), with the standard cache ratios and the fast-mode rate where it applies. Transcripts run to tens of megabytes, so reading is incremental — only appended bytes are ever parsed.
+- Amounts turn yellow past `$2` and red past `$5` by default (`claudeCodeQuotaBar.costYellowDollars` / `costRedDollars`), reusing the colour vocabulary of the context and quota bars. Absolute thresholds, so an amount means the same thing from one day to the next. A conversation with no usage data yet shows nothing rather than a `$0.00` that would suggest it was free, and the tooltip's `≈` marks the figure for what it is: an estimate.
+
+## [2.42.0] - 2026-08-18
+
+### Changed
+- **A batch no longer draws a frame around itself — its head row carries the batch instead.** The tinted outline that boxed in the batch header and its master row is gone, on root batches and on nested sub-batches alike. What said "this row opens a batch" is now inside the row: a noticeably larger, thicker state bubble, the vertical rail starting from under that bubble rather than from under the whole row, and the title in bold. The tinted band stays, so a batch still reads as one block, with one line less of ink around it.
+
+### Fixed
+- **The rail no longer disappears under the row you hover or select.** A row's background is opaque and was painted over the batch's vertical line, so moving the mouse down a batch wiped the line out row by row. The rail now sits above row backgrounds and below the state bubbles, which keep punching their hole through it — an order that no longer depends on the order rows happen to be laid out in.
+
+## [2.41.0] - 2026-08-17
+
+### Added
+- **The context bar (`ctx:%`) now turns yellow or red as a conversation fills its context window**, same red/yellow/green vocabulary as the quota bars. Coloured directly on the percentage of the window used — red at 50% by default, yellow at 40% — rather than the quota bars' burn-rate ratio, since a context window doesn't refill on a schedule the way a quota window does. Thresholds are configurable (`claudeCodeQuotaBar.ctxRedMin`/`ctxYellowMin`); the bar's length is unchanged, it still measures the margin before the wall.
+
 ## [2.40.1] - 2026-08-17
 
 ### Fixed

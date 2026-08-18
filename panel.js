@@ -19,7 +19,11 @@ const vscode = require('vscode');
 //       asked: { model, effort } | null,   // ce qu'on avait demandé au lancement
 //       mismatch: { model?: {asked, real}, effort?: {asked, real} } | null,
 //       ctx: { pct, tokens, denom } | null,
-//       state: 'busy'|'waiting'|'done'|'stale'|'idle'|'interrupted',
+//       cost: { total, input, cacheRead, cacheWrite, output, tools, messages } | null,
+//                             // $ estimés consommés depuis le DÉBUT de la conv
+//                             // (cost.js) — l'intégrale, là où ctx est une
+//                             // photo. null = aucune donnée d'usage encore.
+//       state:'busy'|'waiting'|'done'|'stale'|'idle'|'interrupted',
 //       acked: boolean,       // ✓ déjà lu (onglet consulté après la fin du tour)
 //       active: boolean,      // conv de l'onglet sélectionné dans cette fenêtre
 //       groupId: string|null, // membre d'un groupe → rendue DANS sa section
@@ -44,6 +48,9 @@ const vscode = require('vscode');
 //       collapsedConversations: boolean,  // claudeCodeQuotaBar.collapsedConversations
 //       collapsedQuota: boolean,          // claudeCodeQuotaBar.collapsedQuota
 //       sortOrder: 'tabOrder'|'lastActivity'|'statusFirst',  // claudeCodeQuotaBar.conversationSortOrder
+//       ctxThresholds: { redMin: number, yellowMin: number }, // claudeCodeQuotaBar.ctxRedMin/ctxYellowMin
+//       costThresholds: { redMin: number, yellowMin: number }, // claudeCodeQuotaBar.costRedDollars/costYellowDollars ($) — obsolète, ne colore plus rien
+//       costTurnThresholds: { redMin: number, yellowMin: number }, // claudeCodeQuotaBar.costTurnRedDollars/costTurnYellowDollars ($) — colore la ligne
 //     },
 //     canary: boolean,       // lot 13 §1 : conv(s) busy/waiting mais zéro onglet
 //                             // Claude détecté depuis > 2 min — viewType dérivé ?
@@ -132,11 +139,29 @@ class ClaudePanelProvider {
 
     view.onDidDispose(() => { this._view = null; });
 
+    // « Le panneau est à l'écran ». VS Code ne résout cette vue qu'au moment de
+    // l'afficher, mais elle peut ensuite être masquée puis revenir : les deux
+    // chemins mènent ici, à charge pour extension.js d'être idempotent. Sert au
+    // scan global des transcripts (coût par fenêtre de quota), qu'une fenêtre
+    // au panneau fermé ne doit jamais payer.
+    // Absent des vues mockées des bancs : on ne s'y abonne que si l'hôte le
+    // propose, comme partout ailleurs pour une API non garantie.
+    if (typeof view.onDidChangeVisibility === 'function') {
+      view.onDidChangeVisibility(() => { if (view.visible) this._notifyVisible(); });
+    }
+
     // Le webview repart de zéro à chaque résolution (première ouverture, ou
     // après un déchargement) : on lui repousse le dernier état connu tout de
     // suite pour éviter un panneau vide jusqu'au prochain refresh.
     if (this._state) this.update(this._state);
     else if (this._handlers.ready) this._handlers.ready();
+    if (view.visible) this._notifyVisible();
+  }
+
+  _notifyVisible() {
+    const h = this._handlers.visible;
+    if (!h) return;
+    try { h(); } catch {}
   }
 
   update(state) {
@@ -169,9 +194,19 @@ function l10nBundle() {
   try { return (vscode.l10n && vscode.l10n.bundle) || {}; } catch { return {}; }
 }
 
+// Locale VS Code (« fr », « pt-br »…) — le webview en a besoin pour formater
+// un MONTANT, ce que le bundle l10n ne sait pas faire : le séparateur décimal
+// et la place du symbole $ vivent dans le nombre, pas dans une phrase à
+// traduire. Même précaution que l10nBundle() : hors VS Code (bancs), repli
+// anglais silencieux.
+function uiLocale() {
+  try { return (vscode.env && vscode.env.language) || 'en'; } catch { return 'en'; }
+}
+
 function renderHtml(webview) {
   const nonce = nonceOf();
   const bundleJson = JSON.stringify(l10nBundle()).replace(/</g, '\\u003c');
+  const localeJson = JSON.stringify(uiLocale()).replace(/</g, '\\u003c');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -219,6 +254,30 @@ function renderHtml(webview) {
        21px au banc de la maquette). Axes qui en résultent : rail parent 14,5 ·
        rail enfant 42,5, chacun sous ses propres anneaux. */
     --nest-indent: 28px;
+    /* Crochet de fin de lot (2026-08-17) — le rail ne s'arrête plus au ras de
+       la ligne fantôme : il descend jusqu'à la barre de contexte de la
+       DERNIÈRE ligne du lot et tourne à 90° vers elle, si bien que le bloc se
+       lit comme un crochet fermé. Ces trois valeurs ont été réglées par
+       l'user sur la maquette jouable (MOCKUP_crochet_fin_lot_2026-08-17.html,
+       curseurs en direct) : elles sont un CHOIX, pas une mesure — un banc ne
+       peut donc pas les rederiver, il ne fait que constater qu'elles sont
+       toujours celles-là. La géométrie qu'elles ne portent pas (où le crochet
+       s'arrête, à quelle hauteur) est calculée en JS, cf. measureRail. */
+    --hook-w: 2px;        /* épaisseur, rail vertical ET crochet : un seul trait */
+    --hook-radius: 7px;   /* rayon du coude */
+    --hook-fade: 16px;    /* longueur du fondu de l'extrémité */
+    /* Bulle de la ligne MAÎTRESSE (2026-08-17) — depuis que le cadre de la
+       capsule a disparu (cf. .grp-master-head plus bas), c'est elle qui porte
+       l'identité de la tête de lot : un anneau nettement plus gros et plus
+       épais que celui des membres (16px / 1,5px), d'où part le rail. Les deux
+       valeurs ont été choisies par l'user sur la maquette jouable
+       (MOCKUP_master_sans_cadre_2026-08-17.html, curseurs en direct) : ce sont
+       des CHOIX, pas des mesures — un banc ne les redérive pas, il constate
+       qu'elles sont toujours celles-là. Elles ne déplacent RIEN (l'anneau est
+       un pseudo absolu, hors flux) : l'égalité au pixel entre une ligne de
+       maîtresse, un membre et une ligne plate tient par construction. */
+    --master-ring-w: 4.25px;
+    --master-ring-d: 24px;
   }
   /* Enregistrée = le moteur interpole un <angle> en douceur (la longueur du
      serpentin croît/décroît au lieu de sauter) — condition pour l'animation
@@ -284,6 +343,23 @@ function renderHtml(webview) {
   .conv:hover { background: var(--vscode-list-hoverBackground); }
   .conv.active { background: var(--vscode-list-inactiveSelectionBackground); }
   .conv .body { min-width: 0; }
+  /* Coût estimé ($) — variante B de la maquette 2026-08-17, choisie par
+     l'user : le montant vit sur la ligne du TITRE, à droite, et la ligne méta
+     (modèle · ctx) ne bouge pas. Le titre reste ellipsé, le montant ne
+     l'écourte que de sa propre largeur — et surtout il ne touche PAS à la
+     barre de contexte, dont l'égalité au pixel entre ligne plate, membre et
+     maîtresse est un invariant du panneau (banc §16). */
+  .conv .title-row { display: flex; gap: 8px; align-items: baseline; }
+  .conv .title-row .title { flex: 1 1 auto; min-width: 0; }
+  .conv .cost {
+    flex: none; font-size: 11px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Seuils ABSOLUS en dollars (costYellowDollars/costRedDollars) — mêmes
+     jetons de couleur pace-* que le ctx et le burn-rate : un seul vocabulaire
+     de couleur dans tout le panneau. */
+  .conv .cost.pace-yellow { color: var(--pace-yellow); }
+  .conv .cost.pace-red { color: var(--pace-red); }
   .conv .title {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
@@ -297,6 +373,11 @@ function renderHtml(webview) {
   }
   .conv .meta .model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .conv .meta .ctx { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+  /* Seuils directs sur %ctx (settings ctxRedMin/ctxYellowMin), même vocabulaire
+     CSS que le burn-rate quota — un seul jeu de tokens de couleur pace-*. */
+  .conv .meta .ctx.pace-green { color: var(--pace-green); }
+  .conv .meta .ctx.pace-yellow { color: var(--pace-yellow); }
+  .conv .meta .ctx.pace-red { color: var(--pace-red); }
 
   /* Pastilles d'état : la forme porte l'info autant que la couleur
      (daltonisme + thèmes à contraste élevé).
@@ -417,6 +498,9 @@ function renderHtml(webview) {
   }
   .bar > i { display: block; height: 100%; border-radius: 2px; }
   .bar-ctx > i { background: var(--muted); opacity: .7; }
+  .bar-ctx.pace-green > i { background: var(--pace-green); opacity: 1; }
+  .bar-ctx.pace-yellow > i { background: var(--pace-yellow); opacity: 1; }
+  .bar-ctx.pace-red > i { background: var(--pace-red); opacity: 1; }
   .bar-q { height: 6px; }
   .bar-q > i { background: var(--vscode-progressBar-background, #0e70c0); }
   /* Burn-rate : %utilisé / %fenêtre écoulée. Pas de signal fiable (reset trop
@@ -445,6 +529,12 @@ function renderHtml(webview) {
   .q { margin: var(--sp-sep) 0 var(--sp-block); }
   .q-head { display: flex; align-items: baseline; }
   .q-label { font-size: 11px; color: var(--muted); }
+  /* Coût mesuré de la fenêtre : entre le libellé et le pourcentage, sur la
+     ligne du HAUT — donc zéro hauteur ajoutée, et rien qui puisse entrer en
+     collision avec la flèche de burn-rate, qui vit sous la barre. Les marges
+     auto de part et d'autre le posent au milieu ; le .q-pct garde la sienne à
+     gauche et reste collé au bord droit. */
+  .q-cost { margin: 0 auto; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .q-pct { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
   .q-sub { margin-top: var(--sp-tight); font-size: 11px; color: var(--muted); }
 
@@ -591,12 +681,14 @@ function renderHtml(webview) {
      de la pill commence APRÈS l'axe du rail (margin-left, même repère 20px que
      les autres en-têtes de vague, cf. le groupe de sélecteurs plus bas) : le
      rail passe à sa gauche, intersection vide PAR GÉOMÉTRIE — prouvé au banc
-     (§17f). Le z-index 1 de l'étape 19 est CONSERVÉ en ceinture : si une
-     évolution future refait se croiser les deux boîtes (place() peut réordonner
-     le rail après la pill, l'ordre du DOM ne tranche rien), c'est la pill qui
-     repasse devant, jamais un trait en travers du CTA. */
+     (§17f). Le z-index de ceinture (étape 19) est CONSERVÉ : si une évolution
+     future refait se croiser les deux boîtes (place() peut réordonner le rail
+     après la pill, l'ordre du DOM ne tranche rien), c'est la pill qui repasse
+     devant, jamais un trait en travers du CTA. Passé à 2 le jour où le rail
+     est monté à 1 (2026-08-17) : à valeur égale, la ceinture ne ceinture plus
+     rien — c'est très exactement l'ordre du DOM qu'elle est censée ignorer. */
   .wave-hdr.launch {
-    position: relative; z-index: 1;
+    position: relative; z-index: 2;
     cursor: pointer; justify-content: center;
     border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
     border-radius: 12px; padding: var(--sp-tight) 10px;
@@ -693,8 +785,14 @@ function renderHtml(webview) {
   .grp-head {
     display: flex; align-items: center; gap: 5px;
     margin: 0 calc(-1 * var(--grp-bleed));
-    padding: 4px calc(6px + var(--grp-bleed)); border-radius: 6px; border-bottom-left-radius: 0;
-    border: 1.5px solid var(--grp-hue, var(--muted));
+    /* SANS BORDURE (2026-08-17) : la grip n'est plus qu'une bande TEINTÉE. Le
+       trait qui l'encadrait faisait doublon avec le fond, et il n'a plus rien
+       à refermer depuis que la ligne maîtresse a perdu son cadre. Le padding
+       porte les 1,5px que la bordure occupait (4 → 5,5 ; 6 → 7,5) : la boîte
+       de la grip et l'aplomb de son libellé ne bougent pas d'un pixel, seule
+       l'encre part. Radius bas-gauche à 0 : le fond descend sans couture vers
+       la ligne maîtresse (ou vers le rail, sur un lot sans maîtresse). */
+    padding: 5.5px calc(7.5px + var(--grp-bleed)); border-radius: 6px; border-bottom-left-radius: 0;
     background: var(--grp-tint, transparent);
     cursor: pointer; user-select: none;
     /* Teinte : --grp-hue/--grp-tint, posées en JS sur .grp (renderGroups,
@@ -706,11 +804,11 @@ function renderHtml(webview) {
        porte le chevron et le compteur du groupe — replier ne doit RIEN changer
        à l'apparence de la ligne master (cf. .grp-body.collapsed ci-dessous). */
   }
-  /* Capsule ENGLOBANTE (étape 13) : avec une master, la grip n'est plus que la
-     rangée HAUTE du cadre — elle perd sa bordure basse, la ligne master
-     ci-dessous ferme le cadre. Sans master, la grip reste un cadre complet. */
+  /* Avec une master, le fond teinté de la grip se PROLONGE dans la ligne
+     maîtresse juste en dessous : ses deux coins bas restent carrés pour que
+     les deux bandes n'en fassent qu'une (le bas-gauche l'est déjà pour tout
+     le monde). Il n'y a plus de bordure à ouvrir depuis 2026-08-17. */
   .grp.has-master > .grp-head {
-    border-bottom-width: 0;
     border-bottom-right-radius: 0;
   }
   .grp-head:hover { background: var(--vscode-list-hoverBackground); }
@@ -762,15 +860,18 @@ function renderHtml(webview) {
      offsets horizontaux que .m-head (décision 2, alignement unifié), donc que
      la liste plate — rien à ajouter ici, .grp-master-head ne pose aucun
      padding/margin gauche. */
-  /* La capsule teintée ENGLOBE la ligne master (étape 13 — constat user : elle
-     flottait SOUS le cadre). Le cadre est peint en box-shadow INSET, jamais en
-     border/padding : une bordure décalerait de 1,5px tout le contenu de la
-     ligne et casserait l'égalité au pixel avec les lignes standard — la classe
-     d'erreur même de ce lot. Les bandes tombent donc exactement sur les bords
-     de la bordure de la grip au-dessus (même boîte, même teinte) : un seul
-     cadre continu à l'œil, zéro géométrie modifiée. Le fond teinté, lui, est
-     peint dans la couche des fonds de blocs — le rail (positionné) passe
-     PAR-DESSUS, la master reste le premier nœud du rail comme à l'étape 9. */
+  /* PLUS DE CADRE (2026-08-17, réglé par l'user sur maquette jouable) — la
+     ligne maîtresse n'est plus encadrée du tout : ni les 3 bords qu'un
+     pseudo-élément peignait ici depuis l'étape 13, ni la bordure de la grip
+     au-dessus. Ce que le cadre disait est repris par trois signes qui vivent
+     DANS la ligne, donc sans aucune boîte à refermer : sa bulle (nettement
+     plus grosse et plus épaisse, cf. --master-ring-*), le rail qui en part, et
+     son titre en gras. Le fond teinté, lui, reste : il descend de la grip et
+     donne toujours au bloc son étendue, mais peint dans la couche des fonds —
+     le rail (positionné) passe PAR-DESSUS, la maîtresse reste le premier nœud
+     du rail comme à l'étape 9.
+     Ne pas réintroduire de bordure ici : ce serait re-décaler le contenu de la
+     ligne (l'ancienne raison du pseudo) ET revenir sur la décision. */
   .grp-master-head {
     position: relative;
     display: flex; align-items: flex-start; gap: 4px; min-width: 0;
@@ -778,23 +879,13 @@ function renderHtml(webview) {
     background: var(--grp-tint, transparent);
     border-radius: 0 0 6px 6px;
   }
-  /* ÉTAPE 19 — le cadre vit sur un CALQUE qu'aucun fond d'enfant ne peut
-     recouvrir. Constat user : ligne master sélectionnée (ou survolée) → son
-     fond (.conv.active / .conv:hover) passait PAR-DESSUS les bandes, peintes
-     jusque-là en box-shadow inset sur le conteneur lui-même : un box-shadow
-     inset appartient à la couche des fonds du parent, donc SOUS le fond de
-     n'importe quel enfant. Le pseudo-élément, lui, se peint après tous les
-     descendants non positionnés — la sélection ne peut plus l'atteindre, quel
-     que soit son fond. pointer-events:none : purement décoratif, il ne vole
-     aucun clic à la ligne en dessous. */
-  .grp-master-head::after {
-    content: ''; position: absolute; inset: 0; z-index: 2; pointer-events: none;
-    border-radius: inherit;
-    box-shadow:
-      inset 1.5px 0 0 0 var(--grp-hue, transparent),
-      inset -1.5px 0 0 0 var(--grp-hue, transparent),
-      inset 0 -1.5px 0 0 var(--grp-hue, transparent);
-  }
+  /* SUPPRIMÉ 2026-08-17 — le pseudo-cadre 3 bords de la ligne maîtresse.
+     Il vivait ici (étape 19) et réglait un vrai problème : peint en calque
+     par-dessus les descendants, il survivait au fond d'une ligne sélectionnée
+     ou survolée, ce qu'un box-shadow inset sur le conteneur ne faisait pas.
+     Le cadre lui-même a été retiré (décision user), pas la leçon : toute
+     décoration qu'un fond d'enfant ne doit pas pouvoir recouvrir se peint en
+     pseudo-élément positionné, jamais en inset sur le conteneur. */
   .grp-master-slot { flex: 1; min-width: 0; }
   /* Fallback dégradé (master hors de la fenêtre du panneau — ni transcript ni
      onglet suivis) : réutilise le gabarit .conv/.ico/.title existants (grille
@@ -862,8 +953,10 @@ function renderHtml(webview) {
        bords du cadre — constat visé par le banc « bords gauche/droite
        alignés au pixel entre les deux ». */
     margin: 2px 0 0 var(--nest-indent);
-    padding-left: 6px; padding-right: 6px;
-    border-bottom-width: 0;
+    /* 7,5px comme .grp-head : les 1,5px de l'ancienne bordure sont passés dans
+       le padding le jour où elle a disparu (2026-08-17) — ici sans le bleed,
+       qu'une grip de sous-lot n'a jamais eu. */
+    padding-left: 7.5px; padding-right: 7.5px;
     border-bottom-right-radius: 0;
   }
   /* Corps du sous-lot : même décalage que sa grip, COLLÉ sous la capsule de
@@ -878,33 +971,17 @@ function renderHtml(webview) {
     padding-top: 0;
   }
 
-  /* Capsule de tête : la ligne du parent est ENCADRÉE à la couleur du sous-lot
-     qu'elle ouvre, tout en gardant sa bulle et son anneau au parent (« couleur
-     de bulle héritée du parent, encadrée de la couleur de ses enfants »).
-     — Peinte en PSEUDO-élément, jamais en border/padding : une bordure
-       décalerait tout le contenu de la ligne et casserait l'égalité au pixel
-       avec les lignes plates (§16 du banc), qui est l'invariant même de ce
-       panneau. Le pseudo se peint aussi APRÈS les fonds des descendants, donc
-       la sélection/le survol de la ligne ne peut pas passer par-dessus —
-       exactement la leçon de l'étape 19 sur le cadre de la ligne maîtresse.
-     — Elle commence à --nest-indent : l'anneau reste DEHORS, sur le rail du
-       parent. L'englober enfermerait le rail du parent dans le cadre de
-       l'enfant, ce qui dirait le contraire de la structure.
-     — 3 BORDS seulement (gauche/droite/bas), radius bas uniquement — le cadre
-       de .grp-master-head à l'identique (amendement 2026-08-16) : le bord
-       HAUT n'a plus lieu d'être puisque la grip, juste au-dessus, ferme déjà
-       le cadre par le sien. Un 4e bord aurait dessiné une double ligne à la
-       couture grip/tête. Toujours sans aucun fond : dans tout le panneau, une
-       capsule n'encadre qu'un EN-TÊTE, jamais des lignes de conversation. */
-  .member.nest-host > .m-head::after {
-    content: ''; position: absolute; z-index: 2; pointer-events: none;
-    top: 0; right: 0; bottom: 0; left: var(--nest-indent);
-    border-radius: 0 0 6px 6px;
-    box-shadow:
-      inset 1.5px 0 0 0 var(--nest-hue, var(--grp-hue, var(--muted))),
-      inset -1.5px 0 0 0 var(--nest-hue, var(--grp-hue, var(--muted))),
-      inset 0 -1.5px 0 0 var(--nest-hue, var(--grp-hue, var(--muted)));
-  }
+  /* SUPPRIMÉ 2026-08-17 — le cadre de la ligne de TÊTE d'un sous-lot, qui
+     l'encadrait à la couleur de l'enfant (« bulle héritée du parent, encadrée
+     de la couleur de ses enfants », amendement 2026-08-16). Il suit la ligne
+     maîtresse, dont il reprenait le canon : les deux cadres partent ensemble,
+     sinon le panneau dirait la même chose de deux façons selon l'endroit.
+     Ce qui reste pour lire un sous-lot : sa grip teintée, décalée de
+     --nest-indent JUSTE AU-DESSUS de la ligne de tête, la bulle épaissie de
+     cette ligne (mêmes --master-ring-* que la maîtresse) et le rail de
+     l'enfant, à sa couleur. La couleur de l'enfant n'est donc plus portée par
+     la ligne elle-même — écarté sur maquette (option « liseré extérieur
+     autour de la bulle », laissée à « rien » par l'user). */
 
   /* Rail P1 (« nœuds sur l'axe ») : trait vertical teinté du groupe, centré
      au pixel sur l'axe de la colonne des symboles d'état — le MÊME axe que
@@ -916,25 +993,59 @@ function renderHtml(webview) {
      z-index bas : les anneaux ci-dessous peignent PAR-DESSUS pour le « trouer ». */
   .grp-rail {
     /* left:13px, pas 14 : la propriété left positionne le bord GAUCHE de
-       l'élément, et le rail fait 2px de large — pour que son CENTRE tombe
-       sur l'axe à 14px (mesuré au banc), le bord gauche doit être à 13px. */
-    position: absolute; left: 13px; top: 0; width: 2px; z-index: 0;
-    background: var(--grp-hue, var(--muted));
+       l'élément, et le trait fait --hook-w de large — pour que son CENTRE
+       tombe sur l'axe à 14px (mesuré au banc), le bord gauche doit être à
+       13px. Voir --hook-w si cette épaisseur bouge un jour : le 13 la suit
+       (13 = 14 - --hook-w / 2) et devrait alors être recalculé.
+       CROCHET DE FIN DE LOT (2026-08-17) : le trait n'est plus un rectangle
+       plein mais une BOÎTE À DEUX BORDS — gauche (le rail) et bas (le
+       crochet) — avec un rayon au coin bas-gauche. Le coude est donc natif :
+       pas de second élément à aligner sur le premier, donc aucune couture
+       possible entre les deux segments, quel que soit le zoom. Le fond reste
+       transparent : les anneaux continuent de trouer le trait exactement
+       comme avant (ils peignent par-dessus, cf. plus bas).
+       Le masque fond la seule EXTRÉMITÉ droite du crochet — le gradient est
+       horizontal, donc le trait vertical (les --hook-w premiers pixels, où le
+       masque vaut encore ~1) garde son encre sur toute sa hauteur. Sans lui,
+       le crochet buterait net contre la barre de contexte qu'il vient
+       chercher ; avec, il s'y fond. */
+    /* z-index 1, pas 0 (2026-08-17) : à 0, le trait passait SOUS le fond des
+       lignes — or ce fond est opaque, si bien que survoler ou sélectionner une
+       conversation effaçait le rail sur toute sa hauteur (constat user). Une
+       ligne est un fond, le rail est la structure du lot : la structure ne
+       disparaît pas parce que la souris passe. À 1, il se peint au-dessus de
+       tous les fonds de lignes (z-index auto) et reste SOUS les anneaux, qui
+       valent 1 eux aussi mais viennent après lui dans le DOM — ils continuent
+       donc de le trouer exactement comme avant. Rien d'autre ne le croise :
+       les overlays de ligne (croix, chips) vivent à droite, le crochet
+       s'arrête à l'aplomb de la colonne de contenu. */
+    position: absolute; left: 13px; top: 0; z-index: 1;
+    box-sizing: border-box;
+    border-left: var(--hook-w) solid var(--grp-hue, var(--muted));
+    border-bottom: var(--hook-w) solid var(--grp-hue, var(--muted));
+    border-bottom-left-radius: var(--hook-radius);
+    -webkit-mask: linear-gradient(to right, #000 0, #000 calc(100% - var(--hook-fade)), transparent 100%);
+            mask: linear-gradient(to right, #000 0, #000 calc(100% - var(--hook-fade)), transparent 100%);
     pointer-events: none;
   }
   /* Anneau troué autour du symbole d'état d'une ligne DE GROUPE (membre lié
      OU ligne « en attente » avec son symbole queued) : cercle bordé teinte du
      groupe, fond OPAQUE = fond du panneau (c'est lui qui troue le rail), le
-     glyphe garde sa couleur d'état. .ico/.ico-pending passent à z-index:1
+     glyphe garde sa couleur d'état. .ico/.ico-pending passent à z-index:2
      (position:relative) : leur PROPRE contexte d'empilement peint entièrement
-     au-dessus du rail (z-index:0) ; à l'intérieur de ce contexte, l'anneau
+     au-dessus du rail (z-index:1) ; à l'intérieur de ce contexte, l'anneau
      (z-index:-1, LOCAL à l'icône) reste sous le glyphe — jamais dépendant du
-     z-index global du document, donc robuste peu importe l'ordre DOM. Centré
+     z-index global du document, donc robuste peu importe l'ordre DOM.
+     2 et non 1 (2026-08-17) : à valeur ÉGALE, c'est l'ordre du DOM qui
+     tranche, et cet ordre n'est pas garanti ici — place() replace les enfants
+     du corps par index et peut faire passer le rail après les lignes. Les
+     deux valeurs doivent donc être distinctes, sinon l'anneau cesse de trouer
+     le trait dès que le rendu réordonne (constaté au banc). Centré
      via top/left 50% + margin négatif : le centre du cercle égale TOUJOURS le
      centre de la boîte icône, quelle que soit sa taille exacte (9px vs 10px
      selon l'état) — donc toujours sur l'axe de la colonne grille. */
   .grp-body .conv .ico, .grp-body .m-pending .ico-pending {
-    position: relative; z-index: 1;
+    position: relative; z-index: 2;
   }
   .grp-body .conv .ico::after, .grp-body .m-pending .ico-pending::after {
     content: ''; position: absolute; z-index: -1;
@@ -948,14 +1059,38 @@ function renderHtml(webview) {
        partagés = ne peuvent plus diverger. */
     background: var(--vscode-sideBar-background, var(--vscode-editor-background));
   }
-  /* Anneau de la ligne MASTER (étape 13) : elle est DANS la capsule, donc le
-     fond réel derrière son anneau vaut « fond du panneau + teinte du groupe ».
-     La teinte est ajoutée en background-image PAR-DESSUS le background-color
-     hérité de la règle ci-dessus : exactement la même composition que la
-     capsule elle-même (même couleur, même ordre) — les deux ne peuvent pas
-     diverger, dans aucun thème. */
+  /* LA BULLE DE TÊTE (2026-08-17) — ligne maîtresse d'un lot ET ligne de tête
+     d'un sous-lot : depuis que ni l'une ni l'autre n'est encadrée, c'est cet
+     anneau qui dit « ceci ouvre un lot ». Plus gros et plus épais que celui
+     d'un membre (cf. --master-ring-*), et rien d'autre ne change : le pseudo
+     est absolu et centré sur le centre de la boîte d'icône, donc la ligne
+     garde au pixel la géométrie d'une ligne plate (invariant §16 du banc).
+     Les DEUX partagent la même règle : le canon de la maîtresse vaut pour la
+     tête de sous-lot, il ne peut pas diverger d'un endroit à l'autre. */
+  .grp-master-head .conv .ico::after, .member.nest-host > .m-head .conv .ico::after {
+    width: var(--master-ring-d); height: var(--master-ring-d);
+    margin: calc(-1 * var(--master-ring-d) / 2) 0 0 calc(-1 * var(--master-ring-d) / 2);
+    border-width: var(--master-ring-w);
+  }
+  /* Fond de l'anneau de la MAÎTRESSE seule (étape 13) : elle vit sur le fond
+     teinté du lot, donc le fond réel derrière son anneau vaut « fond du
+     panneau + teinte ». La teinte est ajoutée en background-image PAR-DESSUS
+     le background-color hérité de la règle générale : même couleur, même
+     ordre que la bande elle-même — les deux ne peuvent pas diverger, dans
+     aucun thème. Une tête de sous-lot, elle, n'a aucun fond teinté : elle
+     garde le fond du panneau, sans quoi son anneau se détacherait en pastille.
+     Ce fond reste OPAQUE des deux côtés : c'est lui qui troue le rail du
+     PARENT, qui traverse encore la ligne de tête (celui du lot, lui, part
+     désormais sous la bulle de la maîtresse — cf. measureRail). */
   .grp-master-head .conv .ico::after {
     background-image: linear-gradient(var(--grp-tint, transparent), var(--grp-tint, transparent));
+  }
+  /* Titre en gras (2026-08-17) : troisième signe de la tête de lot, avec la
+     bulle et le rail. Après .conv.active .title (même spécificité, plus haut
+     dans la feuille) : une maîtresse sélectionnée reste en gras, elle ne
+     redescend pas au 600 de la sélection. */
+  .grp-master-head .conv .title, .member.nest-host > .m-head .conv .title {
+    font-weight: 700;
   }
   /* Vie des bulles en attente (plan repli-auto étape 5) : un anneau ne reste
      JAMAIS vide. « inserted » (Entrée attendue de l'USER) : pulse lent, en
@@ -1254,6 +1389,8 @@ function renderHtml(webview) {
   // clé/valeur = texte source anglais → traduction sinon. t() est le pendant
   // local de vscode.l10n.t(), avec les mêmes placeholders {0}/{1}…
   const L10N_BUNDLE = ${bundleJson};
+  // Locale VS Code, pour Intl (montants) — cf. uiLocale() côté hôte.
+  const LOCALE = ${localeJson};
   function t(message) {
     const args = Array.prototype.slice.call(arguments, 1);
     const s = (L10N_BUNDLE && L10N_BUNDLE[message]) || message;
@@ -1315,6 +1452,9 @@ function renderHtml(webview) {
     newConvChevronEl.textContent = collapsedNewConv ? '▸' : '▾';
     const order = (ui && ui.sortOrder) || 'tabOrder';
     if (sortSelectEl.value !== order) sortSelectEl.value = order;
+    if (ui && ui.ctxThresholds) ctxThresholds = ui.ctxThresholds;
+    if (ui && ui.costThresholds) costThresholds = ui.costThresholds;
+    if (ui && ui.costTurnThresholds) costTurnThresholds = ui.costTurnThresholds;
   }
 
   // Icône haut-parleur : reflète l'état réel du setting, pas un état local —
@@ -1355,6 +1495,95 @@ function renderHtml(webview) {
   // garde-fous : aucune donnée non fiable hors textContent).
   const rows = new Map();   // id → nœuds réutilisés d'un rendu à l'autre
 
+  // Seuils de coloration de la barre de contexte (settings ctxRedMin/
+  // ctxYellowMin, défauts alignés sur package.json) — sur le POURCENTAGE de la
+  // fenêtre de contexte (ctx.pct), pas sur un ratio comme le burn-rate quota :
+  // pas de dérive dans le temps à recalculer, donc pas de mirroir de formule
+  // façon burnRatePace/paceColor plus bas, juste un seuil direct relu à chaque
+  // push via renderUi().
+  let ctxThresholds = { redMin: 50, yellowMin: 40 };
+  function ctxPaceColor(pct) {
+    if (pct == null) return null;
+    if (pct >= ctxThresholds.redMin) return 'red';
+    if (pct >= ctxThresholds.yellowMin) return 'yellow';
+    return 'green';
+  }
+
+  // Seuils ABSOLUS en dollars du coût d'une conversation (settings
+  // costYellowDollars/costRedDollars, défauts alignés sur package.json).
+  // Absolus et non relatifs au plus gourmand : une échelle relative repeint
+  // toutes les lignes dès qu'une seule grossit, donc ne dit jamais deux fois la
+  // même chose — décision user sur maquette, 2026-08-17.
+  // OBSOLÈTE (B3, 2026-08-18) : conservés côté settings et lus ici pour ne pas
+  // casser une éventuelle bascule arrière, mais costPaceColor ne sert plus à
+  // colorer la ligne — voir turnPaceColor ci-dessous.
+  let costThresholds = { redMin: 5, yellowMin: 2 };
+  function costPaceColor(v) {
+    if (v == null) return null;
+    if (v >= costThresholds.redMin) return 'red';
+    if (v >= costThresholds.yellowMin) return 'yellow';
+    // Sous le premier seuil : gris méta, PAS de vert. Une conversation bon
+    // marché n'est pas une bonne nouvelle à signaler, c'est le cas ordinaire —
+    // le vert du ctx, lui, répond à une question (« reste-t-il de la place ? »).
+    return null;
+  }
+
+  // Rythme (B3) : la couleur du montant suit le coût du DERNIER TOUR COMPLET,
+  // pas le cumul affiché — elle cesse de dire « ça a coûté cher » (irréversible)
+  // pour dire « le prochain tour risque de coûter cher » (actionnable). Seuils
+  // costTurnYellowDollars/costTurnRedDollars, un ordre de grandeur en dessous
+  // de ceux du cumul (mesuré : dernier tour de 0,03 $ à 27,20 $ sur 18 convs).
+  let costTurnThresholds = { redMin: 2, yellowMin: 0.5 };
+  function turnPaceColor(v) {
+    if (v == null) return null;
+    if (v >= costTurnThresholds.redMin) return 'red';
+    if (v >= costTurnThresholds.yellowMin) return 'yellow';
+    return null;
+  }
+
+  // Montant en dollars, dans la locale de VS Code : « $1.84 » en anglais,
+  // « 1,84 $ » en français, et le bon usage partout ailleurs sans une clé de
+  // traduction par format. L'option narrowSymbol évite le « 1,84 $US » que rendrait
+  // le symbole long en français. Le formateur est construit une fois : il est
+  // relativement coûteux et sert à chaque ligne, à chaque rendu.
+  let costFmt = null;
+  function fmtCost(v) {
+    if (costFmt === null) {
+      try {
+        costFmt = new Intl.NumberFormat(LOCALE, {
+          style: 'currency', currency: 'USD', currencyDisplay: 'narrowSymbol',
+          minimumFractionDigits: 2, maximumFractionDigits: 2,
+        });
+      } catch (e) {
+        // Runtime sans ICU complet, ou locale refusée : repli anglais explicite
+        // plutôt qu'une exception qui emporterait tout le rendu de la ligne.
+        costFmt = { format: function (x) { return '$' + x.toFixed(2); } };
+      }
+    }
+    return costFmt.format(typeof v === 'number' && isFinite(v) ? v : 0);
+  }
+
+  // Montant d'une FENÊTRE de quota. Au-dessus de 100 $, arrondi à l'unité :
+  // deux décimales sur quatre chiffres, dans une sidebar de 300 px, ne se
+  // lisent pas et n'apprennent rien. Même formateur, même locale que le montant
+  // d'une conversation — une seule convention de nombre dans tout le panneau.
+  let costFmt0 = null;
+  function fmtWindowCost(v) {
+    const n = typeof v === 'number' && isFinite(v) ? v : 0;
+    if (Math.abs(n) < 100) return fmtCost(n);
+    if (costFmt0 === null) {
+      try {
+        costFmt0 = new Intl.NumberFormat(LOCALE, {
+          style: 'currency', currency: 'USD', currencyDisplay: 'narrowSymbol',
+          minimumFractionDigits: 0, maximumFractionDigits: 0,
+        });
+      } catch (e) {
+        costFmt0 = { format: function (x) { return '$' + Math.round(x); } };
+      }
+    }
+    return costFmt0.format(n);
+  }
+
   function stateLabel(c) {
     if (c.state === 'busy') return t('working…');
     if (c.state === 'waiting') return t('waiting for you');
@@ -1390,7 +1619,11 @@ function renderHtml(webview) {
     const root = el('div', 'conv');
     const ico = el('span', 'ico');
     const body = el('div', 'body');
+    const titleRow = el('div', 'title-row');
     const title = el('div', 'title');
+    const cost = el('span', 'cost');
+    titleRow.appendChild(title);
+    titleRow.appendChild(cost);
     const meta = el('div', 'meta');
     const model = el('span', 'model');
     const ctx = el('span', 'ctx');
@@ -1398,7 +1631,7 @@ function renderHtml(webview) {
     const ctxBar = bar('bar-ctx', 0);
     meta.appendChild(model);
     meta.appendChild(ctx);
-    body.appendChild(title);
+    body.appendChild(titleRow);
     body.appendChild(meta);
     body.appendChild(mismatch);
     body.appendChild(ctxBar);
@@ -1421,7 +1654,7 @@ function renderHtml(webview) {
     linkMaster.type = 'button';
     linkMaster.title = t('Link to the active tab’s conversation as master');
     root.appendChild(linkMaster);
-    const row = { root, ico, title, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, data: null };
+    const row = { root, ico, title, cost, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, data: null };
     root.addEventListener('click', function () {
       // tabTitle : titre RÉEL de l'onglet quand il diverge de celui du
       // transcript — sans lui, focus.js ne retrouve pas un onglet renommé.
@@ -1443,6 +1676,33 @@ function renderHtml(webview) {
     // Le ✓ est du texte, les autres états sont des formes CSS.
     setText(row.ico, (c.state === 'done' || c.state === 'idle') ? '✓' : '');
     setText(row.title, c.title || t('Untitled'));
+    // Coût estimé ($) consommé depuis le début — l'intégrale, là où le %ctx
+    // n'est qu'une photo. Absent tant que le transcript ne porte aucune donnée
+    // d'usage : on MASQUE le nœud au lieu d'y écrire une chaîne vide, sinon la
+    // gouttière du .title-row rognerait 8px de titre pour rien.
+    const cost = c.cost && typeof c.cost.total === 'number' ? c.cost : null;
+    row.cost.style.display = cost ? '' : 'none';
+    if (cost) {
+      setText(row.cost, fmtCost(cost.total));
+      // Le ≈ étiquette l'estimation (tarifs de liste, famille de modèle
+      // devinée pour un modèle inconnu) ; le détail la justifie. Cache =
+      // lecture + écriture, les deux faces d'une même mécanique.
+      // L'infobulle est OBLIGATOIRE (B3) dès qu'un tour est clos : une couleur
+      // qui ne correspond plus au chiffre affiché (cumul) serait incompréhensible
+      // sans elle — elle porte désormais aussi le coût du dernier tour, seul
+      // signal derrière la couleur.
+      const turns = typeof cost.turns === 'number' ? cost.turns : 0;
+      const ctip = turns > 0
+        ? t('≈ {0} in {1} replies — last turn {2} — input {3} · cache {4} · output {5}',
+            fmtCost(cost.total), String(turns), fmtCost(cost.lastTurn),
+            fmtCost(cost.input), fmtCost((cost.cacheRead || 0) + (cost.cacheWrite || 0)), fmtCost(cost.output))
+        : t('≈ {0} — input {1} · cache {2} · output {3}',
+            fmtCost(cost.total), fmtCost(cost.input),
+            fmtCost((cost.cacheRead || 0) + (cost.cacheWrite || 0)), fmtCost(cost.output));
+      if (row.cost.title !== ctip) row.cost.title = ctip;
+      const cp = turnPaceColor(cost.lastTurn);
+      setClass(row.cost, 'cost' + (cp ? ' pace-' + cp : ''));
+    }
     // Terminée · onglet fermé (lot 4 §5) : barré en plus du reste — découle de
     // tabOpen (member-truth), jamais d'une mémoire locale. Rouvrir l'onglet
     // repasse tabOpen à true et efface le barré tout seul au prochain rendu.
@@ -1458,6 +1718,10 @@ function renderHtml(webview) {
     row.mismatch.classList.toggle('show', !!mm);
     setText(row.ctx, c.ctx ? t('ctx {0}%', Math.round(c.ctx.pct)) : '');
     row.ctxBar.style.display = c.ctx ? '' : 'none';
+    const ctxPace = c.ctx ? ctxPaceColor(c.ctx.pct) : null;
+    const ctxPaceCls = ctxPace ? ' pace-' + ctxPace : '';
+    setClass(row.ctx, 'ctx' + ctxPaceCls);
+    setClass(row.ctxBar, 'bar bar-ctx' + ctxPaceCls);
     if (c.ctx) {
       const w = Math.min(100, Math.max(1, c.ctx.pct)) + '%';
       if (row.fill.style.width !== w) row.fill.style.width = w;
@@ -1577,19 +1841,127 @@ function renderHtml(webview) {
   // blocs posés dans le flux — un nœud détaché mesure 0) ET par un
   // ResizeObserver sur <body> : toute largeur qui change (restauration,
   // redimensionnement de la sidebar) re-mesure sans attendre un postMessage.
+  // Géométrie du crochet (2026-08-17). Deux valeurs en dur, comme le 13px du
+  // rail et le 20px des séparateurs : ce sont des AXES du panneau, prouvés au
+  // banc, pas des grandeurs à re-mesurer à chaque rendu.
+  //   HOOK_END  — abscisse où le crochet s'arrête : le bord gauche de la
+  //     colonne de contenu d'une ligne (padding 6 + colonne d'icône 16 +
+  //     gouttière 8), donc l'aplomb EXACT du début de la barre de contexte.
+  //     C'est aussi celui du texte : une dernière ligne encore EN FILE, qui
+  //     n'a pas de barre de contexte, reçoit donc le même crochet, à la même
+  //     longueur — décidé par l'user sur maquette, et c'est la géométrie qui
+  //     le donne, pas un nombre choisi pour l'occasion.
+  //   HOOK_DROP — de combien le crochet passe SOUS l'axe de cette barre.
+  //     Réglé à la maquette : posé sur l'axe, le trait se confondait avec la
+  //     barre elle-même ; 4px plus bas, il la souligne.
+  const HOOK_END = 30;
+  const HOOK_DROP = 4;
+  const HOOK_W = 2;   // doit valoir --hook-w (CSS) : épaisseur du trait
+
+  // Ordonnée d'un nœud DANS le repère de .grp-body — la même chaîne
+  // d'offsetParent que celle qu'offsetTop suit tout seul quand le nœud est un
+  // enfant direct, remontée à la main parce qu'une ligne de membre est nichée
+  // (.member > .m-head > .m-slot > .conv > .bar-ctx) et que .m-head, lui, est
+  // positionné : sans cette boucle, on lirait un offset relatif à .m-head et
+  // le crochet se poserait des dizaines de pixels trop haut.
+  function topWithin(node, ancestor) {
+    let y = 0;
+    let n = node;
+    while (n && n !== ancestor) { y += n.offsetTop; n = n.offsetParent; }
+    return n ? y : null;
+  }
+
+  // Demi-diamètre de la bulle de tête, LU dans le CSS (--master-ring-d) et non
+  // recopié en dur : le trait part du bas de cet anneau, les deux ne peuvent
+  // donc pas diverger si la bulle grossit un jour. Lu une seule fois — la
+  // variable est posée sur :root et ne dépend d'aucun état.
+  let ringRadius = null;
+  function masterRingRadius() {
+    if (ringRadius === null) {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue('--master-ring-d');
+      const d = parseFloat(raw);
+      ringRadius = isNaN(d) ? 8 : d / 2;
+    }
+    return ringRadius;
+  }
+
+  // Dernière LIGNE du lot, dans l'ordre du flux : ni la ligne fantôme finale,
+  // ni un séparateur de vague, ni la grip d'un sous-lot — et jamais un nœud
+  // masqué (un lot replié n'a plus de ligne, donc plus de crochet). Lu sur les
+  // enfants DIRECTS du corps : les lignes d'un sous-lot imbriqué vivent dans
+  // son propre corps (.grp-body.nest-body), qui est ici un enfant à part
+  // entière — c'est LUI qu'on retient s'il ferme le lot, et le crochet du
+  // parent se pose alors sous le bloc entier, en englobant l'enfant.
+  function lastRowOf(node) {
+    const kids = node.body.children;
+    for (let i = kids.length - 1; i >= 0; i--) {
+      const k = kids[i];
+      if (k === node.rail || k.offsetParent === null) continue;
+      if (k.classList.contains('ghost-line') || k.classList.contains('wave-ghost')) continue;
+      if (k.classList.contains('wave-hdr') || k.classList.contains('wave-ctrl')) continue;
+      if (k.classList.contains('grp-head')) continue;         // grip d'un sous-lot
+      if (k.classList.contains('grp-master-head')) continue;  // la tête n'est pas une fin
+      return k;
+    }
+    return null;
+  }
+
   function measureRail(node) {
-    // ÉTAPE 19 — le rail ne se dessine JAMAIS À L'INTÉRIEUR du cadre de la
-    // capsule : quand une master est rendue, il part du bord BAS de sa ligne.
-    // L'anneau de la master reste le nœud de tête visuel (il est dans la
-    // capsule), mais le trait ne sort qu'avec elle. Sans master, le corps
-    // commence sous la grip : rien à retrancher, le rail part de son haut.
-    // offsetTop/offsetHeight se lisent dans le repère de .grp-body (seul
-    // ancêtre positionné), comme ghostRow.offsetTop juste en dessous — les
-    // deux bouts du trait sont mesurés dans LE MÊME repère, par construction.
+    // Sommet du trait (2026-08-17) : il PART DE LA BULLE de la maîtresse, au
+    // ras du bas de son anneau — la tête de lot n'est plus un cadre qu'on
+    // longe (étape 19 : le rail partait alors du bas de la LIGNE, pour ne
+    // jamais se dessiner à l'intérieur du cadre), c'est un nœud d'où le trait
+    // descend. Le rail ne traverse donc plus la bulle maîtresse : son anneau
+    // n'a plus rien à trouer, contrairement à celui des membres.
+    // Le calcul ne suppose RIEN de la hauteur de la ligne : centre de la boîte
+    // d'icône + demi-diamètre de l'anneau, lu sur --master-ring-d (une valeur,
+    // un seul endroit : la changer dans le CSS déplace le trait avec elle).
+    // Sans master, le corps commence sous la grip : rien à retrancher, le rail
+    // part de son haut. Repli si la ligne n'a pas d'icône (fallback dégradé
+    // d'une maîtresse hors de la fenêtre du panneau) : le bas de la ligne,
+    // c'est-à-dire le comportement d'avant.
     const head = node.masterHead.parentElement === node.body ? node.masterHead : null;
-    const top = head ? head.offsetTop + head.offsetHeight : 0;
+    let top = 0;
+    if (head) {
+      const ico = head.querySelector('.conv .ico');
+      const y = ico ? topWithin(ico, node.body) : null;
+      top = y === null
+        ? head.offsetTop + head.offsetHeight
+        : y + ico.offsetHeight / 2 + masterRingRadius();
+    }
+
+    // Pied du trait : l'axe de la barre de contexte de la dernière ligne,
+    // décalé de HOOK_DROP. Trois cas, un seul repli — jamais un nombre en
+    // dur : (1) ligne avec barre de contexte → son axe ; (2) ligne EN FILE
+    // (pas de barre) ou sous-lot imbriqué qui ferme le bloc → le bas de la
+    // boîte, seule ordonnée qui existe alors ; (3) rien à fermer (lot replié,
+    // lot vide) → pas de trait du tout. Le cas 3 doit couper le nœud : une
+    // boîte de hauteur 0 afficherait quand même son border-bottom, soit un
+    // crochet horizontal orphelin sous une grip repliée.
+    const last = lastRowOf(node);
+    const bar = last && !last.classList.contains('grp-body') ? last.querySelector('.bar-ctx') : null;
+    let footY = null;
+    if (bar && bar.offsetParent !== null) {
+      const y = topWithin(bar, node.body);
+      if (y !== null) footY = y + bar.offsetHeight / 2 + HOOK_DROP;
+    } else if (last) {
+      // Repli SANS HOOK_DROP, et ce n'est pas un oubli : la profondeur se
+      // compte depuis l'axe d'une barre de contexte, qui n'existe pas ici. Sur
+      // une ligne qui en a une, cet axe + HOOK_DROP tombe à un demi-pixel sous
+      // le BAS de la boîte (padding 2 + demi-barre 1,5 contre 4) — le bas de
+      // boîte est donc la même ordonnée, obtenue sans rien supposer du contenu
+      // de la ligne. Une dernière ligne encore en file reçoit ainsi le crochet
+      // à la hauteur qu'elle aurait une fois lancée, et il reste au-dessus de
+      // la ligne fantôme (4px plus bas) au lieu de la mordre.
+      const y = topWithin(last, node.body);
+      if (y !== null) footY = y + last.offsetHeight;
+    }
+    const height = footY === null ? 0 : Math.max(0, footY + HOOK_W / 2 - top);
+
+    node.rail.style.display = height > 0 ? '' : 'none';
     node.rail.style.top = top + 'px';
-    node.rail.style.height = Math.max(0, node.ghostRow.offsetTop - top) + 'px';
+    node.rail.style.height = height + 'px';
+    node.rail.style.width = Math.max(HOOK_W, HOOK_END - 13) + 'px';
   }
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(function () {
@@ -3033,6 +3405,19 @@ function renderHtml(webview) {
       const wrap = el('div', 'q');
       const head = el('div', 'q-head');
       head.appendChild(el('span', 'q-label', w.label));
+      // Coût MESURÉ sur la période exacte de cette fenêtre — absent (scan pas
+      // encore passé, fenêtre scopée sur une famille qu'on ne sait pas
+      // reconnaître, rien de mesurable dans la période) → on n'ajoute RIEN, la
+      // ligne garde exactement sa tête d'avant plutôt qu'un zéro trompeur.
+      if (typeof w.cost === 'number' && isFinite(w.cost)) {
+        const amount = fmtWindowCost(w.cost);
+        const c = el('span', 'q-cost', t('≈ {0}', amount));
+        // Les deux réserves vivent ICI, jamais sur la ligne : la mesure est
+        // partielle (ce PC, Claude Code seulement) et ce n'est pas une facture
+        // (valeur au tarif de liste, que l'abonnement couvre).
+        c.title = t('≈ {0} used in this window, measured on this PC (Claude Code only) — what goes through claude.ai or the mobile app counts toward the %, not toward this amount.\\nThis is the value of that usage at API list prices: your subscription covers it, it is not a spend.', amount);
+        head.appendChild(c);
+      }
       head.appendChild(el('span', 'q-pct' + paceCls, Math.round(w.pct) + '%'));
       wrap.appendChild(head);
       const barWrap = el('div', 'bar-wrap');

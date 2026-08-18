@@ -79,7 +79,7 @@ function paceColor(pace) {
   if (pace <= BURN_RATE.yellowMax) return 'yellow';
   return 'red';
 }
-function mkWindow(label, pct, resetsAt, windowMs) {
+function mkWindow(label, pct, resetsAt, windowMs, cost) {
   const elapsedPct = windowElapsedPct(resetsAt, windowMs);
   return {
     label, pct,
@@ -88,6 +88,7 @@ function mkWindow(label, pct, resetsAt, windowMs) {
     windowMs,
     pace: paceColor(burnRatePace(pct, resetsAt, windowMs)),
     elapsedPct: elapsedPct == null ? null : Math.min(100, Math.max(0, elapsedPct)),
+    cost: typeof cost === 'number' ? cost : null,
   };
 }
 
@@ -773,9 +774,13 @@ async function run() {
     // c'est le CONTENU (la bannière) qu'il faut mesurer, comme wave-ghost/
     // wave-hdr mesurent déjà leur propre boîte décalée par marge/padding.
     const ctrlVsRail = await cdp.evaluate(`(() => {
-      const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
+      const railEl = document.querySelector('#flow .grp-rail');
+      const rail = railEl.getBoundingClientRect();
       const banner = document.querySelector('#flow .wave-ctrl .banner').getBoundingClientRect();
-      return { railRight: rail.left + rail.width, bannerLeft: banner.left };
+      // Bord droit du TRAIT, pas de la boîte : depuis le crochet de fin de lot
+      // (2026-08-17) la boîte s'étend jusqu'à la colonne de contenu, mais son
+      // encre à hauteur des bannières se limite au border-left.
+      return { railRight: rail.left + parseFloat(getComputedStyle(railEl).borderLeftWidth), bannerLeft: banner.left };
     })()`);
     check('waveCtrl (bannières) : commence après l\'axe du rail, ne le recouvre pas',
       ctrlVsRail.bannerLeft >= ctrlVsRail.railRight, JSON.stringify(ctrlVsRail));
@@ -1845,7 +1850,12 @@ async function run() {
         flatIcoCenter: flatIcoRect.left + flatIcoRect.width / 2,
         grpIcoCenter: grpIcoRect.left + grpIcoRect.width / 2,
         masterIcoCenter: masterIcoRect.left + masterIcoRect.width / 2,
-        railCenter: railRect.left + railRect.width / 2,
+        // Depuis le crochet de fin de lot (2026-08-17), la boîte du rail
+        // s'étend jusqu'à la barre de contexte : sa largeur est celle du
+        // CROCHET, plus celle du trait. L'axe se lit donc sur le trait
+        // VERTICAL — le bord gauche de la boîte plus la moitié de son
+        // border-left, la seule encre posée à gauche.
+        railCenter: railRect.left + parseFloat(getComputedStyle(document.querySelector('#flow .grp-rail')).borderLeftWidth) / 2,
         gripAboveMaster: gripRect.bottom <= masterRect.top + 0.5,
       };
     })()`);
@@ -1871,19 +1881,69 @@ async function run() {
 
     // Le rail va du bas de la CAPSULE (étape 19 : jamais un trait à l'intérieur
     // du cadre — sans master c'est le haut du corps, qui vaut la même chose)
-    // jusqu'à la ligne fantôme finale (jamais la ligne d'ajout en file
-    // « + add to this wave »), jamais plus bas.
+    // jusqu'à la DERNIÈRE LIGNE du lot, où il tourne à 90° (crochet de fin de
+    // lot, 2026-08-17). Il ne descend donc plus jusqu'à la ligne fantôme :
+    // celle-ci est une invite d'ajout, pas un membre du lot, et le crochet
+    // doit se fermer sur la dernière conversation — c'est tout l'objet du
+    // changement. Mesuré sur la BARRE DE CONTEXTE de cette ligne : le trait
+    // horizontal passe HOOK_DROP px sous son axe, et son extrémité s'arrête à
+    // l'aplomb du bord gauche de cette même barre (crochet « au contact »).
     const railSpan = await cdp.evaluate(`(() => {
       const body = document.querySelector('#flow .grp-body').getBoundingClientRect();
+      // Sommet attendu (2026-08-17) : le bas de la BULLE de la maîtresse, plus
+      // le bas de sa ligne — la tête de lot est devenue un nœud d'où le trait
+      // descend, elle n'est plus un cadre qu'on longe. Sans maîtresse, le haut
+      // du corps, comme avant.
       const head = document.querySelector('#flow .grp-master-head');
-      const start = head && head.parentElement.classList.contains('grp-body')
-        ? head.getBoundingClientRect().bottom : body.top;
-      const railRect = document.querySelector('#flow .grp-rail').getBoundingClientRect();
+      const headIco = head ? head.querySelector('.conv .ico') : null;
+      const ringD = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--master-ring-d')) || 0;
+      let start = body.top;
+      if (head && head.parentElement.classList.contains('grp-body')) {
+        const icoRect = headIco ? headIco.getBoundingClientRect() : null;
+        start = icoRect ? icoRect.top + icoRect.height / 2 + ringD / 2
+                        : head.getBoundingClientRect().bottom;
+      }
+      const rail = document.querySelector('#flow .grp-rail');
+      const railRect = rail.getBoundingClientRect();
+      const cs = getComputedStyle(rail);
+      // Dernière LIGNE du lot : le dernier enfant direct du corps qui est un
+      // membre — jamais la ligne fantôme, jamais un séparateur, exactement ce
+      // que lastRowOf() retient côté panneau.
+      const rows = Array.from(document.querySelectorAll('#flow .grp-body > .member'))
+        .filter((m) => getComputedStyle(m).display !== 'none');
+      const last = rows.length ? rows[rows.length - 1] : null;
+      const lastBar = last ? last.querySelector('.bar-ctx') : null;
+      const barRect = lastBar ? lastBar.getBoundingClientRect() : null;
+      const lastRect = last ? last.getBoundingClientRect() : null;
+      // Bord gauche de la colonne de CONTENU de cette ligne : l'aplomb où le
+      // crochet s'arrête, qu'il y ait une barre de contexte (.body) ou que la
+      // ligne soit encore en file (.m-body) — même abscisse dans les deux cas,
+      // c'est tout l'intérêt de la mesurer ainsi.
+      const content = last ? last.querySelector('.body, .m-body') : null;
+      const contentLeft = content ? content.getBoundingClientRect().left : null;
       const ghostRect = document.querySelector('#flow .wave-ghost:not(.wave-add-row)').getBoundingClientRect();
-      return { top: Math.abs(railRect.top - start) < 1, bottom: Math.abs(railRect.bottom - ghostRect.top) < 1 };
+      return {
+        top: Math.abs(railRect.top - start) < 1,
+        hasBar: !!barRect,
+        // pied : axe de la barre + 4px (HOOK_DROP) quand elle existe ; sinon
+        // le bas de la ligne — la même ordonnée à un demi-pixel près.
+        foot: barRect ? (railRect.bottom - (barRect.top + barRect.height / 2))
+            : lastRect ? (railRect.bottom - lastRect.bottom) : null,
+        hookRight: contentLeft === null ? null : (railRect.right - contentLeft),
+        aboveGhost: railRect.bottom <= ghostRect.top + 0.5,
+        hasBottomBorder: parseFloat(cs.borderBottomWidth) > 0,
+        radius: parseFloat(cs.borderBottomLeftRadius),
+      };
     })()`);
-    check('rail : sommet au bas de la capsule (ou du corps, sans master)', railSpan.top === true, JSON.stringify(railSpan));
-    check('rail : pied au sommet de la ligne fantôme finale (jamais plus bas)', railSpan.bottom === true, JSON.stringify(railSpan));
+    check('rail : sommet au bas de la BULLE de la maîtresse (ou du corps, sans maîtresse)', railSpan.top === true, JSON.stringify(railSpan));
+    check('crochet : pied posé sur la dernière ligne (4px sous l\'axe de sa barre de contexte, ou son bas si elle est en file)',
+      railSpan.foot !== null && Math.abs(railSpan.foot - (railSpan.hasBar ? 5 : 1)) < 1.5, JSON.stringify(railSpan));
+    check('crochet : extrémité à l\'aplomb de la colonne de contenu (au contact, jamais au-delà)',
+      railSpan.hookRight !== null && Math.abs(railSpan.hookRight) < 1.5, JSON.stringify(railSpan));
+    check('crochet : reste au-dessus de la ligne fantôme finale (jamais plus bas)',
+      railSpan.aboveGhost === true, JSON.stringify(railSpan));
+    check('crochet : dessiné par le bord BAS du rail, avec son coude arrondi (un seul nœud, aucune couture)',
+      railSpan.hasBottomBorder === true && railSpan.radius > 0, JSON.stringify(railSpan));
 
     // Anneau troué : le pseudo-élément ::after de l'icône reprend --grp-hue en
     // bordure, jamais une couleur libre.
@@ -1919,10 +1979,16 @@ async function run() {
       const hdr = document.querySelector('#flow .grp-body .wave-hdr:not(.launch)');
       const addRow = document.querySelector('#flow .wave-ghost.wave-add-row');
       const ghostNew = document.querySelector('#flow .wave-ghost:not(.wave-add-row)');
-      const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
+      const railEl = document.querySelector('#flow .grp-rail');
+      const rail = railEl.getBoundingClientRect();
       return {
         hdrPaddingLeft: hdr ? parseFloat(getComputedStyle(hdr).paddingLeft) : null,
-        railRight: rail.right,
+        // Bord droit du TRAIT VERTICAL, pas de la boîte : depuis le crochet de
+        // fin de lot (2026-08-17) la boîte s'étend jusqu'à la barre de
+        // contexte, mais son encre à cette hauteur-là se limite au border-left.
+        // Ce que ces contrôles protègent est inchangé : aucune bordure
+        // pointillée ne croise le trait que l'œil suit.
+        railRight: rail.left + parseFloat(getComputedStyle(railEl).borderLeftWidth),
         addRowLeft: addRow ? addRow.getBoundingClientRect().left : null,
         ghostNewLeft: ghostNew ? ghostNew.getBoundingClientRect().left : null,
       };
@@ -2155,8 +2221,12 @@ async function run() {
     // ResizeObserver doit corriger tout seul, sans nouveau postMessage.
     await cdp.evaluate(`document.querySelector('#flow .grp-rail').style.height = '0px'`);
     const corrupted = await cdp.evaluate(`document.querySelector('#flow .grp-rail').getBoundingClientRect().height`);
+    // Depuis le crochet (2026-08-17) le rail est une boîte à bordures : une
+    // hauteur CSS de 0 laisse toujours l'épaisseur du trait horizontal (~2px),
+    // c'est la boîte de BORDURE que mesure getBoundingClientRect. Le fait
+    // reproduit reste le même — le rail ne couvre plus rien.
     check('(mise en place) hauteur du rail corrompue à 0, comme la panne reproduite',
-      corrupted === 0, String(corrupted));
+      corrupted <= 2.5, String(corrupted));
     await cdp.evaluate(`(() => { const s = document.createElement('div'); s.id = 'qb-resize-spacer'; s.style.height = '400px'; document.body.appendChild(s); })()`);
     await sleep(250);
     await cdp.evaluate(`document.getElementById('qb-resize-spacer').remove()`);
@@ -2167,10 +2237,17 @@ async function run() {
       // Le rail ne part plus du haut du corps mais du bas de la capsule (étape
       // 19) : sa hauteur attendue est l'écart entre les DEUX bouts mesurés,
       // jamais le seul offsetTop de la ligne fantôme.
-      return { railHeight: rail.getBoundingClientRect().height, ghostTop: ghost.offsetTop, railTop: rail.offsetTop };
+      // Depuis le crochet de fin de lot, le pied n'est plus le sommet de la
+      // ligne fantôme mais la dernière ligne : la guérison se prouve par une
+      // hauteur redevenue franche ET un pied resté au-dessus du fantôme.
+      return {
+        railHeight: rail.getBoundingClientRect().height,
+        ghostTop: ghost.offsetTop, railTop: rail.offsetTop,
+        aboveGhost: rail.offsetTop + rail.getBoundingClientRect().height <= ghost.offsetTop + 0.5,
+      };
     })()`);
     check('… le ResizeObserver corrige tout seul la hauteur corrompue, SANS nouveau postMessage',
-      healed.railHeight > 0 && Math.abs(healed.railHeight - (healed.ghostTop - healed.railTop)) < 1, JSON.stringify(healed));
+      healed.railHeight > 10 && healed.aboveGhost === true, JSON.stringify(healed));
 
     // (c) Anneau vs fond du panneau, dans les DEUX thèmes RÉELS — le §7
     // existant (prefers-color-scheme) ne change RIEN ici : aucune @media
@@ -2250,11 +2327,24 @@ async function run() {
         masterOut: r(q('#flow .grp-master-head .m-out')), memberOut: r(q('#flow .member .m-out')),
         grip: r(grip), head: r(head), masterRow: r(master),
         gripBorderBottom: parseFloat(getComputedStyle(grip).borderBottomWidth),
-        // Étape 19 : le cadre est peint par le pseudo-élément (calque au-dessus
-        // des fonds d'enfants), plus par le conteneur lui-même.
+        gripBorderTotal: ['Top', 'Right', 'Bottom', 'Left']
+          .reduce((s, side) => s + parseFloat(getComputedStyle(grip)['border' + side + 'Width']), 0),
+        // 2026-08-17 : plus AUCUN cadre sur la ligne maîtresse — ni le pseudo
+        // qui le peignait (étape 19), ni une bordure sur la ligne elle-même.
         headShadow: getComputedStyle(head, '::after').boxShadow,
         headShadowLayer: getComputedStyle(head, '::after').zIndex,
         headShadowPos: getComputedStyle(head, '::after').position,
+        headBorderTotal: ['Top', 'Right', 'Bottom', 'Left']
+          .reduce((s, side) => s + parseFloat(getComputedStyle(head)['border' + side + 'Width']), 0),
+        // La bulle de tête : ce qui remplace le cadre. Mesurée sur le pseudo
+        // de l'anneau, chez la maîtresse ET chez un membre, pour que la
+        // comparaison ne dépende d'aucune valeur écrite ici.
+        masterRing: (() => { const cs = getComputedStyle(master.querySelector('.ico'), '::after');
+          return { d: parseFloat(cs.width), w: parseFloat(cs.borderTopWidth), bg: cs.backgroundColor }; })(),
+        memberRing: (() => { const cs = getComputedStyle(member.querySelector('.ico'), '::after');
+          return { d: parseFloat(cs.width), w: parseFloat(cs.borderTopWidth) }; })(),
+        masterWeight: getComputedStyle(master.querySelector('.title')).fontWeight,
+        memberWeight: getComputedStyle(member.querySelector('.title')).fontWeight,
         headBg: getComputedStyle(head).backgroundColor,
         gripBg: getComputedStyle(grip).backgroundColor,
         killPos: getComputedStyle(q('#flow .grp-head .g-kill')).position,
@@ -2292,16 +2382,25 @@ async function run() {
       check(`${label} — ligne master entièrement CONTENUE dans le cadre teinté`,
         g.masterRow.t >= frame.t - 0.5 && g.masterRow.b <= frame.b + 0.5
         && g.masterRow.l >= frame.l - 0.5 && g.masterRow.r <= frame.r + 0.5, JSON.stringify({ frame, row: g.masterRow }));
-      check(`${label} — la grip ne referme plus le cadre en bas (c'est la master qui le fait)`,
-        g.gripBorderBottom === 0, String(g.gripBorderBottom));
-      check(`${label} — le cadre de la ligne master est peint en box-shadow inset (jamais une bordure : elle décalerait le contenu)`,
-        /inset/.test(g.headShadow) && g.headShadow !== 'none', g.headShadow);
-      // Étape 19 — sur un CALQUE au-dessus des enfants : c'est ce qui rend un
-      // recouvrement par le fond d'une ligne sélectionnée/survolée structurellement
-      // impossible, au lieu de dépendre de la largeur de cette ligne.
-      check(`${label} — … et ce cadre est un calque AU-DESSUS des fonds d'enfants (pseudo-élément positionné)`,
-        g.headShadowPos === 'absolute' && Number(g.headShadowLayer) >= 1,
-        `${g.headShadowPos} / ${g.headShadowLayer}`);
+      // 2026-08-17 — le lot n'est plus une BOÎTE encadrée : ni la grip ni la
+      // ligne maîtresse ne portent le moindre trait. Ces trois checks sont
+      // l'inverse exact de ceux d'avant : ils tombent si un cadre revient,
+      // d'où qu'il vienne (pseudo, bordure de la grip, bordure de la ligne).
+      check(`${label} — la grip n'a AUCUNE bordure (bande teintée seule)`,
+        g.gripBorderTotal === 0, String(g.gripBorderTotal));
+      check(`${label} — la ligne maîtresse n'a AUCUN cadre (ni pseudo, ni bordure)`,
+        g.headShadow === 'none' && g.headBorderTotal === 0,
+        `${g.headShadow} / ${g.headBorderTotal}`);
+      // Ce qui le remplace, mesuré par COMPARAISON avec un membre : la bulle
+      // de tête est plus grosse et plus épaisse, et le titre plus gras. Aucune
+      // valeur en dur ici — régler --master-ring-* ne fait pas mentir le banc,
+      // seul un retour à l'anneau ordinaire le fait tomber.
+      check(`${label} — bulle de tête plus grosse et plus épaisse que celle d'un membre`,
+        g.masterRing.d > g.memberRing.d + 2 && g.masterRing.w > g.memberRing.w + 1,
+        JSON.stringify({ master: g.masterRing, member: g.memberRing }));
+      check(`${label} — titre de la maîtresse en gras, plus appuyé que celui d'un membre`,
+        Number(g.masterWeight) >= 700 && Number(g.masterWeight) > Number(g.memberWeight),
+        `${g.masterWeight} / ${g.memberWeight}`);
       check(`${label} — même fond teinté sur la grip et sur la ligne master (une seule variable)`,
         g.headBg === g.gripBg && g.headBg !== 'rgba(0, 0, 0, 0)', `${g.gripBg} / ${g.headBg}`);
       // Le ✕ de dissolution, lui, a le droit de rester dans le flux : il vit
@@ -2415,10 +2514,11 @@ async function run() {
     check('master hors de vue (fallback) — toujours contenue dans le cadre (grip collée, mêmes bords)',
       Math.abs(fb.head.t - fb.grip.b) < 0.5 && fb.row.b <= fb.head.b + 0.5, JSON.stringify(fb));
 
-    // Groupe REPLIÉ avec master (révisé 2026-08-07) : la grip RESTE en place et
-    // continue de fermer le cadre en haut — la capsule repliée est donc la même
-    // qu'ouverte, en plus court. La ligne master garde ses trois bandes
-    // (gauche/droite/bas) : elle n'a jamais à se déguiser en cadre complet.
+    // Groupe REPLIÉ avec master (révisé 2026-08-07, puis 2026-08-17 sans
+    // cadre) : la grip RESTE en place et sa bande teintée reste collée à la
+    // ligne maîtresse — repliée, la tête de lot est la même qu'ouverte, en
+    // plus court. Ce qui se mesure n'est plus un trait mais la CONTINUITÉ des
+    // deux fonds : aucun interstice, aucun coin arrondi à leur couture.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: collapsedWithMaster })}, '*')`);
     await sleep(200);
     const col = await cdp.evaluate(`(() => {
@@ -2426,26 +2526,32 @@ async function run() {
       const grip = document.querySelector('#flow .grp-head');
       const gb = grip.getBoundingClientRect(); const hb = head.getBoundingClientRect();
       return { gripVisible: getComputedStyle(grip).display !== 'none',
-               gripBorderTop: parseFloat(getComputedStyle(grip).borderTopWidth),
+               gripBg: getComputedStyle(grip).backgroundColor,
+               headBg: getComputedStyle(head).backgroundColor,
                joined: Math.abs(hb.top - gb.bottom) < 0.5,
                shadow: getComputedStyle(head, '::after').boxShadow, radiusTop: getComputedStyle(head).borderTopLeftRadius };
     })()`);
-    check('replié + master : la grip reste visible et ferme le cadre en haut…',
-      col.gripVisible === true && col.gripBorderTop > 1 && col.joined === true, JSON.stringify(col));
-    check('… la ligne master garde ses TROIS bandes (gauche/droite/bas), coins hauts non arrondis',
-      (col.shadow.match(/inset/g) || []).length === 3 && parseFloat(col.radiusTop) === 0, JSON.stringify(col));
+    check('replié + master : la grip reste visible et sa bande teintée reste collée à la maîtresse…',
+      col.gripVisible === true && col.joined === true && col.gripBg === col.headBg
+      && col.gripBg !== 'rgba(0, 0, 0, 0)', JSON.stringify(col));
+    check('… et la ligne maîtresse n\'invente aucun cadre au repli (coins hauts carrés, aucun trait)',
+      col.shadow === 'none' && parseFloat(col.radiusTop) === 0, JSON.stringify(col));
 
-    // Sans master : la grip EST le cadre entier, elle reprend sa bordure basse.
+    // Sans master : la grip reste la même bande teintée, elle ne se referme
+    // sur rien — il n'y a plus de bordure à rétablir depuis 2026-08-17.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: noMaster })}, '*')`);
     await sleep(200);
     const solo = await cdp.evaluate(`(() => {
       const grip = document.querySelector('#flow .grp-head');
-      return { borderBottom: parseFloat(getComputedStyle(grip).borderBottomWidth),
+      return { borderTotal: ['Top', 'Right', 'Bottom', 'Left']
+                 .reduce((s, side) => s + parseFloat(getComputedStyle(grip)['border' + side + 'Width']), 0),
+               bg: getComputedStyle(grip).backgroundColor,
                hasMasterClass: document.querySelector('#flow .grp').classList.contains('has-master'),
                masterRow: !!document.querySelector('#flow .grp-master-head') };
     })()`);
-    check('sans master : la grip redevient un cadre complet (bordure basse rétablie)',
-      solo.borderBottom > 1 && solo.hasMasterClass === false && solo.masterRow === false, JSON.stringify(solo));
+    check('sans master : la grip reste une bande teintée sans aucune bordure',
+      solo.borderTotal === 0 && solo.bg !== 'rgba(0, 0, 0, 0)'
+      && solo.hasMasterClass === false && solo.masterRow === false, JSON.stringify(solo));
 
     console.log('\n17. Étape 19 — polissage : le cadre tient dans TOUS les états interactifs, la croix est dedans, le rail dehors');
     // Constats user 2026-08-05 (capsule) : cadre avalé par le fond de la ligne
@@ -2503,7 +2609,7 @@ async function run() {
         await cdp.evaluate(`getComputedStyle(document.querySelector('#flow .grp-master-head .conv')).backgroundColor`)
           !== 'rgba(0, 0, 0, 0)');
       for (const side of ['left', 'right'])
-        check(`thème ${name} — … et la bande ${side === 'left' ? 'gauche' : 'droite'} du cadre est INTACTE (pixels identiques au repos)`,
+        check(`thème ${name} — … et la bande teintée ${side === 'left' ? 'gauche' : 'droite'} est INTACTE (pixels identiques au repos)`,
           await band(side) === ref[side]);
       // (b) Ligne master SURVOLÉE — même fond, autre variable de thème.
       await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
@@ -2511,22 +2617,16 @@ async function run() {
       await moveMouse(masterCenter[0], masterCenter[1]);
       await sleep(150);
       for (const side of ['left', 'right'])
-        check(`thème ${name} — ligne master survolée : bande ${side === 'left' ? 'gauche' : 'droite'} intacte`,
+        check(`thème ${name} — ligne master survolée : bande teintée ${side === 'left' ? 'gauche' : 'droite'} intacte`,
           await band(side) === ref[side]);
       await moveMouse(2, 2);
       await sleep(120);
-      // (c) La propriété STRUCTURELLE, pas seulement le cas du jour : même un
-      // enfant qui déborderait de toute la capsule avec un fond opaque ne peut
-      // plus effacer le cadre (il est peint sur un calque au-dessus).
-      await cdp.evaluate(`(() => { const c = document.querySelector('#flow .grp-master-head .conv');
-        c.style.background = '#ff00ff'; c.style.margin = '0 -40px'; })()`);
-      await sleep(120);
-      for (const side of ['left', 'right'])
-        check(`thème ${name} — un fond d'enfant débordant NE PEUT PAS recouvrir le cadre (bande ${side === 'left' ? 'gauche' : 'droite'})`,
-          await band(side) === ref[side]);
-      await cdp.evaluate(`(() => { const c = document.querySelector('#flow .grp-master-head .conv');
-        c.style.background = ''; c.style.margin = ''; })()`);
-      await sleep(120);
+      // (c) SUPPRIMÉ 2026-08-17 — « un fond d'enfant débordant ne peut pas
+      // recouvrir le cadre ». Il n'y a plus de cadre à protéger : la tête de
+      // lot se lit à sa bulle, son rail et son titre. Les deux mesures qui
+      // précèdent gardent tout leur sens (la bande TEINTÉE, elle, survit à la
+      // sélection comme au survol), et le §16 vérifie qu'aucun trait n'est
+      // revenu s'ajouter. Ne pas ressusciter ce cas sans un cadre à défendre.
       for (const k of Object.keys(vars)) await cdp.evaluate(`document.documentElement.style.removeProperty('${k}')`);
     }
 
@@ -2550,16 +2650,49 @@ async function run() {
       Math.abs(cross.master.l - cross.member.l) < 0.5, JSON.stringify(cross));
 
     // (e) Le rail ne se dessine JAMAIS dans le cadre : intersection vide.
-    const railVsFrame = await cdp.evaluate(`(() => {
+    // (e) RÉVISÉ 2026-08-17 — l'invariant d'avant (« aucune intersection avec
+    // l'intérieur du cadre ») disait que le trait ne devait pas se dessiner
+    // DANS la capsule. Sans capsule, il est remplacé par ce qu'on veut
+    // vraiment : le rail PART DE LA BULLE de la maîtresse — son sommet tombe
+    // au bas de l'anneau, jamais plus haut (il traverserait la bulle) ni plus
+    // bas d'une ligne entière (il se décrocherait de sa tête).
+    const railVsBubble = await cdp.evaluate(`(() => {
       const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
-      const grip = document.querySelector('#flow .grp-head').getBoundingClientRect();
-      const head = document.querySelector('#flow .grp-master-head').getBoundingClientRect();
-      const frame = { t: Math.min(grip.top, head.top), b: Math.max(grip.bottom, head.bottom) };
-      return { overlap: +(Math.min(rail.bottom, frame.b) - Math.max(rail.top, frame.t)).toFixed(2),
-               railTop: +rail.top.toFixed(2), frameBottom: +frame.b.toFixed(2) };
+      const ico = document.querySelector('#flow .grp-master-head .conv .ico').getBoundingClientRect();
+      const ring = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--master-ring-d'));
+      const center = ico.top + ico.height / 2;
+      return { gap: +(rail.top - (center + ring / 2)).toFixed(2),
+               belowCenter: rail.top > center, railTop: +rail.top.toFixed(2), center: +center.toFixed(2), ring };
     })()`);
-    check('rail P1 : aucune intersection avec l\'intérieur du cadre (il démarre au bord bas de la capsule)',
-      railVsFrame.overlap <= 0.5, JSON.stringify(railVsFrame));
+    check('rail P1 : son sommet est au bas de la bulle de la maîtresse (jamais au travers)',
+      Math.abs(railVsBubble.gap) < 1 && railVsBubble.belowCenter === true, JSON.stringify(railVsBubble));
+
+    // (e bis) 2026-08-17 — le fond d'une ligne ne masque PAS le rail. Constat
+    // user : survoler une conversation d'un lot effaçait le trait sur toute la
+    // hauteur de la ligne. Cause : le rail se peignait SOUS les fonds de
+    // lignes, et un fond de ligne est opaque.
+    // Mesuré sur l'EMPILEMENT, pas sur les pixels, et c'est le bon outil ici :
+    // l'ordre de peinture CSS est une règle exacte (un positionné à z-index 1
+    // passe après tous les positionnés en auto, quel que soit l'ordre du DOM),
+    // alors qu'un ruban de pixels sur le trait n'est pas calable — le poste
+    // rend à devicePixelRatio 1,8 et le rail tombe à des abscisses
+    // fractionnaires, si bien qu'un clip de 1px mélange toujours un peu du
+    // fond qui, lui, DOIT changer au survol. Les trois valeurs doivent rester
+    // STRICTEMENT ordonnées : lignes < rail < anneaux. À valeur égale, c'est
+    // l'ordre du DOM qui trancherait — or place() réordonne les enfants du
+    // corps, c'est très exactement ce qui a cassé les anneaux au premier jet.
+    const stack = await cdp.evaluate(`(() => {
+      const z = (el) => { const v = getComputedStyle(el).zIndex; return v === 'auto' ? 0 : Number(v); };
+      const rail = document.querySelector('#flow .grp-rail');
+      const row = document.querySelector('#flow .member .conv');
+      return { rail: z(rail), row: z(row), master: z(document.querySelector('#flow .grp-master-head .conv')),
+               ico: z(row.querySelector('.ico')), masterIco: z(document.querySelector('#flow .grp-master-head .conv .ico')),
+               railPos: getComputedStyle(rail).position };
+    })()`);
+    check('rail P1 : au-dessus des fonds de lignes (survol et sélection ne peuvent plus l\'effacer)',
+      stack.railPos === 'absolute' && stack.rail > stack.row && stack.rail > stack.master, JSON.stringify(stack));
+    check('… et STRICTEMENT sous les anneaux, qui continuent de le trouer (jamais la même valeur, sinon le DOM arbitre)',
+      stack.ico > stack.rail && stack.masterIco > stack.rail, JSON.stringify(stack));
 
     // (f) La pill « ▶ lancer la vague » ne CROISE plus le rail (constat user
     // 2026-08-07 : « la pill mord sur le trait ») : sa boîte commence après
@@ -2571,15 +2704,18 @@ async function run() {
       const pill = document.querySelector('#flow .wave-hdr.launch');
       if (!pill) return null;
       const b = pill.getBoundingClientRect();
-      const rail = document.querySelector('#flow .grp-rail').getBoundingClientRect();
-      return { railRight: rail.left + rail.width, pillLeft: b.left,
-               z: getComputedStyle(pill).zIndex, pos: getComputedStyle(pill).position };
+      const railEl = document.querySelector('#flow .grp-rail');
+      const rail = railEl.getBoundingClientRect();
+      // Bord droit du TRAIT (border-left), pas de la boîte du crochet.
+      return { railRight: rail.left + parseFloat(getComputedStyle(railEl).borderLeftWidth), pillLeft: b.left,
+               z: getComputedStyle(pill).zIndex, pos: getComputedStyle(pill).position,
+               railZ: getComputedStyle(railEl).zIndex };
     })()`);
     if (pillVsRail) {
       check('pill « ▶ vague » : sa boîte commence après l\'axe du rail (aucune morsure possible)',
         pillVsRail.pillLeft >= pillVsRail.railRight, JSON.stringify(pillVsRail));
-      check('… et garde son z-index 1 de ceinture (recroisement futur → pill devant, jamais un trait au travers)',
-        pillVsRail.pos === 'relative' && pillVsRail.z === '1', JSON.stringify(pillVsRail));
+      check('… et garde une ceinture d\'empilement STRICTEMENT au-dessus du rail (recroisement futur → pill devant)',
+        pillVsRail.pos === 'relative' && Number(pillVsRail.z) > Number(pillVsRail.railZ), JSON.stringify(pillVsRail));
     }
 
     // (g) Symbole d'état centré dans son anneau — mesuré sur les PIXELS (un
@@ -2862,6 +2998,7 @@ async function run() {
     // A du plan — si cet axe bouge, la ligne a cessé d'appartenir à A.
     const axes = await cdp.evaluate(`(() => {
       const cx = (n) => { const r = n.getBoundingClientRect(); return r.left + r.width / 2; };
+      const railAxis = (n) => n.getBoundingClientRect().left + parseFloat(getComputedStyle(n).borderLeftWidth) / 2;
       const parent = document.querySelector('#flow > .grp');
       const subBody = document.querySelector('.grp-body.nest-body');
       const subGrip = document.querySelector('.grp-head.nest-grip');
@@ -2875,8 +3012,11 @@ async function run() {
         headLeft: memberIco(parent, 'A task two — opens B').closest('.conv').getBoundingClientRect().left,
         sisterLeft: memberIco(parent, 'A task one').closest('.conv').getBoundingClientRect().left,
         childIco: cx(memberIco(subBody, 'B task one')),
-        parentRail: cx(parent.querySelector(':scope > .grp-body > .grp-rail')),
-        subRail: cx(subBody.querySelector(':scope > .grp-rail')),
+        // Axe d'un rail = celui de son TRAIT vertical : depuis le crochet de
+        // fin de lot (2026-08-17) la boîte s'étend jusqu'à la colonne de
+        // contenu, son centre géométrique ne dit plus rien de l'axe.
+        parentRail: railAxis(parent.querySelector(':scope > .grp-body > .grp-rail')),
+        subRail: railAxis(subBody.querySelector(':scope > .grp-rail')),
         parentBodyLeft: parent.querySelector(':scope > .grp-body').getBoundingClientRect().left,
         subBodyLeft: subBody.getBoundingClientRect().left,
         subGripLeft: subGrip.getBoundingClientRect().left,
@@ -2922,12 +3062,13 @@ async function run() {
       rails.sub.height > 0 && rails.sub.railTop <= rails.sub.firstIco + 0.5
       && rails.sub.railBottom >= rails.sub.lastIco - 0.5, JSON.stringify(rails.sub));
 
-    // (e) La capsule de tête, désormais à 3 bords (gauche/droite/bas — le
-    // cadre de .grp-master-head à l'identique, amendement 2026-08-16) : le
-    // bord HAUT n'a plus lieu d'être, la grip juste au-dessus ferme déjà le
-    // cadre par le sien. Toujours un PSEUDO : aucune géométrie touchée
-    // (invariant du §16), rien qui puisse être recouvert par le fond d'une
-    // ligne survolée/sélectionnée.
+    // (e) RÉVISÉ 2026-08-17 — la ligne de TÊTE d'un sous-lot n'a plus de
+    // capsule du tout : elle suit la ligne maîtresse, dont elle reprend le
+    // canon (les deux cadres sont partis ensemble, sinon le panneau dirait la
+    // même chose de deux façons). Ce qui se mesure désormais : aucun trait sur
+    // la ligne, une bulle au canon de tête, RESTÉE À LA COULEUR DU PARENT
+    // (elle est un membre du parent : c'est la structure, pas un détail), et
+    // son fond opaque — le rail du parent, lui, la traverse toujours.
     const caps = await cdp.evaluate(`(() => {
       const probe = document.createElement('span');
       probe.style.color = 'hsl(30, 45%, 55%)';
@@ -2939,6 +3080,13 @@ async function run() {
       const head = host.querySelector('.m-head');
       const cs = getComputedStyle(head, '::after');
       const headRect = head.getBoundingClientRect();
+      // Bulle de la ligne de tête vs bulle d'un membre ordinaire du PARENT :
+      // taille (canon de tête) et teinte (celle du parent, jamais celle de
+      // l'enfant) se prouvent l'une par l'autre, sans valeur écrite ici.
+      const headIco = getComputedStyle(head.querySelector('.conv .ico'), '::after');
+      const plainMember = Array.from(document.querySelectorAll('#flow .grp-body > .member'))
+        .find((m) => m !== host && m.querySelector('.conv .ico'));
+      const plainIco = plainMember ? getComputedStyle(plainMember.querySelector('.conv .ico'), '::after') : null;
       // Un CADRE (border réelle) qui contiendrait une ligne de conversation est
       // interdit dans tout le panneau : une capsule n'encadre qu'un EN-TÊTE.
       const framedConvs = Array.from(document.querySelectorAll('#flow .conv')).filter((c) => {
@@ -2961,19 +3109,21 @@ async function run() {
         hostHasBorder: getComputedStyle(host).borderTopWidth,
         headWidth: headRect.width,
         framedConvs,
+        headRing: { d: parseFloat(headIco.width), w: parseFloat(headIco.borderTopWidth),
+                    color: headIco.borderTopColor, bg: headIco.backgroundColor },
+        plainRing: plainIco ? { d: parseFloat(plainIco.width), w: parseFloat(plainIco.borderTopWidth),
+                    color: plainIco.borderTopColor } : null,
+        headWeight: getComputedStyle(head.querySelector('.conv .title')).fontWeight,
       };
     })()`);
-    check('capsule : peinte en PSEUDO, 3 bords (gauche/droite/bas) — jamais en bordure de la ligne',
-      caps.threeSided === true && caps.hostHasBorder === '0px', JSON.stringify(caps));
-    check('… coins HAUTS carrés, coins BAS arrondis (fermeture du cadre, comme .grp-master-head)',
-      caps.radiusTL === '0px' && caps.radiusTR === '0px' && caps.radiusBL === '6px' && caps.radiusBR === '6px', JSON.stringify(caps));
-    check('… à la couleur de l\'ENFANT (bulle et anneau restent au parent)',
-      caps.shadow.indexOf(caps.hueB) !== -1, JSON.stringify(caps));
-    check('… sans AUCUN fond (le fond de la ligne reste celui du parent)',
-      caps.bg === 'rgba(0, 0, 0, 0)', JSON.stringify(caps));
-    check('… commençant à 28px : l\'anneau reste DEHORS, sur le rail du parent',
-      Math.abs(caps.left - 28) < 0.5, JSON.stringify(caps));
-    check('… décorative : elle ne vole aucun clic à la ligne', caps.pointer === 'none', caps.pointer);
+    check('ligne de tête : AUCUN cadre (ni pseudo, ni bordure sur la ligne)',
+      caps.shadow === 'none' && caps.hostHasBorder === '0px', JSON.stringify(caps));
+    check('… bulle au canon de tête : plus grosse et plus épaisse que celle d\'un membre ordinaire',
+      caps.plainRing !== null && caps.headRing.d > caps.plainRing.d + 2
+      && caps.headRing.w > caps.plainRing.w + 1, JSON.stringify(caps));
+    check('… mais RESTÉE à la couleur du parent (jamais celle de l\'enfant : la ligne appartient au parent)',
+      caps.headRing.color === caps.plainRing.color && caps.headRing.color !== caps.hueB, JSON.stringify(caps));
+    check('… titre en gras, comme une maîtresse', Number(caps.headWeight) >= 700, String(caps.headWeight));
     check('AUCUN élément à bordure ne contient une ligne de conversation (une capsule n\'encadre qu\'un en-tête)',
       caps.framedConvs === 0, JSON.stringify(caps));
 
@@ -3164,15 +3314,20 @@ async function run() {
         gripToHostGap: mHeadRect.top - gripBottom,
         footVisible: getComputedStyle(host.querySelector('.m-foot')).display !== 'none',
         capShadow: getComputedStyle(host.querySelector('.m-head'), '::after').boxShadow,
-        gripBorder: getComputedStyle(gripSub).borderColor,
+        gripBg: getComputedStyle(gripSub).backgroundColor,
       };
     })()`);
     check('thème sombre : le corps du sous-lot est COLLÉ sous la capsule (aucune bande de fond entre les deux)',
       nestDark.footVisible === false && Math.abs(nestDark.gap) < 1, JSON.stringify(nestDark));
     check('… et la grip est COLLÉE au-dessus de la ligne de tête (cadre continu, aucune bande de fond)',
       Math.abs(nestDark.gripToHostGap) < 1, JSON.stringify(nestDark));
-    check('… capsule et grip restent peintes (teintes hsl, indépendantes du thème)',
-      nestDark.capShadow.indexOf('rgb') !== -1 && nestDark.gripBorder.indexOf('rgb') !== -1, JSON.stringify(nestDark));
+    // RÉVISÉ 2026-08-17 : ce qui doit rester peint n'est plus un cadre (il n'y
+    // en a plus) mais le FOND teinté de la grip du sous-lot — une teinte hsl(),
+    // donc indépendante des variables de thème. Et la ligne de tête, elle, ne
+    // doit porter AUCUN trait, dans aucun thème.
+    check('… la grip du sous-lot reste peinte (fond hsl, indépendant du thème) et la ligne de tête sans aucun cadre',
+      nestDark.gripBg.indexOf('rgb') !== -1 && nestDark.gripBg !== 'rgba(0, 0, 0, 0)'
+      && nestDark.capShadow === 'none', JSON.stringify(nestDark));
     for (const k of Object.keys(darkVars)) await cdp.evaluate(`document.documentElement.style.removeProperty('${k}')`);
 
     // ── 20. La maîtresse n'engage que son DERNIER lot ────────────────────
@@ -3269,6 +3424,224 @@ async function run() {
     await sleep(120);
     check('retour à tabsFrozen:false → bandeau remasqué (pas de rémanence)',
       await cdp.evaluate(`getComputedStyle(document.querySelector('#tabsFrozenNotice')).display`) === 'none');
+
+    console.log('\n22. Coût estimé ($) sur la ligne — cumul affiché, couleur au DERNIER TOUR (plan coût-conv 2026-08-17 + plan coût-fenêtre 2026-08-18 lot 2, B3)');
+    // Ce que cette section garde : le montant s'affiche à droite du TITRE, il
+    // ne coûte pas un pixel à la barre de contexte — l'invariant du §16, qui a
+    // déjà été cassé deux fois par un enfant ajouté « juste à côté » d'une
+    // ligne. Depuis B3 (2026-08-18), la couleur ne suit plus le CUMUL affiché
+    // mais le coût du dernier tour COMPLET (`cost.lastTurn`) : le cumul et la
+    // couleur peuvent donc légitimement diverger — c'est tout le sens du lot.
+    const COST_PROBE = `(() => {
+      const rows = Array.from(document.querySelectorAll('#flow > .conv'));
+      const at = (i) => {
+        const r = rows[i]; if (!r) return null;
+        const c = r.querySelector('.cost');
+        const t = r.querySelector('.title');
+        const bar = r.querySelector('.bar-ctx');
+        const bb = bar ? bar.getBoundingClientRect() : null;
+        return {
+          text: c ? c.textContent : null,
+          shown: c ? getComputedStyle(c).display !== 'none' : false,
+          cls: c ? c.className : null,
+          tip: c ? c.title : null,
+          color: c ? getComputedStyle(c).color : null,
+          tabular: c ? getComputedStyle(c).fontVariantNumeric : null,
+          titleClipped: t ? t.scrollWidth > t.clientWidth : false,
+          rowH: +r.getBoundingClientRect().height.toFixed(2),
+          bar: bb ? { l: +bb.left.toFixed(2), r: +bb.right.toFixed(2), w: +bb.width.toFixed(2) } : null,
+          costInTitleRow: !!(c && c.parentElement && c.parentElement.classList.contains('title-row')),
+        };
+      };
+      return { n: rows.length, r0: at(0), r1: at(1), r2: at(2), r3: at(3) };
+    })()`;
+
+    // Référence : le MÊME état, sans le moindre coût — c'est lui qui fixe la
+    // géométrie à ne pas bouger.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(150);
+    const noCost = await cdp.evaluate(COST_PROBE);
+
+    const withCost = JSON.parse(JSON.stringify(STATE));
+    const mkCost = (total, lastTurn, turns) => ({
+      total, input: total * 0.06, cacheRead: total * 0.4, cacheWrite: total * 0.15,
+      output: total * 0.39, tools: 0, messages: 12,
+      lastTurn: typeof lastTurn === 'number' ? lastTurn : 0,
+      turns: typeof turns === 'number' ? turns : 0,
+    });
+    // Le CUMUL (`total`) n'a plus aucun rôle dans la couleur — seul le DERNIER
+    // TOUR (`lastTurn`) en a un, exprès aligné sur des seuils différents pour
+    // prouver la divergence : r0 gros cumul mais dernier tour minuscule, r1
+    // petit cumul mais dernier tour cher.
+    withCost.conversations[0].cost = mkCost(0.42, 0.1, 3);    // dernier tour < 0,5 $ → gris
+    withCost.conversations[1].cost = mkCost(1.10, 0.6, 5);    // dernier tour ≥ 0,5 $ → jaune
+    withCost.conversations[2].cost = mkCost(7.31, 3.0, 23);   // dernier tour ≥ 2 $ → rouge
+    withCost.conversations[3].cost = null;           // aucune donnée d'usage
+    // Titre volontairement long : l'ellipse doit rester au titre, jamais au
+    // montant (un montant tronqué serait un mensonge, pas une abréviation).
+    withCost.conversations[0].title = 'Conv au travail avec un titre vraiment très long qui ne tient pas dans la largeur du panneau';
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withCost })}, '*')`);
+    await sleep(150);
+    const cost = await cdp.evaluate(COST_PROBE);
+
+    check('le montant est rendu sur la ligne du TITRE (variante B), pas dans la méta',
+      cost.r0.costInTitleRow === true && cost.r0.shown === true, JSON.stringify(cost.r0));
+    check('format : symbole $ et DEUX décimales, en chiffres tabulaires',
+      cost.r0.text === '$0.42' && cost.r2.text === '$7.31'
+      && /tabular-nums/.test(cost.r0.tabular || ''),
+      `${cost.r0.text} / ${cost.r2.text} / ${cost.r0.tabular}`);
+    check('couleur au DERNIER TOUR (costTurnYellowDollars/costTurnRedDollars), pas au cumul : < 0,5 $ gris, ≥ 0,5 $ jaune, ≥ 2 $ rouge',
+      !/pace-/.test(cost.r0.cls) && /pace-yellow/.test(cost.r1.cls) && /pace-red/.test(cost.r2.cls),
+      `${cost.r0.cls} | ${cost.r1.cls} | ${cost.r2.cls}`);
+    check('les trois couleurs sont RÉSOLUES et distinctes (jetons pace-* du thème)',
+      cost.r0.color !== cost.r1.color && cost.r1.color !== cost.r2.color
+      && [cost.r0, cost.r1, cost.r2].every((r) => r.color && r.color !== 'rgba(0, 0, 0, 0)'),
+      `${cost.r0.color} | ${cost.r1.color} | ${cost.r2.color}`);
+    check('tooltip : cumul, nombre de réponses, dernier tour, puis le détail — obligatoire dès qu\'un tour est clos (B3)',
+      /^≈ \$7\.31 in 23 replies — last turn \$3\.00 — input /.test(cost.r2.tip || '')
+      && /cache /.test(cost.r2.tip || '') && /output /.test(cost.r2.tip || ''),
+      cost.r2.tip);
+    check('conversation sans donnée d\'usage → RIEN (nœud masqué, pas un « $0.00 »)',
+      cost.r3.shown === false && noCost.r3.shown === false, JSON.stringify(cost.r3));
+
+    // L'invariant du lot : le montant n'a aucune emprise sur la barre de
+    // contexte, ni sur la hauteur de ligne — il ne rogne que le titre, qui est
+    // fait pour ça (ellipse).
+    check('barre de contexte inchangée par l\'arrivée du montant (bord gauche, largeur, bord droit)',
+      Math.abs(cost.r0.bar.l - noCost.r0.bar.l) < 0.5 && Math.abs(cost.r0.bar.w - noCost.r0.bar.w) < 0.5
+      && Math.abs(cost.r0.bar.r - noCost.r0.bar.r) < 0.5,
+      JSON.stringify({ avec: cost.r0.bar, sans: noCost.r0.bar }));
+    check('hauteur de ligne inchangée (le montant est sur la ligne du titre, pas au-dessous)',
+      Math.abs(cost.r0.rowH - noCost.r0.rowH) < 0.5, `${noCost.r0.rowH} → ${cost.r0.rowH}`);
+    check('c\'est le TITRE qui s\'ellipse, jamais le montant',
+      cost.r0.titleClipped === true && cost.r0.text === '$0.42', JSON.stringify(cost.r0));
+
+    // Les seuils viennent des settings, pas du code : les déplacer repeint.
+    // costThresholds (cumul) n'a plus AUCUN effet sur la couleur : le relever
+    // à un niveau qui « éteindrait » r1/r2 s'il comptait encore ne doit rien
+    // changer — c'est costTurnThresholds qui gouverne.
+    const reThreshold = JSON.parse(JSON.stringify(withCost));
+    reThreshold.ui = Object.assign({}, reThreshold.ui, { costThresholds: { redMin: 10, yellowMin: 8 } });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: reThreshold })}, '*')`);
+    await sleep(150);
+    const untouched = await cdp.evaluate(COST_PROBE);
+    check('costThresholds (cumul, obsolète) relevé → AUCUN effet, r1/r2 restent colorés',
+      /pace-yellow/.test(untouched.r1.cls) && /pace-red/.test(untouched.r2.cls),
+      `${untouched.r1.cls} | ${untouched.r2.cls}`);
+
+    const reTurnThreshold = JSON.parse(JSON.stringify(withCost));
+    reTurnThreshold.ui = Object.assign({}, reTurnThreshold.ui, { costTurnThresholds: { redMin: 10, yellowMin: 8 } });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: reTurnThreshold })}, '*')`);
+    await sleep(150);
+    const moved = await cdp.evaluate(COST_PROBE);
+    check('costTurnThresholds relevé (settings) → les mêmes derniers tours redeviennent gris',
+      !/pace-/.test(moved.r1.cls) && !/pace-/.test(moved.r2.cls), `${moved.r1.cls} | ${moved.r2.cls}`);
+
+    console.log('\n23. Coût mesuré par FENÊTRE DE QUOTA (plan coût-fenêtre 2026-08-18, A1/D1 + C1)');
+    // Ce que cette section garde : le montant vit sur la ligne du HAUT, entre le
+    // libellé et le pourcentage ; il n'ajoute pas un pixel de hauteur, ne
+    // déplace pas le % ni la barre, ne touche pas au rail de la flèche ; et une
+    // fenêtre sans montant calculable garde exactement sa tête d'avant.
+    const QUOTA_PROBE = `(() => {
+      const rows = Array.from(document.querySelectorAll('#quota .q'));
+      const at = (i) => {
+        const q = rows[i]; if (!q) return null;
+        const head = q.querySelector('.q-head');
+        const c = q.querySelector('.q-cost');
+        const pct = q.querySelector('.q-pct');
+        const bar = q.querySelector('.bar-q');
+        const arrow = q.querySelector('.arrow');
+        const rb = bar ? bar.getBoundingClientRect() : null;
+        const rp = pct ? pct.getBoundingClientRect() : null;
+        const rh = head ? head.getBoundingClientRect() : null;
+        const rc = c ? c.getBoundingClientRect() : null;
+        return {
+          text: c ? c.textContent : null,
+          tip: c ? c.title : null,
+          tabular: c ? getComputedStyle(c).fontVariantNumeric : null,
+          inHead: !!(c && c.parentElement && c.parentElement.classList.contains('q-head')),
+          beforePct: !!(c && pct && (c.compareDocumentPosition(pct) & Node.DOCUMENT_POSITION_FOLLOWING)),
+          qH: +q.getBoundingClientRect().height.toFixed(2),
+          headH: rh ? +rh.height.toFixed(2) : null,
+          bar: rb ? { l: +rb.left.toFixed(2), r: +rb.right.toFixed(2), w: +rb.width.toFixed(2) } : null,
+          pctR: rp ? +rp.right.toFixed(2) : null,
+          headR: rh ? +rh.right.toFixed(2) : null,
+          arrowLeft: arrow ? arrow.style.left : null,
+          costR: rc ? +rc.right.toFixed(2) : null,
+          pctL: rp ? +rp.left.toFixed(2) : null,
+        };
+      };
+      return { n: rows.length, r0: at(0), r1: at(1), r2: at(2), r3: at(3) };
+    })()`;
+
+    // Référence : le MÊME état, sans le moindre montant — c'est lui qui fixe la
+    // géométrie à ne pas bouger.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(150);
+    const noQCost = await cdp.evaluate(QUOTA_PROBE);
+
+    const withQCost = JSON.parse(JSON.stringify(STATE));
+    withQCost.quota.windows[0].cost = 108.89;   // > 100 $ → arrondi à l'unité
+    withQCost.quota.windows[1].cost = 1390.91;  // quatre chiffres, sidebar 300 px
+    withQCost.quota.windows[2].cost = 41.30;    // < 100 $ → deux décimales
+    withQCost.quota.windows[3].cost = null;     // rien de mesurable → aucun ajout
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withQCost })}, '*')`);
+    await sleep(150);
+    const q = await cdp.evaluate(QUOTA_PROBE);
+
+    check('le montant est sur la ligne du HAUT, entre le libellé et le %',
+      q.r0.inHead === true && q.r0.beforePct === true, JSON.stringify(q.r0));
+    check('au-dessus de 100 $ : arrondi à l\'unité, en chiffres tabulaires',
+      q.r0.text === '≈ $109' && q.r1.text === '≈ $1,391' && /tabular-nums/.test(q.r0.tabular || ''),
+      `${q.r0.text} | ${q.r1.text} | ${q.r0.tabular}`);
+    check('en dessous de 100 $ : deux décimales, comme sur une ligne de conversation',
+      q.r2.text === '≈ $41.30', q.r2.text);
+    check('fenêtre sans montant calculable → RIEN d\'ajouté, la ligne garde sa tête',
+      q.r3.text === null && noQCost.r3.text === null, JSON.stringify(q.r3));
+    check('l\'infobulle porte les DEUX réserves (mesure partielle, tarif de liste)',
+      /measured on this PC/.test(q.r0.tip || '') && /claude\.ai/.test(q.r0.tip || '')
+      && /list prices/.test(q.r0.tip || '') && /not a spend/.test(q.r0.tip || ''),
+      q.r0.tip);
+
+    // L'invariant du lot : le gabarit de la ligne de quota ne bouge pas d'un
+    // pixel — ni sa hauteur, ni la barre, ni la position de la flèche, ni le %.
+    check('hauteur du bloc de fenêtre inchangée (aucune ligne ajoutée)',
+      Math.abs(q.r0.qH - noQCost.r0.qH) < 0.5 && Math.abs(q.r1.qH - noQCost.r1.qH) < 0.5,
+      `${noQCost.r0.qH} → ${q.r0.qH} | ${noQCost.r1.qH} → ${q.r1.qH}`);
+    check('hauteur de la ligne du haut inchangée',
+      Math.abs(q.r0.headH - noQCost.r0.headH) < 0.5, `${noQCost.r0.headH} → ${q.r0.headH}`);
+    check('barre de quota inchangée (bord gauche, largeur, bord droit)',
+      Math.abs(q.r0.bar.l - noQCost.r0.bar.l) < 0.5 && Math.abs(q.r0.bar.w - noQCost.r0.bar.w) < 0.5
+      && Math.abs(q.r0.bar.r - noQCost.r0.bar.r) < 0.5,
+      JSON.stringify({ avec: q.r0.bar, sans: noQCost.r0.bar }));
+    check('la flèche de burn-rate ne bouge pas (le montant ne partage pas son rail)',
+      q.r0.arrowLeft === noQCost.r0.arrowLeft && q.r1.arrowLeft === noQCost.r1.arrowLeft,
+      `${noQCost.r0.arrowLeft} → ${q.r0.arrowLeft}`);
+    check('le % reste collé au bord droit, jamais poussé hors de la ligne',
+      Math.abs(q.r1.pctR - noQCost.r1.pctR) < 0.5 && q.r1.pctR <= q.r1.headR + 0.5,
+      JSON.stringify({ pctR: q.r1.pctR, headR: q.r1.headR, sans: noQCost.r1.pctR }));
+    check('montant et % ne se chevauchent jamais, même sur quatre chiffres',
+      q.r1.costR < q.r1.pctL, JSON.stringify({ costR: q.r1.costR, pctL: q.r1.pctL }));
+
+    // Le montant vit sur la ligne du haut : le tick local de 30 s recompose les
+    // fenêtres (retick) et ne doit pas le perdre en route.
+    const qShots = [];
+    for (const scheme of ['dark', 'light']) {
+      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      await sleep(120);
+      const col = await cdp.evaluate(`getComputedStyle(document.querySelector('.q-cost')).color`);
+      check(`thème ${scheme} : le montant a une couleur résolue non transparente (${col})`,
+        !!col && col !== 'rgba(0, 0, 0, 0)' && col !== 'transparent');
+      qShots.push(Buffer.from((await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })).data, 'base64'));
+    }
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] });
+    const qDir = path.join(os.tmpdir(), 'qb-quota-cost-shots');
+    fs.mkdirSync(qDir, { recursive: true });
+    qShots.forEach((b, i) => fs.writeFileSync(path.join(qDir, `quota-${['dark', 'light'][i]}.png`), b));
+    console.log(`       captures : ${qDir}`);
+
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
   } finally {
     if (cdp) cdp.close();
     try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore', timeout: 5000 }); } catch {}

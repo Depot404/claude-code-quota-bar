@@ -62,6 +62,7 @@ console.log('\n1. pendingResumeSignals : appariement lancement ↔ notification'
   const p1 = write('a.jsonl', [agentLaunch('toolu_A', 'agent111', T0), assistant(T0 + 1000)]);
   const s1 = pendingResumeSignals(p1);
   check('agent lancé, aucune notification → pendingTask', !!s1 && s1.pendingTask === true, JSON.stringify(s1));
+  check('pendingTaskAt = instant du lancement orphelin', !!s1 && s1.pendingTaskAt === T0, JSON.stringify(s1));
 
   const p2 = write('b.jsonl', [agentLaunch('toolu_A', 'agent111', T0), taskNotif('agent111', 'toolu_A', T0 + 60000)]);
   const s2 = pendingResumeSignals(p2);
@@ -81,7 +82,10 @@ console.log('\n1. pendingResumeSignals : appariement lancement ↔ notification'
   check('appariement par tool-use-id quand le task-id manque', pendingResumeSignals(p5).pendingTask === false);
 
   const p6 = write('f.jsonl', [agentLaunch('toolu_D', 'agentD', T0), agentLaunch('toolu_E', 'agentE', T0 + 1000), taskNotif('agentD', 'toolu_D', T0 + 30000)]);
-  check('2 lancements, 1 notifié → toujours pending', pendingResumeSignals(p6).pendingTask === true);
+  const s6 = pendingResumeSignals(p6);
+  check('2 lancements, 1 notifié → toujours pending', s6.pendingTask === true);
+  check('pendingTaskAt = le PLUS RÉCENT des lancements encore orphelins (agentE, pas agentD notifié)',
+    s6.pendingTaskAt === T0 + 1000, JSON.stringify(s6));
 
   check('fichier absent → null', pendingResumeSignals(path.join(SANDBOX, 'absent.jsonl')) === null);
 }
@@ -118,11 +122,56 @@ console.log('\n1bis. Citations ≠ signaux (faux positif du 2026-08-17, jour mê
   check('une vraie notification en blocs text éteint l\'attente', pendingResumeSignals(p3).pendingTask === false);
 }
 
+console.log('\n1ter. Notification livrée en PLEIN TOUR : file d\'attente (CLI 2.1.234, 2026-08-18)');
+{
+  // Formes RELEVÉES sur transcript réel (session 4c8963a6, incident spinner
+  // éternel n°2, le soir même de 2.44.0) : la tâche finit pendant que la
+  // conversation TRAVAILLE → la notification ne passe JAMAIS par un message
+  // user. Le harnais l'enfile (queue-operation enqueue puis remove) et la
+  // livre en `attachment` marqué `commandMode: 'task-notification'`.
+  const notifText = (taskId, toolUseId) => `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<output-file>C:\\tmp\\${taskId}.output</output-file>\n<status>completed</status>\n<summary>Background command "suite" completed (exit code 0)</summary>\n</task-notification>`;
+  const queueOp = (operation, content, ms) => ({ type: 'queue-operation', operation, timestamp: iso(ms), sessionId: 's', content });
+  const attachmentNotif = (taskId, toolUseId, ms, commandMode = 'task-notification') => ({
+    type: 'attachment', timestamp: iso(ms), userType: 'external',
+    attachment: { type: 'queued_command', prompt: notifText(taskId, toolUseId), commandMode, timestamp: iso(ms) },
+  });
+
+  const p1 = write('t1.jsonl', [bashLaunch('toolu_bg', 'bsroinrir', T0), queueOp('enqueue', notifText('bsroinrir', 'toolu_bg'), T0 + 64000)]);
+  check('bash de fond + notification ENFILÉE (queue-operation) → plus d\'attente',
+    pendingResumeSignals(p1).pendingTask === false, JSON.stringify(pendingResumeSignals(p1)));
+
+  const p2 = write('t2.jsonl', [bashLaunch('toolu_bg', 'bsroinrir', T0), attachmentNotif('bsroinrir', 'toolu_bg', T0 + 70000)]);
+  check('bash de fond + notification LIVRÉE (attachment) → plus d\'attente',
+    pendingResumeSignals(p2).pendingTask === false);
+
+  // Appariement par tool-use-id seul, via la file (agent sans agentId lisible),
+  // et sur l'opération `remove` — elle porte le même texte que l'enqueue.
+  const noId = { type: 'user', timestamp: iso(T0), message: { role: 'user', content: [{ tool_use_id: 'toolu_q', type: 'tool_result', content: [{ type: 'text', text: 'Async agent launched successfully. The agent is working in the background.' }] }] } };
+  const p3 = write('t3.jsonl', [noId, queueOp('remove', notifText('whatever', 'toolu_q'), T0 + 5000)]);
+  check('appariement par tool-use-id via la file (remove porte aussi le texte)',
+    pendingResumeSignals(p3).pendingTask === false);
+
+  // Gardes : un prompt USER mis en file (c'est aussi une queue-operation) qui
+  // CITE les balises sans être une notification n'éteint rien…
+  const p4 = write('t4.jsonl', [bashLaunch('toolu_bg', 'bsroinrir', T0),
+    queueOp('enqueue', 'regarde : <task-id>bsroinrir</task-id> <tool-use-id>toolu_bg</tool-use-id>', T0 + 5000)]);
+  check('un prompt user EN FILE qui cite les balises n\'éteint pas l\'attente',
+    pendingResumeSignals(p4).pendingTask === true);
+
+  // …et un attachment non marqué task-notification (prompt user en file,
+  // livré) non plus, même si son texte Y RESSEMBLE.
+  const p5 = write('t5.jsonl', [bashLaunch('toolu_bg', 'bsroinrir', T0), attachmentNotif('bsroinrir', 'toolu_bg', T0 + 5000, 'queued command')]);
+  check('un attachment non marqué task-notification n\'éteint pas l\'attente',
+    pendingResumeSignals(p5).pendingTask === true);
+}
+
 console.log('\n2. pendingResumeSignals : réveils programmés (ScheduleWakeup)');
 {
   const future = NOW + 600 * 1000;
   const p1 = write('g.jsonl', [wakeup(future, T0)]);
-  check('dernier réveil dans le futur → wakeupAt le porte', pendingResumeSignals(p1).wakeupAt === future);
+  const w1 = pendingResumeSignals(p1);
+  check('dernier réveil dans le futur → wakeupAt le porte', w1.wakeupAt === future);
+  check('wakeupSetAt = instant où CE réveil a été armé', w1.wakeupSetAt === T0, JSON.stringify(w1));
 
   const p2 = write('h.jsonl', [wakeup(NOW - 60000, T0)]);
   check('réveil passé → wakeupAt passé (l\'appelant le juge inoffensif)', pendingResumeSignals(p2).wakeupAt === NOW - 60000);
@@ -163,6 +212,51 @@ console.log('\n3. effectiveState : done + reprise autonome à venir = busy (si v
   const spy = () => { called++; return { pendingTask: true, wakeupAt: null }; };
   const v = effectiveState(entry, NOW, NOW, true, NOW - 1000, spy);
   check('reprise déjà détectée par isResuming → busy sans consulter le scan', v === 'busy' && called === 0, `state=${v} called=${called}`);
+}
+
+console.log('\n3bis. effectiveState : startedAt — un signal antérieur à la naissance du process VIVANT est un débris (incident spinner éternel, 2026-08-18)');
+{
+  // Reproduit la session témoin 347e407a-32a5-46f2-8c64-32240b4618df :
+  // 2 run_in_background + 1 sous-agent lancés le 17/08 (19h45-20h14), jamais
+  // notifiés (reload qui a tué leur process), le CLI courant de cette conv
+  // n'étant né que le lendemain à 00:43:37 — bien APRÈS ces lancements.
+  const entryDone = { state: 'done', since: T0 };
+  const born = T0 + 60000; // process vivant né APRÈS le lancement orphelin ci-dessous
+  const orphanedLaunch = () => ({ pendingTask: true, pendingTaskAt: T0, wakeupAt: null, wakeupSetAt: null });
+  const freshLaunch = () => ({ pendingTask: true, pendingTaskAt: born + 5000, wakeupAt: null, wakeupSetAt: null });
+  const orphanedWakeup = () => ({ pendingTask: false, pendingTaskAt: null, wakeupAt: NOW + 600000, wakeupSetAt: T0 });
+  const freshWakeup = () => ({ pendingTask: false, pendingTaskAt: null, wakeupAt: NOW + 600000, wakeupSetAt: born + 5000 });
+  const undated = () => ({ pendingTask: true, pendingTaskAt: 0, wakeupAt: null, wakeupSetAt: null });
+
+  check('lancement ANTÉRIEUR à la naissance du process vivant → done (débris jamais notifiable — cas 347e407a)',
+    effectiveState(entryDone, T0, NOW, true, T0, orphanedLaunch, born) === 'done');
+  check('lancement POSTÉRIEUR à la naissance du process (cas nominal vagues 2026-08-17) → reste busy',
+    effectiveState(entryDone, T0, NOW, true, T0, freshLaunch, born) === 'busy');
+  check('réveil ScheduleWakeup ARMÉ par un process mort (avant startedAt) → ignoré, reste done',
+    effectiveState(entryDone, T0, NOW, true, T0, orphanedWakeup, born) === 'done');
+  check('réveil ScheduleWakeup ARMÉ par le process courant (après startedAt) → busy',
+    effectiveState(entryDone, T0, NOW, true, T0, freshWakeup, born) === 'busy');
+  check('signal présent mais NON DATABLE (pendingTaskAt=0) → comparaison sautée, comportement d\'avant (busy)',
+    effectiveState(entryDone, T0, NOW, true, T0, undated, born) === 'busy');
+  check('startedAt INDISPONIBLE (null, session hors registre) → comparaison sautée, comportement d\'avant (busy)',
+    effectiveState(entryDone, T0, NOW, true, T0, orphanedLaunch, null) === 'busy');
+  check('startedAt absent (appel unitaire à 6 arguments) → comportement d\'avant, jamais pire (busy)',
+    effectiveState(entryDone, T0, NOW, true, T0, orphanedLaunch) === 'busy');
+}
+
+console.log('\n3ter. effectiveState : rejoue la session témoin réelle 347e407a-32a5-46f2-8c64-32240b4618df');
+{
+  // Signaux RÉELS extraits du transcript (SecretaireUI, 2026-08-18) : deux
+  // run_in_background et un sous-agent lancés 17/08 19h45-20h14, jamais
+  // notifiés — pendingTaskAt le plus récent mesuré = 1786990469594 (20:14:29).
+  // Le process qui lit ce transcript aujourd'hui est né à 1787006617813
+  // (18/08 00:43:37, cf. ~/.claude/sessions/32340.json).
+  const realResumeSignals = () => ({ pendingTask: true, pendingTaskAt: 1786990469594, wakeupAt: null, wakeupSetAt: null });
+  const realStartedAt = 1787006617813;
+  const realMtime = realStartedAt + 3600000; // transcript encore écrit après la naissance du process
+  const realEntry = { state: 'done', since: realMtime - 1000 };
+  check('session témoin 347e407a (onglet ouvert, process vivant) → done après correctif',
+    effectiveState(realEntry, realMtime, realMtime + 5000, true, realMtime, realResumeSignals, realStartedAt) === 'done');
 }
 
 console.log('\n4. Lecteur : resumeSignals caché par (mtime, size)');

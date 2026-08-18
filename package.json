@@ -2,7 +2,7 @@
   "name": "claude-code-quota-bar",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "2.40.1",
+  "version": "2.47.2",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -105,6 +105,50 @@
           "default": 1,
           "minimum": 0,
           "description": "%config.burnRateYellowMax.description%"
+        },
+        "claudeCodeQuotaBar.ctxRedMin": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "%config.ctxRedMin.description%"
+        },
+        "claudeCodeQuotaBar.ctxYellowMin": {
+          "type": "number",
+          "default": 40,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "%config.ctxYellowMin.description%"
+        },
+        "claudeCodeQuotaBar.costRedDollars": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "%config.costRedDollars.description%"
+        },
+        "claudeCodeQuotaBar.costYellowDollars": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "%config.costYellowDollars.description%"
+        },
+        "claudeCodeQuotaBar.costTurnRedDollars": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "%config.costTurnRedDollars.description%"
+        },
+        "claudeCodeQuotaBar.costTurnYellowDollars": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "description": "%config.costTurnYellowDollars.description%"
+        },
+        "claudeCodeQuotaBar.relayNoticeDollars": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "%config.relayNoticeDollars.description%"
         },
         "claudeCodeQuotaBar.sounds.enabled": {
           "type": "boolean",

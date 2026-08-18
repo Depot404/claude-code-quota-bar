@@ -8,6 +8,11 @@ const { spawn, execSync, execFile } = require('child_process');
 const WebSocket = require('ws');
 const { ClaudePanelProvider } = require('./panel');
 const { createStateEngine, DEFAULTS: STATE_DEFAULTS, projectDirFor, readSessionsState } = require('./state');
+// Lecteur de coût : un SEUL accumulateur pour deux consommateurs — le montant
+// par conversation (via state.js) et celui d'une fenêtre de quota (timeline
+// globale). Il vit ici, et non dans le moteur d'état, parce que la ligne de
+// quota le consulte hors de tout snapshot.
+const { createCostReader } = require('./cost.js');
 const { focusConversation, createFocusRelay } = require('./focus');
 const { createTabTracker, localActiveLabel } = require('./tabs');
 const { createAckTracker } = require('./ack');
@@ -89,6 +94,7 @@ const BRAVE_EXE_CANDIDATES = [
 
 let timer;
 let panelProvider;
+let costReader = null;
 let stateEngine;
 let tabTracker;
 let ackTracker;
@@ -241,6 +247,28 @@ function getConfig() {
     sortOrder: cfg.get('conversationSortOrder', 'tabOrder'),
     collapsedConversations: !!cfg.get('collapsedConversations', false),
     collapsedQuota: !!cfg.get('collapsedQuota', false),
+    // Barre de contexte (%ctx) : seuils DIRECTS sur le pourcentage, pas un
+    // ratio comme burnRate — décision user 2026-08-17, comparée sur maquette.
+    ctxThresholds: {
+      redMin: cfg.get('ctxRedMin', 50),
+      yellowMin: cfg.get('ctxYellowMin', 40),
+    },
+    // Coût par conversation : seuils ABSOLUS en dollars (décision user
+    // 2026-08-17, comparée sur maquette contre une coloration relative au plus
+    // gourmand — le relatif repeint tout dès qu'une conv grossit, donc ne dit
+    // rien de stable). Même motif que ctxRedMin/ctxYellowMin.
+    costThresholds: {
+      redMin: cfg.get('costRedDollars', 5),
+      yellowMin: cfg.get('costYellowDollars', 2),
+    },
+    // Rythme (B3, 2026-08-18) : la couleur de la ligne suit désormais le coût
+    // du DERNIER TOUR COMPLET, pas le cumul — costThresholds ci-dessus reste
+    // lu (settings existants, retrait possible plus tard) mais ne colore plus
+    // rien.
+    costTurnThresholds: {
+      redMin: cfg.get('costTurnRedDollars', 2),
+      yellowMin: cfg.get('costTurnYellowDollars', 0.5),
+    },
   };
 }
 
@@ -294,6 +322,11 @@ function activate(context) {
     // suivants restent immédiats (pushPanelState direct, inchangé partout
     // ailleurs dans ce fichier).
     ready: () => pushPanelStateSettled(),
+    // Première ouverture VISIBLE du panneau : c'est SEULEMENT ici qu'on arme le
+    // scan global des transcripts, dont le premier passage n'est pas gratuit
+    // (cf. armGlobalCostScan). Tirer à chaque retour de visibilité est sans
+    // effet — la fonction est idempotente.
+    visible: () => armGlobalCostScan(),
     refresh: () => fetchAndUpdate(true),
     openUsage: () => vscode.env.openExternal(vscode.Uri.parse(USAGE_URL)),
     // Clic = acte observé explicite (lot 10c), même si l'onglet est déjà actif
@@ -419,9 +452,15 @@ function activate(context) {
   // comportement d'avant ce lot.
   const sessionTitles = createSessionTitles(resolveStateDbPath(context));
 
+  // Un seul lecteur pour les deux montants (ligne de conversation et ligne de
+  // quota) : il porte l'octet où chaque transcript a été lu, et relire deux
+  // fois les mêmes centaines de Mo pour la seconde question serait absurde.
+  costReader = createCostReader();
+
   stateEngine = createStateEngine({
     workspacePath,
     ...STATE_DEFAULTS,
+    readCost: costReader,
     tabs: () => tabTracker.getTabs(),
     sessionTitles: () => sessionTitles.get(),
     sortOrder: () => getConfig().sortOrder,
@@ -588,6 +627,32 @@ function resolveStateDbPath(context) {
   return null;
 }
 
+// Scan global des transcripts (coût par fenêtre de quota). Armé à la première
+// ouverture VISIBLE du panneau, jamais à l'activation : le premier passage
+// coûte quelques centaines de ms, et chaque fenêtre VS Code a son propre hôte
+// d'extension — six fenêtres ouvertes feraient six scans. Une fenêtre dont le
+// panneau reste fermé ne lit donc rien.
+const COST_SCAN_DELAY_MS = 1500;      // après le premier rendu, jamais pendant
+const COST_SCAN_INTERVAL_MS = 60000;  // ensuite : incrémental, quelques ms
+let costScanTimer = null;
+let costScanKick = null;
+
+function runGlobalCostScan() {
+  if (!costReader) return;
+  try { if (costReader.scanAll()) pushPanelState(); } catch {}
+}
+
+function armGlobalCostScan() {
+  if (costScanTimer) return;
+  costScanKick = setTimeout(runGlobalCostScan, COST_SCAN_DELAY_MS);
+  costScanTimer = setInterval(runGlobalCostScan, COST_SCAN_INTERVAL_MS);
+}
+
+function stopGlobalCostScan() {
+  if (costScanKick) { clearTimeout(costScanKick); costScanKick = null; }
+  if (costScanTimer) { clearInterval(costScanTimer); costScanTimer = null; }
+}
+
 function startTimer(ms) {
   clearInterval(timer);
   timer = setInterval(fetchAndUpdate, ms);
@@ -601,6 +666,7 @@ function restartTimer() {
 function deactivate() {
   clearInterval(timer);
   if (waveGateTimer) { clearTimeout(waveGateTimer); waveGateTimer = null; }
+  stopGlobalCostScan();
 }
 
 // `force` (commande Refresh / bouton du panneau, lot 13 §2) court-circuite la
@@ -936,6 +1002,10 @@ function conversationsState() {
       model: c.model,
       effort: c.effort || null,
       ctx: c.ctx,
+      // Coût estimé ($) depuis le début de la conv (cost.js, via state.js) —
+      // null quand le transcript ne porte encore aucune donnée d'usage : le
+      // panneau n'affiche alors RIEN, jamais un 0,00 $ supposé.
+      cost: c.cost || null,
       state: c.state,
       acked: c.acked !== false,
       active: c.isActive,
@@ -1242,7 +1312,7 @@ function paceColor(pace, thresholds) {
 // toucher au contrat). pace/elapsedPct sont calculés ici pour le premier
 // rendu ; le webview les ré-évalue localement toutes les 30 s (resetsAt +
 // windowMs + burnRate suffisent, aucun I/O) — cf. panel.js.
-function mkWindow(label, pct, resetsAt, windowMs, burnRate) {
+function mkWindow(label, pct, resetsAt, windowMs, burnRate, cost) {
   const elapsedPct = windowElapsedPct(resetsAt, windowMs);
   return {
     label,
@@ -1252,7 +1322,21 @@ function mkWindow(label, pct, resetsAt, windowMs, burnRate) {
     windowMs,
     pace: paceColor(burnRatePace(pct, resetsAt, windowMs), burnRate),
     elapsedPct: elapsedPct == null ? null : Math.min(100, Math.max(0, elapsedPct)),
+    // Coût MESURÉ sur la période exacte de la fenêtre (cost.js), pas une
+    // projection : `null` tant que le scan global n'a pas eu lieu, ou quand
+    // rien de mesurable n'y tombe — la ligne garde alors sa tête d'avant.
+    cost: typeof cost === 'number' && isFinite(cost) ? cost : null,
   };
+}
+
+// Bornes exactes de la fenêtre : début = reset − durée. Aucune heuristique de
+// date, aucune horloge locale dans le calcul du début — c'est l'API qui date le
+// reset. `modelName` non vide = fenêtre scopée par famille de modèle.
+function windowCost(resetsAt, windowMs, modelName) {
+  if (!costReader || !resetsAt) return null;
+  const end = Date.parse(resetsAt);
+  if (!Number.isFinite(end)) return null;
+  try { return costReader.windowCost(end - windowMs, modelName || null); } catch { return null; }
 }
 
 function quotaState() {
@@ -1261,9 +1345,9 @@ function quotaState() {
   if (!cached || !cached.data) return { windows: [], burnRate, ageMin: null, source: null };
   const windows = [];
   const fh = cached.data.five_hour;
-  if (fh && fh.utilization != null) windows.push(mkWindow(vscode.l10n.t('5h window'), fh.utilization, fh.resets_at, FIVE_HOUR_MS, burnRate));
+  if (fh && fh.utilization != null) windows.push(mkWindow(vscode.l10n.t('5h window'), fh.utilization, fh.resets_at, FIVE_HOUR_MS, burnRate, windowCost(fh.resets_at, FIVE_HOUR_MS)));
   const sd = cached.data.seven_day;
-  if (sd && sd.utilization != null) windows.push(mkWindow(vscode.l10n.t('7d window'), sd.utilization, sd.resets_at, SEVEN_DAY_MS, burnRate));
+  if (sd && sd.utilization != null) windows.push(mkWindow(vscode.l10n.t('7d window'), sd.utilization, sd.resets_at, SEVEN_DAY_MS, burnRate, windowCost(sd.resets_at, SEVEN_DAY_MS)));
   // Barres hebdo scopées par modèle (ex. Fable 50 % de l'hebdo jusqu'au
   // 19/07) : AUCUNE référence en dur à un modèle ni une date — toute entrée
   // limits[] avec group:"weekly" et un scope produit sa barre, et disparaît
@@ -1272,7 +1356,11 @@ function quotaState() {
   for (const l of limits) {
     if (l.group !== 'weekly' || !l.scope || !l.scope.model) continue;
     const name = l.scope.model.display_name || vscode.l10n.t('scoped');
-    windows.push(mkWindow(vscode.l10n.t('{0} (7d)', name), l.percent, l.resets_at, SEVEN_DAY_MS, burnRate));
+    // Le filtre par famille part du display_name, seul champ renseigné : dans
+    // le cache réel, `scope.model.id` vaut null. Aucun match → aucun montant
+    // sur cette ligne, jamais un chiffre faux (cf. cost.js modelMatcher).
+    windows.push(mkWindow(vscode.l10n.t('{0} (7d)', name), l.percent, l.resets_at, SEVEN_DAY_MS, burnRate,
+      windowCost(l.resets_at, SEVEN_DAY_MS, l.scope.model.display_name)));
   }
   return { windows, burnRate, ageMin: Math.round((Date.now() - cached.timestamp) / 60000), source: lastSource };
 }
@@ -1294,6 +1382,10 @@ function buildPanelState() {
   // si son groupe a disparu — jamais une seconde résolution divergente.
   if (shouldPurgeBatchLaunch(batchLastLaunch, (id) => !!(groupStore && groupStore.get(id)))) {
     batchLastLaunch = null;
+    // ...ET le texte de repli qui décrivait CE lot : sans lui, la ligne
+    // `if (!launch) return fallback` de computeBatchNoticeFromLaunch le
+    // réaffiche pour toujours, alors qu'il n'y a plus rien à recalculer.
+    if (!batchStatus.busy && batchStatus.notice) batchStatus = { busy: false, notice: null };
   }
   return {
     conversations: convs,
@@ -1304,6 +1396,9 @@ function buildPanelState() {
       collapsedQuota: cfg.collapsedQuota,
       sortOrder: cfg.sortOrder,
       collapsedNewConversation: !!(workspaceStateRef && workspaceStateRef.get(NEW_CONV_COLLAPSED_KEY, false)),
+      ctxThresholds: cfg.ctxThresholds,
+      costThresholds: cfg.costThresholds,
+      costTurnThresholds: cfg.costTurnThresholds,
     },
     // Lot 13 §1 : indicateur discret, jamais de popup — voir checkTabCanary().
     canary: canaryActive,
@@ -1638,7 +1733,19 @@ async function createBatch(msg) {
     // pour un batch sans groupe (tâche unique) : rien à surveiller.
     groupId: group ? group.id : null,
   };
-  batchStatus = { busy: false, notice: composeBatchNotice(conversationsState()) };
+  // Le texte VIVANT (« appuyez sur Entrée », « lien perdu ») est recalculé à
+  // chaque push par composeBatchNotice, juste en dessous — le FIGER ici en
+  // faisait un zombie : dès que la source du calcul disparaît (lot purgé avec
+  // son groupe, ou aucune session tracée), computeBatchNoticeFromLaunch
+  // retombe sur ce `fallback` et prescrit « appuyez sur Entrée dans son
+  // onglet » pour une conversation qui a envoyé depuis des heures — constat
+  // user 2026-08-18, exactement la classe d'erreur que member-truth.js
+  // documente déjà six fois (un état posé une fois, jamais réconcilié).
+  // `batchStatus.notice` ne garde donc plus que le CONSTAT statique, celui
+  // qu'aucun recompute ne saurait reproduire (tâches jamais identifiées,
+  // arrêt en cours de lot) : un constat périmé est muet, une prescription
+  // périmée envoie l'utilisateur chercher un onglet qui n'existe pas.
+  batchStatus = { busy: false, notice: staticSuffix.trim() || null };
   pushPanelState();
 }
 

@@ -50,9 +50,10 @@ const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js')
 const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, pendingInteractiveAt, interruptedAt, lastActivityTs, firstUserText, pendingResumeSignals } = require('./hooks/transcript.js');
 const { labelMatches, convMatchesLabel } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
-const { liveSessionIds, foreignSessionIds, SESSIONS_DIR } = require('./live-sessions.js');
+const { liveSessionIds, foreignSessionIds, liveSessionEntries, SESSIONS_DIR } = require('./live-sessions.js');
 const { cleanLabel } = require('./session-titles.js');
 const { computeSupersededBy } = require('./supersede.js');
+const { createCostReader } = require('./cost.js');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SESSIONS_STATE_PATH = path.join(CLAUDE_DIR, 'sessions-state.json');
@@ -179,7 +180,23 @@ function isResuming(since, activity, now) {
 // gèlerait la vague pour l'éternité, exactement le travers que member-truth.js
 // interdit. Thunk et pas valeur : le scan (4 Mo) ne doit tourner que si on en
 // arrive là — jamais pendant qu'une conv écrit (elle est `busy` bien avant).
-function effectiveState(entry, mtime, now, isLive, activityTs, resumeSignals) {
+//
+// `startedAt` (optionnel, incident spinner éternel 2026-08-18) : instant (ms
+// epoch) de naissance du process CLI VIVANT qui porte cette entrée
+// (liveSessionEntries, live-sessions.js). Un lancement de fond ou un réveil
+// programmé signalé par le transcript n'est une preuve de reprise QUE pour le
+// process qui pourra recevoir sa notification — celui qui l'a posé, ou un
+// futur respawn. Un process VIVANT mais NÉ APRÈS ce lancement (reload de
+// fenêtre, resume) ne recevra jamais cette notification-là : le lancement est
+// un débris de la session précédente, pas une promesse de reprise. Prouvé
+// sur transcript réel (347e407a, 2026-08-18) : deux `run_in_background`
+// et un sous-agent lancés à 19h45/20h14 la veille, jamais notifiés — le
+// process qui lit ce transcript est né à 00:43:37, largement après ; sans
+// cette date, `done` restait `busy` pour l'éternité, aucune écriture ne
+// pouvant plus jamais réparer un transcript qui n'avance plus. `startedAt`
+// absent (session hors registre, appel unitaire) OU signal non daté (`0`) →
+// comparaison sautée, comportement d'AVANT cette date — jamais pire.
+function effectiveState(entry, mtime, now, isLive, activityTs, resumeSignals, startedAt) {
   if (!entry || !entry.state) return 'idle';
   const since = entry.since || entry.updated_at || 0;
   const activity = activityTs || mtime;
@@ -192,7 +209,14 @@ function effectiveState(entry, mtime, now, isLive, activityTs, resumeSignals) {
       if (isResuming(since, activity, now)) return 'busy';
       if (isLive && typeof resumeSignals === 'function') {
         const rs = resumeSignals();
-        if (rs && (rs.pendingTask || (rs.wakeupAt && rs.wakeupAt > now))) return 'busy';
+        if (rs) {
+          // ts == null (rien à comparer) ou ts === 0 (présent, non datable) →
+          // le doute profite à l'affichage précédent, jamais un blocage neuf.
+          const startedAfter = (ts) => startedAt == null || !ts || ts >= startedAt;
+          const pending = !!rs.pendingTask && startedAfter(rs.pendingTaskAt);
+          const sleeping = !!rs.wakeupAt && rs.wakeupAt > now && startedAfter(rs.wakeupSetAt);
+          if (pending || sleeping) return 'busy';
+        }
       }
       return 'done';
     }
@@ -294,6 +318,20 @@ function hasOpenTab(c, tabs) {
 // bien réels (deux conversations distinctes). Le compte, lui, le dit.
 function countOpenTabs(c, tabs) {
   return tabs.labels.reduce((n, l) => (convMatchesLabel(l, c) ? n + 1 : n), 0);
+}
+
+// Un onglet OUVERT porte-t-il encore l'identité de cette session ? — répondu
+// SANS lire le transcript, donc utilisable AVANT même de décider si une conv
+// mérite d'être lue (filtre d'ancienneté de buildSnapshot). Deux sources se
+// croisent : la paire sessionId → libellé d'onglet du store VS Code
+// (session-titles.js) et la liste des onglets RÉELLEMENT ouverts (tabs.js).
+// Le croisement est indispensable — la table du store garde l'historique
+// COMPLET des conversations du workspace, onglets fermés compris (203 entrées
+// relevées sur ce poste le 2026-08-18), elle ne prouve donc rien à elle seule.
+function tabStillOpenFor(sessionId, titles, tabs) {
+  if (!tabs.known) return false;
+  const tabTitle = titles.get(sessionId);
+  return !!tabTitle && tabs.labels.some((l) => labelMatches(l, tabTitle));
 }
 
 // Tolérance au bruit d'UN SEUL recompute (lot 2, bascule au focus, 2026-07-24).
@@ -581,6 +619,14 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // Absente des opts (bancs d'avant ce lot) ⇒ ensemble vide ⇒ comportement d'avant.
   const foreign = (typeof opts.foreignSessions === 'function' && opts.foreignSessions()) || NO_LIVE;
   const titles = (typeof opts.sessionTitles === 'function' && opts.sessionTitles()) || new Map();
+  // Naissance (ms epoch) de chaque process VIVANT du registre — incident
+  // spinner éternel 2026-08-18, cf. le commentaire de `effectiveState` sur
+  // `startedAt`. Absente des opts (bancs d'avant ce lot) ⇒ Map vide ⇒ la
+  // comparaison de date est sautée partout, comportement d'avant à l'octet près.
+  const liveStarts = (typeof opts.liveSessionStarts === 'function' && opts.liveSessionStarts()) || new Map();
+  // Lu ICI, et non plus bas dans la fonction : le filtre d'ancienneté juste en
+  // dessous en a besoin (cf. tabStillOpenFor).
+  const tabs = (typeof opts.tabs === 'function' && opts.tabs()) || NO_TABS;
 
   if (projectDir) {
     for (const { sessionId, file } of listTranscripts(projectDir)) {
@@ -590,7 +636,20 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // Session vivante : candidate même si son transcript n'a rien écrit
       // depuis recentMs (4 h) — une conv ouverte et laissée en plan la journée
       // reste ouverte, et son onglet aussi.
-      if (!fresh && now - mtime > recentMs && !live.has(sessionId)) continue;
+      // …et session MORTE dont l'ONGLET est resté ouvert : même conclusion
+      // (2026-08-18). Le panneau doit tenir l'invariant « onglet ouvert ⇒
+      // listée », parce que tout le reste en dépend : member-truth.js conclut
+      // `done-closed` — titre BARRÉ sur une ligne maîtresse, ligne RETIRÉE pour
+      // un membre de vague — du seul fait qu'une conversation n'est pas dans la
+      // liste. Sans cette exemption ce raisonnement devient faux au bout de 4 h,
+      // et une conversation de cadrage terminée la nuit, CLI éteint mais onglet
+      // grand ouvert à l'écran, se retrouve barrée « terminée · onglet fermé »
+      // (signalé par l'user le 2026-08-18). La preuve ne coûte aucune lecture :
+      // libellé d'onglet du store croisé avec les onglets ouverts. Store muet ou
+      // tracker d'onglets absent → false → comportement d'avant, jamais un
+      // masquage de plus.
+      if (!fresh && now - mtime > recentMs && !live.has(sessionId)
+        && !tabStillOpenFor(sessionId, titles, tabs)) continue;
       byId.set(sessionId, { sessionId, transcript: file, mtime, entry: fresh ? entry : null });
     }
   }
@@ -635,10 +694,32 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // qu'une conv OUVERTE donnaient un panneau VIDE, la seule conv ouverte étant
   // 13e au tri. SCAN_LIMIT borne le coût du cas dégradé (tout est masqué) au
   // lieu de relire les 374.
-  const candidates = [...byId.values()].sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+  // Priorité aux conversations dont un ONGLET est ouvert (2026-08-18) — même
+  // invariant que l'exemption d'ancienneté plus haut, mais l'autre moitié :
+  // entrer dans les candidats ne suffit pas, encore faut-il entrer dans les
+  // `maxItems` places, et la troncature se fait dans l'ordre de ce tableau.
+  // Une conv à onglet ouvert mais ancienne se faisait couper par 12
+  // conversations plus fraîches, l'invariant « onglet ouvert ⇒ listée »
+  // retombait, et avec lui TOUT ce que la hiérarchie en déduit : ligne
+  // maîtresse barrée (member-truth), membre retiré de sa vague (panel.js),
+  // filiation défaite (nesting.js exige `master.listed`), groupe replié
+  // (group-done.js). Le poste de l'auteur tient 11 onglets Claude pour 12
+  // places : la marge n'est pas théorique. À onglet égal, le mtime tranche
+  // comme avant — et sans store d'onglets, tout le monde est à égalité, donc
+  // l'ordre est celui d'avant à l'octet près.
+  const hasTab = new Map();
+  for (const c of byId.values()) hasTab.set(c.sessionId, tabStillOpenFor(c.sessionId, titles, tabs) ? 1 : 0);
+  const candidates = [...byId.values()].sort((a, b) => {
+    const d = hasTab.get(b.sessionId) - hasTab.get(a.sessionId);
+    return d !== 0 ? d : (b.mtime || 0) - (a.mtime || 0);
+  });
   const SCAN_LIMIT = maxItems * 4;
 
-  const tabs = (typeof opts.tabs === 'function' && opts.tabs()) || NO_TABS;
+  // Coût estimé ($) consommé depuis le début de chaque conversation (cost.js).
+  // Injecté par l'engine, qui garde l'accumulateur incrémental à travers ses
+  // recomputes ; absent (bancs, usage isolé) → `cost` reste null partout et le
+  // panneau n'affiche rien, comportement d'avant à l'octet près.
+  const readCost = typeof opts.readCost === 'function' ? opts.readCost : null;
   const closedAt = opts.closedAt instanceof Map ? opts.closedAt : new Map();
   // Cf. resolveTabOpen : Map fraîche par défaut (bancs déterministes), tenue
   // par l'engine à travers ses recomputes dans le cas réel.
@@ -665,7 +746,8 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // la propriété → undefined → dégradation silencieuse, comportement d'avant.
       typeof readTranscript.resumeSignals === 'function'
         ? () => readTranscript.resumeSignals(c.transcript)
-        : undefined);
+        : undefined,
+      liveStarts.get(c.sessionId) ?? null);
     // Interruption manuelle (bouton Stop / Échap) et question interactive en
     // attente : deux faits qu'AUCUN hook ne signale, donc que seul le transcript
     // connaît — cf. applyTranscriptTruth, qui arbitre par la DATE des preuves.
@@ -738,6 +820,11 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // sur les conversations qui n'en portent pas (cf. extractLastAssistant).
       effort: (t && t.effort) || null,
       ctx: (t && t.ctx) || null,
+      // Intégrale de consommation, là où `ctx` n'est qu'une photo. Calculé
+      // seulement pour les convs RENDUES (on est déjà passé sous maxItems) :
+      // le périmètre est la VUE, comme le veut le plan — une conv masquée ne
+      // coûte pas une lecture d'append.
+      cost: readCost && c.transcript ? readCost(c.transcript) : null,
       message: state === 'waiting' && c.entry ? (c.entry.message || null) : null,
       isActive: false,
       transcript: c.transcript,
@@ -827,6 +914,13 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   for (const id of [...tabOpenMisses.keys()]) {
     if (!byId.has(id)) tabOpenMisses.delete(id);
   }
+  // Même raison pour l'accumulateur de coût : ses totaux par fichier n'ont plus
+  // de consommateur dès qu'une conversation quitte l'ensemble des candidates.
+  if (readCost && typeof readCost.forget === 'function') {
+    const keep = new Set();
+    for (const c of byId.values()) if (c.transcript) keep.add(c.transcript);
+    readCost.forget(keep);
+  }
 
   // Déjà trié (lastActivity/tabOrder/statusFirst ci-dessus) et borné à maxItems.
   // `supersededBy` (husk→successeur) : la redirection d'identité que les
@@ -845,6 +939,14 @@ function renderKey(convs) {
   return JSON.stringify(convs.map((c) => [
     c.sessionId, c.title, c.state, c.acked, c.model, c.effort,
     c.ctx ? Math.round(c.ctx.pct) : null, c.isActive, c.message,
+    // Coût AU CENTIME — la précision affichée, pas la précision calculée : le
+    // panneau montre deux décimales, une variation plus fine ne change rien à
+    // l'écran et ne mérite pas un push. Même esprit que le ctx% arrondi.
+    c.cost ? Math.round(c.cost.total * 100) : null,
+    // Coût du dernier tour, même précision : sans lui, la couleur de rythme
+    // (B3) ne se rafraîchirait pas tant que le CUMUL n'a pas assez bougé pour
+    // changer son propre centime arrondi.
+    c.cost ? Math.round(c.cost.lastTurn * 100) : null,
     // `tabOpen` (lot « bascule au focus ») : sans lui, un recompute qui corrige
     // tout seul une valeur fausse (cf. resolveTabOpen) ne repousse rien au
     // panneau tant qu'aucun AUTRE champ n'a changé — le chip resterait faux
@@ -864,9 +966,17 @@ function createStateEngine(options = {}) {
   // `liveSessions` a un défaut RÉEL : le registre est du Node pur, lisible d'ici
   // (contrairement au state.vscdb, dont seul l'hôte d'extension connaît le
   // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
+  // Accumulateur de coût, propriété du moteur : il DOIT survivre d'un recompute
+  // à l'autre — c'est lui qui porte l'octet où la lecture s'était arrêtée. Une
+  // instance neuve à chaque tick relirait des dizaines de Mo toutes les 30 s.
+  // `options.readCost` a la priorité pour que les bancs injectent le leur.
+  const readCost = typeof options.readCost === 'function' ? options.readCost : createCostReader();
   const opts = {
     liveSessions: liveSessionIds, foreignSessions: foreignSessionIds,
-    ...DEFAULTS, ...options, closedAt, tabOpenMisses,
+    // Défaut RÉEL, même registre que liveSessions ci-dessus (live-sessions.js) :
+    // cf. `startedAt` sur effectiveState.
+    liveSessionStarts: () => new Map(liveSessionEntries().map((e) => [e.sessionId, e.startedAt || null])),
+    ...DEFAULTS, ...options, closedAt, tabOpenMisses, readCost,
   };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
   // Part de la clé de rendu qui N'EST PAS dans les conversations (2026-08-06).
