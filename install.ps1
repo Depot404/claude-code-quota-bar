@@ -16,8 +16,9 @@ $srcHooks     = Join-Path $PSScriptRoot 'hooks'
 $srcCommands  = Join-Path $PSScriptRoot 'commands'
 
 # usage-statusline.js / track-active-session.js / hook-session-state.js sont des
-# hooks ; sessions-state.js, model-id.js, transcript.js et turn-cost.js sont des
-# libs require() par les precedents (meme dossier de deploiement obligatoire).
+# hooks ; sessions-state.js, model-id.js, transcript.js, turn-cost.js et
+# cost-history.js sont des libs require() par les precedents (meme dossier de
+# deploiement obligatoire).
 $hookFiles = @(
     'usage-statusline.js',
     'track-active-session.js',
@@ -25,7 +26,8 @@ $hookFiles = @(
     'sessions-state.js',
     'model-id.js',
     'transcript.js',
-    'turn-cost.js'
+    'turn-cost.js',
+    'cost-history.js'
 )
 
 # cost.js vit a la RACINE du repo (module de l'extension) et turn-cost.js le

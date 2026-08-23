@@ -10,6 +10,9 @@
 //     `costTurnRedDollars` : notice de relais, également en additionalContext
 //     (turn-cost.js). Elle PROPOSE une reprise en conversation neuve, elle
 //     n'agit pas.
+//  5) au plus une fois par jour civil : régénère ~/.claude/quotabar-cost-
+//     daily.json (cost-history.js), l'historique persistant des coûts —
+//     silencieux, aucun effet sur stdout ni sur la saisie.
 //
 // Source canonique : ce fichier est versionné dans le repo Octopus
 // (Tools/ClaudeCodeQuotaBar/hooks/). Déployé vers ~/.claude/scripts/ par
@@ -23,6 +26,7 @@ const { updateSession, readHookInput } = require('./sessions-state.js');
 const { modelIdToDisplay } = require('./model-id.js');
 const { extractLastAssistant } = require('./transcript.js');
 const { relayNotice } = require('./turn-cost.js');
+const { updateDailyHistory } = require('./cost-history.js');
 
 const ACTIVE_SESSION_PATH = path.join(os.homedir(), '.claude', 'active-session.json');
 
@@ -75,6 +79,7 @@ readHookInput((data) => {
   if (HANDOFFS_RE.test(String(data.prompt || ''))) parts.push(sessionTokenText(sessionId));
   try { parts.push(relayNotice(data)); } catch {}
   try { emitContext(parts); } catch {}
+  try { updateDailyHistory(); } catch {}
 
   // `busy` d'abord, et INCONDITIONNELLEMENT : l'état de la conv ne dépend pas
   // de notre capacité à résoudre le modèle. (Piège : la résolution échoue au

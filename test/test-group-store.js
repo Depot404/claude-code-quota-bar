@@ -146,6 +146,18 @@ function run() {
   check('ancienne valeur littérale "inherit" (stockage pré-lot-14) : traverse telle quelle, jamais interprétée comme une intention',
     legacyInherit.members[0].model === 'inherit' && legacyInherit.members[0].effort === 'inherit', JSON.stringify(legacyInherit));
   check('nom absent → repli, jamais undefined', clean.name === 'Batch');
+  // Trou de numérotation venu d'un stockage antérieur (déplacement « +1 sur le
+  // numéro » d'avant le 2026-08-22, ou dernier membre d'une vague retiré) : le
+  // panneau afficherait « vague 1 » puis « vague 3 », et la flèche ◂ serait
+  // morte faute de vague 2 où revenir. L'invariant tient à la LECTURE.
+  const holed = sanitizeGroup({ id: 'gh', members: [
+    { key: 'm1', wave: 1, launchedAt: 5 }, { key: 'm2', wave: 3 }, { key: 'm3', wave: 3 }, { key: 'm4', wave: 7 },
+  ] });
+  check('vagues trouées à la lecture → renumérotées 1,2,3 sans rien réordonner',
+    holed.members.map((m) => m.key + '=' + m.wave).join(' ') === 'm1=1 m2=2 m3=2 m4=3',
+    holed.members.map((m) => m.key + '=' + m.wave).join(' '));
+  check('… la vague déjà lancée reste devant, et lancée',
+    holed.members[0].wave === 1 && holed.members[0].launchedAt === 5);
   const st7 = fakeStorage([{ id: 'g', name: 'ok', members: [] }, 'garbage', 42]);
   const s7 = createGroupStore({ load: st7.load, save: st7.save });
   check('un stockage à moitié pourri ne fait pas planter le store', s7.all().length === 1);
@@ -156,9 +168,11 @@ function run() {
   const st9 = fakeStorage();
   let s9Seq = 0;
   const s9 = createGroupStore({ load: st9.load, save: st9.save, now: () => 1000, newId: () => 'gw' + (s9Seq++) });
-  // Deux tâches en vague 2 (c, e) : déplacer m3 hors de la vague 2 ne doit pas
-  // faire disparaître ce numéro de vague (moveQueuedMember ne renumérote pas —
-  // seul compactWaves, côté formulaire du lot 1, le fait).
+  // Une vague est une POSITION, jamais un numéro figé (décision 2026-08-22) :
+  // la numérotation reste contiguë, et `delta` vaut UN CRAN. Un membre seul
+  // dans sa vague FUSIONNE avec la voisine (sa vague disparaît) ; un membre
+  // accompagné SE DÉTACHE dans une vague neuve — c'est le seul chemin qui
+  // fabrique une vague, et c'est lui qui rend le geste réversible.
   const WAVE_TASKS = [
     { prompt: 'a', wave: 1 }, { prompt: 'b', wave: 1 },
     { prompt: 'c', wave: 2 }, { prompt: 'e', wave: 2 },
@@ -169,11 +183,58 @@ function run() {
     s9.get('gw0').members.filter((m) => m.launchedAt != null).map((m) => m.key).join() === 'm1,m2');
   check('membersOfWave(2) rend le bon sous-ensemble', s9.membersOfWave('gw0', 2).map((m) => m.key).join() === 'm3,m4');
 
-  check('déplacer m3 (queued, vague 2) vers la vague 3 : accepté', s9.moveQueuedMember('gw0', 'm3', 1) && s9.get('gw0').members.find((m) => m.key === 'm3').wave === 3);
-  check('le remettre en vague 2 : accepté', s9.moveQueuedMember('gw0', 'm3', -1) && s9.get('gw0').members.find((m) => m.key === 'm3').wave === 2);
-  check('reculer m3 vers la vague 1 (déjà lancée) : REFUSÉ', s9.moveQueuedMember('gw0', 'm3', -1) === false);
+  // Vue lisible de la répartition : « 1:m1,m2 | 2:m3,m4 | 3:m5 ». C'est la
+  // SEULE chose que ces tests regardent — un numéro de vague isolé ne dit rien
+  // tant qu'on ne voit pas ce qu'il y a autour.
+  const shape = (st, id) => {
+    const ms = st.get(id).members;
+    const waves = [...new Set(ms.map((m) => m.wave))].sort((a, b) => a - b);
+    return waves.map((w) => w + ':' + ms.filter((m) => m.wave === w).map((m) => m.key).join(',')).join(' | ');
+  };
+
+  check('départ : deux vagues en file derrière la vague 1 lancée',
+    shape(s9, 'gw0') === '1:m1,m2 | 2:m3,m4 | 3:m5', shape(s9, 'gw0'));
+
+  // m3 est ACCOMPAGNÉ (m4 partage sa vague) : il se détache dans une vague
+  // neuve juste après, et tout ce qui suivait se décale.
+  check('▸ sur un membre accompagné : il se détache dans une vague neuve',
+    s9.moveQueuedMember('gw0', 'm3', 1) && shape(s9, 'gw0') === '1:m1,m2 | 2:m4 | 3:m3 | 4:m5', shape(s9, 'gw0'));
+  // ... et la flèche inverse annule EXACTEMENT le clic précédent : m3 est
+  // maintenant seul, il refusionne avec la vague d'avant, qui se renumérote.
+  check('◂ derrière : le clic précédent est annulé au numéro près',
+    s9.moveQueuedMember('gw0', 'm3', -1) && shape(s9, 'gw0') === '1:m1,m2 | 2:m3,m4 | 3:m5', shape(s9, 'gw0'));
+
+  // Le bug du 2026-08-22 : la seule ligne d'une vague part rejoindre la
+  // suivante, sa vague se vide — et il fallait pouvoir revenir. Avant, la
+  // vague 2 n'existait plus et le retour était refusé en silence.
+  check('m5 (seul en vague 3) rejoint la vague 2 : sa vague disparaît, pas de trou',
+    s9.moveQueuedMember('gw0', 'm5', -1) && shape(s9, 'gw0') === '1:m1,m2 | 2:m3,m4,m5', shape(s9, 'gw0'));
+  check('retour : m5 se détache à nouveau dans sa propre vague',
+    s9.moveQueuedMember('gw0', 'm5', 1) && shape(s9, 'gw0') === '1:m1,m2 | 2:m3,m4 | 3:m5', shape(s9, 'gw0'));
+
+  // Deuxième moitié du bug : créer une vague APRÈS la dernière. Seul un membre
+  // accompagné peut le faire — m5 est seul en dernière vague, le pousser plus
+  // loin ne ferait que renuméroter sa propre vague.
+  check('▸ sur le seul membre de la dernière vague : REFUSÉ (rien ne changerait)',
+    s9.moveQueuedMember('gw0', 'm5', 1) === false);
+  check('▸ sur un membre accompagné de la dernière vague : une vague neuve naît au bout',
+    s9.moveQueuedMember('gw0', 'm5', -1) && s9.moveQueuedMember('gw0', 'm5', 1) &&
+    shape(s9, 'gw0') === '1:m1,m2 | 2:m3,m4 | 3:m5', shape(s9, 'gw0'));
+
+  // Le seuil des vagues lancées tient toujours : un membre SEUL dans la
+  // première vague en file n'a nulle part où reculer.
+  check('◂ sur le seul membre de la première vague en file : REFUSÉ (la vague 1 est partie)',
+    s9.moveQueuedMember('gw0', 'm5', -1) && s9.moveQueuedMember('gw0', 'm3', -1) &&
+    s9.moveQueuedMember('gw0', 'm3', -1) === false, shape(s9, 'gw0'));
+  check('… et il est bien seul en vague 2, la vague 1 lancée intacte',
+    shape(s9, 'gw0') === '1:m1,m2 | 2:m3 | 3:m4,m5', shape(s9, 'gw0'));
+  check('un membre accompagné, LUI, peut se détacher devant ses voisines',
+    s9.moveQueuedMember('gw0', 'm5', -1) && shape(s9, 'gw0') === '1:m1,m2 | 2:m3 | 3:m5 | 4:m4', shape(s9, 'gw0'));
+
   s9.markLaunched('gw0', 'm3', 2000);
   check('un membre déjà lancé ne bouge plus', s9.moveQueuedMember('gw0', 'm3', 1) === false);
+  check("une vague déjà ouverte n'accueille plus personne",
+    s9.moveQueuedMember('gw0', 'm5', -1) === false, shape(s9, 'gw0'));
 
   const st10 = fakeStorage();
   const s10 = createGroupStore({ load: st10.load, save: st10.save, now: () => 1000, newId: () => 'ge' });

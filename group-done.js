@@ -10,34 +10,42 @@
 // table, ne jamais recalculer un fait qu'elle a déjà établi ailleurs (c'est
 // exactement la classe d'erreur que member-truth.js documente en tête).
 //
+// 2026-08-18 — LA MAÎTRESSE NE RETIENT PLUS LE LOT. Jusqu'ici, une maîtresse
+// encore ouverte bloquait ce statut (« elle reste la porte d'entrée du
+// groupe ») : le lot restait donc affiché, réduit à sa capsule et à un chip
+// « ✓ done », et la conversation de cadrage gardait sa ligne de tête — son
+// « tag » — indéfiniment. Or c'est le cas NOMINAL : la conv de cadrage reste
+// ouverte, c'est celle depuis laquelle on travaille, et `prune()` (groups.js)
+// ne purge jamais un groupe dont la maîtresse est encore listée. Le lot ne
+// s'effaçait donc, en pratique, que le jour où l'on fermait aussi la conv de
+// cadrage. Décision : le lot n'existe QUE pour ses membres — quand ils sont
+// tous finis et fermés, il n'a plus rien à montrer et se retire ; la maîtresse
+// redevient une conversation ordinaire de la liste plate (panel.js la sort de
+// `masterIds` sur ce même `done`), sans que rien ne soit écrit dans le store,
+// ni fermé, ni interrompu.
+//
+// CE QUE ÇA NE CHANGE PAS, et qui est la raison de ne regarder QUE
+// `done-closed` : un membre INTERROMPU (`stale`) ou dont le prompt n'est jamais
+// parti (`unsent-lost` — le cas du reload de la fenêtre VS Code, qui efface le
+// prompt inséré sans l'envoyer) retient toujours le lot. Sa ligne reste, donc
+// son ▶ « Relaunch » aussi. On ne cache jamais du travail qui n'a pas eu lieu.
+//
 // Node PUR — aucun `require('vscode')`, aucun accès disque : testable cas par
 // cas (test/test-group-done.js), comme member-truth.js et waves.js.
 // ============================================================================
 
-// groupDone(memberStatuses, masterStatus) → bool
+// groupDone(memberStatuses) → bool
 //   memberStatuses : array des `status` memberTruth() des membres du groupe
 //                    (déjà redirigés husk→successeur par supersede.js).
-//   masterStatus   : `status` memberTruth() de la conv maîtresse, ou null si
-//                    le groupe n'a pas de maîtresse désignée.
-//   → true ssi le groupe a au moins un membre, TOUS sont 'done-closed', et la
-//     maîtresse (si désignée) l'est aussi. Une maîtresse encore ouverte ou
-//     vivante bloque ce statut — elle reste la porte d'entrée du groupe.
+//   → true ssi le groupe a au moins un membre et que TOUS sont 'done-closed'.
 //
-// Étape 11 : ce booléen sert désormais à decider si le groupe ENTIER se rend
-// (`panel.js` — `done` vrai ⇒ groupe absent du DOM, le store le garde,
-// `prune()` le nettoiera). Un groupe SANS maîtresse dont tous les membres
-// sont `done-closed` disparaît donc lui aussi (rien d'autre à montrer). Le
-// cas « membres tous finis, maîtresse encore ouverte » (capsule seule + chip
-// « ✓ done ») n'a PAS besoin de ce module : c'est une agrégation directe des
-// `status` des membres déjà transmis (même principe que `doneCount`, calculé
-// côté webview sans passer par une fonction partagée — rien de nouveau à
-// déduire, juste compter ce qui est déjà tranché).
-function groupDone(memberStatuses, masterStatus) {
+// Étape 11 : ce booléen décide si le groupe ENTIER se rend (`panel.js` —
+// `done` vrai ⇒ groupe absent du DOM, le store le garde, `prune()` le
+// nettoiera).
+function groupDone(memberStatuses) {
   const list = Array.isArray(memberStatuses) ? memberStatuses : [];
   if (list.length === 0) return false;
-  if (!list.every((s) => s === 'done-closed')) return false;
-  if (masterStatus != null && masterStatus !== 'done-closed') return false;
-  return true;
+  return list.every((s) => s === 'done-closed');
 }
 
 module.exports = { groupDone };

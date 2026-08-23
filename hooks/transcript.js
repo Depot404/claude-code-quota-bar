@@ -11,6 +11,15 @@ const fs = require('fs');
 
 const TAIL_BYTES = 65536;
 const HEAD_BYTES = 32768;
+// Borne du scan ligne-à-ligne (extractTitleInfo / firstUserText, ci-dessous) —
+// distincte de HEAD_BYTES, qui reste la fenêtre ai-title/last-prompt côté
+// queue. 2 Mo, volontairement large : un contexte de session incorporé dans
+// la 1re ligne user peut peser plusieurs centaines de Ko (mesuré 2026-08-18,
+// ~233 Ko) — HEAD_BYTES (32 Ko) coupait cette ligne au milieu, JSON.parse
+// échouait sur TOUTE la tranche, et le titre retombait au repli last-prompt
+// (source divergente du libellé d'onglet, resté sur le 1er prompt → le clic
+// sur la ligne ne matchait plus rien, convMatchesLabel/labels.js).
+const HEAD_SCAN_MAX_BYTES = 2 * 1024 * 1024;
 // Garde de salubrité SEULEMENT (titre de repli = prompt collé entier, parfois
 // des Ko) — jamais atteinte par un vrai ai-title. La coupe d'AFFICHAGE est du
 // ressort du CSS (ellipsis + tooltip, panel.js) : tronquer ici à 40 rendait le
@@ -31,6 +40,43 @@ function readSlice(filePath, bytes, from) {
     fs.closeSync(fd);
   }
   return { text: buf.toString('utf8'), partialFirstLine: from === 'tail' && size < stat.size };
+}
+
+// Scan de tête ligne par ligne, borné en octets mais JAMAIS en plein milieu
+// d'une ligne (contrairement à readSlice(…, 'head'), qui coupe à une frontière
+// d'octets fixe — une 1re ligne plus grosse que la coupe rend alors un JSON
+// illisible dans toute la tranche). `onEntry(entry)` est appelé pour chaque
+// ligne parseable, dans l'ordre du fichier ; il rend `true` pour arrêter le
+// scan dès qu'il a ce qu'il cherche (évite de lire les 2 Mo en entier sur un
+// gros transcript quand la réponse est dans les premières lignes).
+function scanHeadLines(filePath, maxBytes, onEntry) {
+  let fd;
+  try { fd = fs.openSync(filePath, 'r'); } catch { return; }
+  const CHUNK = 65536;
+  const buf = Buffer.allocUnsafe(CHUNK);
+  let leftover = '';
+  let pos = 0;
+  try {
+    while (pos < maxBytes) {
+      const toRead = Math.min(CHUNK, maxBytes - pos);
+      let bytesRead;
+      try { bytesRead = fs.readSync(fd, buf, 0, toRead, pos); } catch { break; }
+      if (bytesRead <= 0) break;
+      pos += bytesRead;
+      leftover += buf.toString('utf8', 0, bytesRead);
+      const lines = leftover.split('\n');
+      leftover = lines.pop(); // dernière ligne potentiellement incomplète → gardée pour le tour suivant
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        let entry;
+        try { entry = JSON.parse(t); } catch { continue; }
+        if (onEntry(entry) === true) return;
+      }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function parseSlice(slice) {
@@ -177,12 +223,16 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
     if (aiTitle && lastPrompt) break;
   }
   if (aiTitle) return { title: aiTitle, source: 'ai-title' };
-  for (const e of parseSlice(readSlice(filePath, HEAD_BYTES, 'head'))) {
-    if (e.type !== 'user' || e.isMeta || e.isSidechain || !e.message) continue;
+  let firstUser = null;
+  scanHeadLines(filePath, HEAD_SCAN_MAX_BYTES, (e) => {
+    if (e.type !== 'user' || e.isMeta || e.isSidechain || !e.message) return false;
     const txt = firstTextBlock(e.message.content);
     const cleaned = cleanTitle(txt);
-    if (cleaned) return { title: cleaned, source: 'first-user' };
-  }
+    if (!cleaned) return false;
+    firstUser = cleaned;
+    return true;
+  });
+  if (firstUser) return { title: firstUser, source: 'first-user' };
   const lp = cleanTitle(lastPrompt);
   return lp ? { title: lp, source: 'last-prompt' } : { title: null, source: null };
 }
@@ -198,19 +248,21 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
 // fichier. Fichier absent/illisible → null, jamais d'exception (le rattachement
 // se contente alors de ne rien conclure).
 function firstUserText(filePath, maxChars = 600) {
-  let entries;
-  // readSlice fait un statSync : fichier disparu entre le snapshot et ici
-  // (conversation fermée, transcript déplacé) = cas normal, pas une erreur.
-  try { entries = parseSlice(readSlice(filePath, HEAD_BYTES, 'head')); } catch { return null; }
-  for (const e of entries) {
-    if (e.type !== 'user' || e.isMeta || e.isSidechain || !e.message) continue;
-    const txt = firstTextBlock(e.message.content);
-    if (!txt) continue;
-    const cleaned = stripEnvelopes(txt).trim();
-    if (!cleaned) continue;
-    return cleaned.slice(0, maxChars);
-  }
-  return null;
+  // Fichier disparu entre le snapshot et ici (conversation fermée, transcript
+  // déplacé) = cas normal, pas une erreur : scanHeadLines rend simplement rien.
+  let found = null;
+  try {
+    scanHeadLines(filePath, HEAD_SCAN_MAX_BYTES, (e) => {
+      if (e.type !== 'user' || e.isMeta || e.isSidechain || !e.message) return false;
+      const txt = firstTextBlock(e.message.content);
+      if (!txt) return false;
+      const cleaned = stripEnvelopes(txt).trim();
+      if (!cleaned) return false;
+      found = cleaned.slice(0, maxChars);
+      return true;
+    });
+  } catch { return null; }
+  return found;
 }
 
 // Scan incrémental append-only d'un transcript à la recherche d'entrées
@@ -372,10 +424,33 @@ function lastActivityTs(filePath) {
     const e = entries[i];
     if (e.type !== 'user' && e.type !== 'assistant') continue;
     if (e.type === 'user' && e.isMeta) continue;
+    if (e.type === 'user' && isStoppedTaskNotif(e.message && e.message.content)) continue;
     const t = Date.parse(e.timestamp || '');
     return Number.isFinite(t) ? t : null;
   }
   return null;
+}
+
+// Livraison ≠ reprise (incident 2026-08-22, spinner post-reload n°3) : une
+// <task-notification> au statut `stopped` est un message `user` fabriqué par le
+// harnais quand il constate qu'une tâche de fond est morte SANS résultat — le
+// cas typique : tuée par le reload de fenêtre, notification livrée au respawn
+// du CLI. Elle n'est PAS suivie d'une ré-invocation du modèle (constaté en
+// réel : aucun assistant pendant 77 s, il ne serait jamais venu) ; la compter
+// comme activité conversationnelle faisait conclure isResuming « le travail a
+// repris » → spinner sur une conv done, jusqu'à STALE_MS. Ironie mesurée sur le
+// transcript témoin : c'est la notification même qui ÉTEINT le pending de
+// 2.44.2 qui rallumait le spinner par ce chemin-ci.
+// SEUL `stopped` est ignoré : une notification completed/failed annonce une
+// vraie ré-invocation imminente — l'ignorer ouvrirait une fenêtre `done` de
+// quelques secondes avant le premier token, exactement le faux-done qui a fait
+// avancer une vague sur un lot inachevé (incident vagues 2026-08-17). Libellé
+// harnais assumé, comme TASK_NOTIF_RE : s'il change, la détection rend faux →
+// comportement d'avant (spinner ≤ STALE_MS, auto-éteint), jamais pire.
+const TASK_NOTIF_STOPPED_RE = /<status>stopped<\/status>/;
+function isStoppedTaskNotif(content) {
+  const text = allText(content).trim();
+  return TASK_NOTIF_RE.test(text) && TASK_NOTIF_STOPPED_RE.test(text);
 }
 
 // ── Signaux de reprise AUTONOME (incident vagues 2026-08-17) ────────────────

@@ -143,7 +143,6 @@ const BATCH = {
   envConflict: [], busy: false, notice: null, noticeHint: null,
   inherit: { model: 'sonnet', effort: 'medium' },
   lastModel: null, lastEffort: null,
-  tipDismissed: true,
 };
 
 const UI = { collapsedConversations: false, collapsedQuota: false, sortOrder: 'tabOrder' };

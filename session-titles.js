@@ -32,8 +32,33 @@ const fs = require('fs');
 // qu'une conv travaille).
 const MIN_STAT_INTERVAL_MS = 30 * 1000;
 
-const RESOURCE_PREFIX = 'claude-code:/';
+// Le schéma d'URI des sessions Claude a CHANGÉ sous nos pieds (relevé le
+// 2026-08-20) : `agent-host-claude:/<uuid>` là où c'était `claude-code:/<uuid>`.
+// Un seul préfixe en dur, et la table entière devient illisible SANS erreur —
+// 411 entrées présentes, 0 retenue sur le workspace Octopus, pendant que
+// d'autres workspaces plus anciens répondaient encore : la panne se lit comme
+// une dégradation silencieuse normale, ce qui la rend indétectable de
+// l'intérieur. C'est un internal non documenté ; il rebougera. On accepte donc
+// TOUS les schémas connus, du plus récent au plus ancien, et on n'en retire
+// jamais un tant qu'un workspace peut encore le porter (le vscdb d'un dossier
+// qu'on n'a pas rouvert depuis des mois garde l'ancien format pour toujours).
+//
+// Conséquence en cascade quand cette source tombe, et raison de ne pas la
+// laisser muette : elle est la SEULE preuve d'onglet indépendante du titre.
+// Sans elle, une conversation sans ai-title n'a plus aucun moyen d'être
+// reconnue fermée — c'est le bug des lignes barrées immortelles du 2026-08-20.
+const RESOURCE_PREFIXES = ['agent-host-claude:/', 'claude-code:/'];
 const CACHE_KEY = 'agentSessions.model.cache';
+
+// L'identifiant de session porté par une URI de ressource, quel que soit son
+// schéma — null si aucun schéma connu ne la porte (autre provider d'agent).
+function sessionIdFromResource(resource) {
+  if (typeof resource !== 'string') return null;
+  for (const prefix of RESOURCE_PREFIXES) {
+    if (resource.startsWith(prefix)) return resource.slice(prefix.length) || null;
+  }
+  return null;
+}
 
 function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
 
@@ -86,9 +111,8 @@ function createSessionTitles(stateDbPath, options = {}) {
       const entries = Array.isArray(parsed) ? parsed : [];
       const map = new Map();
       for (const e of entries) {
-        if (!e || typeof e.resource !== 'string' || typeof e.label !== 'string') continue;
-        if (!e.resource.startsWith(RESOURCE_PREFIX)) continue;
-        const sessionId = e.resource.slice(RESOURCE_PREFIX.length);
+        if (!e || typeof e.label !== 'string') continue;
+        const sessionId = sessionIdFromResource(e.resource);
         if (sessionId) map.set(sessionId, e.label);
       }
       return map;

@@ -91,6 +91,22 @@ const vscode = require('vscode');
 //         status: 'queued'|'launched'|'done'|'stale',  // lot 4 (waves.js)
 //       }],
 //     }],
+//     setup: {                // lot onboarding 2026-08-19 — un poste installé
+//                             // depuis le Marketplace ne déploie RIEN dans
+//                             // ~/.claude/ tout seul ; ces deux booléens
+//                             // pilotent le bandeau non masquable en tête de
+//                             // la liste (#hooksBanner). Recalculés à CHAQUE
+//                             // push (fs.existsSync, jamais mis en cache côté
+//                             // extension) — INDÉPENDANTS l'un de l'autre,
+//                             // jamais fondus en un seul drapeau. Absent du
+//                             // message (contrat non respecté, ou state
+//                             // fabriqué à la main par un banc/make-store-
+//                             // shots.js) → bandeau MASQUÉ, jamais affiché à
+//                             // tort (dégradation maison : une source
+//                             // illisible n'ajoute jamais un avertissement).
+//       hooksInstalled: boolean,     // ~/.claude/scripts/hook-session-state.js
+//       handoffsInstalled: boolean,  // ~/.claude/commands/handoffs.md
+//     },
 //   }
 //
 // Un membre n'a PAS d'état propre : son état, son modèle, son contexte sont
@@ -278,6 +294,21 @@ function renderHtml(webview) {
        maîtresse, un membre et une ligne plate tient par construction. */
     --master-ring-w: 4.25px;
     --master-ring-d: 24px;
+    /* Anneau d'un MEMBRE (2026-08-22) — sorti des littéraux le jour où la
+       tête d'un sous-lot a porté les DEUX canons sur la même bulle : sa
+       moitié gauche EST cet anneau-là (même diamètre, même épaisseur), et
+       splitRingSvg() lit ces deux variables au lieu de les recopier — une
+       valeur en double finit toujours par diverger. Le diamètre passe de 16
+       à 18px au même moment (choix de l'user sur
+       MOCKUP_bulle_scindee_2026-08-22.html) : il vaut pour TOUS les membres,
+       pas seulement pour cette bulle — c'est un canon, pas un cas. */
+    --member-ring-w: 1.5px;
+    --member-ring-d: 18px;
+    /* Marque « à relire » (lot 2, plan marque_a_relire 2026-08-22) — seul
+       point de réglage du gabarit d'icônes (pose, marque posée, ⌂ rattacher) :
+       valeur reprise telle quelle de la maquette jouée et mesurée au
+       rectangle (MOCKUP_pin_ligne_2026-08-22.html, variante B). */
+    --mk-size: 18px;
   }
   /* Enregistrée = le moteur interpole un <angle> en douceur (la longueur du
      serpentin croît/décroît au lieu de sauter) — condition pour l'animation
@@ -323,6 +354,37 @@ function renderHtml(webview) {
     background: color-mix(in srgb, var(--waiting) 12%, transparent);
   }
   .canary.show { display: block; }
+  /* Panneau figé (incident 2026-08-21) : le webview, VISIBLE, n'a plus reçu
+     d'état depuis frozenAfterMs malgré ses re-demandes (heartbeat — cf.
+     checkFreshness dans le script). Geler TOUTES les animations en UNE règle,
+     jamais une liste de sélecteurs à maintenir : un spinner qui tourne sur des
+     données sues périmées affirme « ça travaille » sans aucune preuve — c'est
+     le mensonge exact de l'incident (spinner 9 min après la fin du tour, canal
+     hôte→webview gelé, l'animation CSS locale continuait toute seule). Le
+     bandeau .canary jumeau dit pourquoi plus rien ne bouge. */
+  body.data-stale *, body.data-stale *::before, body.data-stale *::after {
+    animation-play-state: paused !important;
+  }
+
+  /* Bandeau d'onboarding (lot 2026-08-19) — NON masquable par construction :
+     zéro règle pilotée par un clic utilisateur, uniquement par msg.state.setup
+     (cf. renderSetupBanner ci-dessous) — une croix ici recréerait exactement
+     le silence que ce lot corrige (constat : un poste Marketplace n'affiche
+     jamais rien quand il manque les hooks). Teinte "avertissement" du thème
+     hôte (inputValidation-warning*, ce que VS Code réserve à ses propres
+     messages de validation bloquants) — plus appuyée que .canary/.banner.info,
+     volontairement : icônes d'état vides, aucun son, aucun coût par tour ne
+     sont pas un détail parmi d'autres. */
+  .hooks-banner {
+    display: none;
+    margin: 2px 2px var(--sp-sep); padding: 6px 8px; border-radius: 4px;
+    font-size: 12px; line-height: 1.45;
+    background: var(--vscode-inputValidation-warningBackground, color-mix(in srgb, var(--waiting) 16%, transparent));
+    border: 1px solid var(--vscode-inputValidation-warningBorder, var(--waiting));
+    color: var(--vscode-foreground);
+  }
+  .hooks-banner.show { display: block; }
+  .hooks-banner .txt { display: block; margin-bottom: 6px; }
 
   /* ── Conversations ── */
   .conv {
@@ -360,6 +422,13 @@ function renderHtml(webview) {
      de couleur dans tout le panneau. */
   .conv .cost.pace-yellow { color: var(--pace-yellow); }
   .conv .cost.pace-red { color: var(--pace-red); }
+  /* Lot 2 marque « à relire » (2026-08-22) : le coût cède la place aux gestes
+     de pose/rattacher au survol de la ligne — sa boîte reste (rien ne se
+     décale), le montant revient dès qu'on sort. Idiome VS Code du badge qui
+     s'efface devant les actions ; repris tel quel de la maquette mesurée
+     (MOCKUP_pin_ligne_2026-08-22.html, variante B). */
+  .conv .title-row .cost { transition: opacity .1s; }
+  .conv:hover .title-row .cost { opacity: 0; }
   .conv .title {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
@@ -622,14 +691,6 @@ function renderHtml(webview) {
     color: var(--muted); border-color: var(--vscode-panel-border, rgba(128,128,128,.35));
   }
   .btn.pri.dim:hover { background: var(--vscode-list-hoverBackground); }
-  .hint { margin-top: var(--sp-sep); font-size: 11px; color: var(--muted); }
-  .tip-restore {
-    margin-left: 6px; cursor: pointer; opacity: .5; font-size: 10px;
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 14px; height: 14px; border-radius: 50%;
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.4));
-  }
-  .tip-restore:hover { opacity: 1; }
   .notice {
     display: none;
     margin: var(--sp-sep) 0; padding: 3px 6px; border-radius: 4px; font-size: 11px;
@@ -763,6 +824,13 @@ function renderHtml(webview) {
   .mismatch { color: var(--vscode-errorForeground, #f14c4c); font-size: 10px; }
   .conv .mismatch { display: none; }
   .conv .mismatch.show { display: block; }
+  /* Ambiguïté d'appariement onglet (lot 3 du plan d'appariement, 2026-08-21) :
+     signe DISCRET, inline sur la ligne de titre — jamais une ligne de plus
+     comme .mismatch, l'ambiguïté n'est pas une action à corriger dans la conv
+     mais un fait sur le rendu (renommer/fermer un des deux réglerait ça).
+     Infobulle native (title=) pour le détail. */
+  .conv .amb { display: none; flex: none; font-size: 11px; color: var(--muted); cursor: help; }
+  .conv .amb.show { display: inline; }
 
   /* ── Groupes (lot 2, capsule v2 — plan repli-auto étape 9 2026-08-05) ──────
      La capsule teintée redevient une simple GRIP au-dessus du corps : chevron,
@@ -833,7 +901,6 @@ function renderHtml(webview) {
   .grp-count { flex: none; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
   /* Chip « ce qui reste à faire » (étape 11) : même variable de thème que le
      glyphe ✓ done des membres. */
-  .grp-done { flex: none; font-size: 10px; color: var(--done); font-weight: 600; margin-left: 4px; }
   .grp-head .spacer { flex: 1 1 auto; }
   .gbtn {
     flex: none; border: 0; background: none; cursor: pointer; padding: 1px 4px;
@@ -1049,9 +1116,11 @@ function renderHtml(webview) {
   }
   .grp-body .conv .ico::after, .grp-body .m-pending .ico-pending::after {
     content: ''; position: absolute; z-index: -1;
-    top: 50%; left: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+    top: 50%; left: 50%;
+    width: var(--member-ring-d); height: var(--member-ring-d);
+    margin: calc(-1 * var(--member-ring-d) / 2) 0 0 calc(-1 * var(--member-ring-d) / 2);
     border-radius: 50%; box-sizing: border-box;
-    border: 1.5px solid var(--grp-hue, var(--muted));
+    border: var(--member-ring-w) solid var(--grp-hue, var(--muted));
     /* Étape 12 (régression thème clair) : MÊME chaîne que le fond du body
        ci-dessus, jamais un littéral figé (l'ancien fallback #1e1e1e ne
        « troue » que sur fond sombre — en clair il peignait un disque sombre
@@ -1085,6 +1154,29 @@ function renderHtml(webview) {
   .grp-master-head .conv .ico::after {
     background-image: linear-gradient(var(--grp-tint, transparent), var(--grp-tint, transparent));
   }
+  /* BULLE SCINDÉE de la tête de sous-lot (2026-08-22, réglée par l'user sur
+     MOCKUP_bulle_scindee_2026-08-22.html) — une ligne à DOUBLE rôle porte les
+     deux sur son anneau, chacun au canon de son rôle :
+       · moitié GAUCHE  « je suis un membre de ce lot »  → teinte du parent,
+         canon d'un membre (--member-ring-*) ;
+       · moitié DROITE  « j'ouvre ce sous-lot »          → teinte de l'enfant,
+         canon d'une tête (--master-ring-*).
+     Les deux moitiés n'ont donc ni la même épaisseur ni le même diamètre : une
+     bordure CSS n'en sait porter qu'une seule de chaque, et un dégradé ne sait
+     pas faire un bout d'arc net. C'est un tracé SVG (splitRingSvg) qui la peint,
+     posé dans la boîte d'icône par renderGroups — le seul endroit qui sache
+     qu'une ligne est tête de sous-lot. Le pseudo mono-couleur s'efface donc
+     ici, et NULLE PART ailleurs : la maîtresse RACINE, qui n'a qu'un rôle,
+     garde le sien.
+     Les arcs se CHEVAUCHENT de 10° (5° de part et d'autre de l'axe) : bout à
+     bout, le décrochement de rayon laissait une couture ouverte à midi et à
+     six heures. */
+  .member.nest-host > .m-head .conv .ico::after { display: none; }
+  .split-ring {
+    position: absolute; top: 50%; left: 50%; z-index: -1;
+    pointer-events: none; overflow: visible;
+  }
+
   /* Titre en gras (2026-08-17) : troisième signe de la tête de lot, avec la
      bulle et le rail. Après .conv.active .title (même spécificité, plus haut
      dans la feuille) : une maîtresse sélectionnée reste en gras, elle ne
@@ -1326,6 +1418,38 @@ function renderHtml(webview) {
      aussi la ligne master (.grp-master-slot) et chaque membre (.m-slot) —
      masqué par la structure DOM, jamais par un état JS à tenir à jour. */
   .m-slot .conv .link-master, .grp-master-slot .conv .link-master { display: none; }
+  /* Marque « à relire » (lot 2, plan marque_a_relire 2026-08-22, variante B
+     « devant le titre ») — CSS et gabarit repris TELS QUELS de la maquette
+     jouée et mesurée au rectangle (MOCKUP_pin_ligne_2026-08-22.html) : rien
+     ci-dessous n'est jugé à l'œil.
+     Icônes monochromes au même gabarit (viewBox 16, currentColor, taille
+     pilotée par --mk-size) : le ⌂ ci-dessus était un CARACTÈRE de texte,
+     redessiné en SVG dans le même jeu pour ne plus jurer à côté de la marque
+     (décision 5). .mk-set est le bouton de POSE/RETRAIT — overlay hover-only,
+     jamais un enfant du flux flex (un enfant coûterait sa largeur même
+     invisible et rognerait la barre de contexte, égalité au pixel §16) ; il
+     vit juste à gauche du ⌂, même référence position:relative que lui.
+     .mk-pin est la marque POSÉE — délibérément DANS le flux du title-row,
+     devant le titre (décision 2 : le décalage du titre qui en découle est
+     assumé, pas réservé sur les lignes non marquées). rowFor() étant la
+     fabrique unique, les deux existent sur toute ligne (plate, membre,
+     maîtresse) — rien à masquer par contexte ici, contrairement au ⌂. */
+  .mk-set svg, .mk-pin svg, .link-master svg { width: var(--mk-size, 13px); height: var(--mk-size, 13px); display: block; }
+  .link-master { background: transparent !important; color: var(--muted); padding: 0 2px !important; display: flex; align-items: center; height: 15px; }
+  .link-master:hover { background: transparent !important; color: var(--vscode-foreground) !important; }
+  .mk-set {
+    position: absolute; top: calc(var(--sp-tight) - 1px); right: calc(var(--mk-size, 13px) + 6px); z-index: 3;
+    border: 0; background: transparent; cursor: pointer; padding: 0 2px; opacity: 0;
+    transition: opacity .1s, color .1s; color: var(--muted); display: flex; align-items: center; height: 15px;
+  }
+  .conv:hover .mk-set, .mk-set:focus-visible { opacity: 1; }
+  .mk-set:hover { color: var(--vscode-foreground); }
+  .conv.mk-pinned .mk-set { color: var(--vscode-charts-yellow); }
+  .mk-pin {
+    display: none; cursor: pointer; border: 0; background: transparent; padding: 0; line-height: 1;
+    color: var(--vscode-charts-yellow); flex: none; align-self: center; margin-right: -2px;
+  }
+  .conv.mk-pinned .mk-pin { display: flex; align-items: center; }
   .chip {
     font-size: 10px; padding: 0 5px; border-radius: 8px; border: 0; cursor: default;
     background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
@@ -1351,8 +1475,18 @@ function renderHtml(webview) {
       </select>
     </div>
     <div class="sec-body" id="convBody">
+      <!-- Bandeau d'onboarding (lot 2026-08-19) — EN TÊTE de la liste, avant
+           même le canari/gel d'onglets : c'est le signal le plus courant sur
+           un poste fraîchement installé, et le seul des trois qui n'a AUCUN
+           mécanisme de fermeture (cf. CSS .hooks-banner et renderSetupBanner
+           plus bas). Texte rempli par JS (dépend duquel des deux manque). -->
+      <div class="hooks-banner" id="hooksBanner">
+        <span class="txt" id="hooksBannerText"></span>
+        <button class="btn pri" id="hooksBannerInstall" type="button">${vscode.l10n.t('Install hooks')}</button>
+      </div>
       <div class="canary" id="canary">${vscode.l10n.t('⚠ Claude tabs not detected — viewType changed?')}</div>
       <div class="canary" id="tabsFrozenNotice">${vscode.l10n.t('VS Code stopped reporting tab changes — highlight may lag. Reloading the window fixes it.')}</div>
+      <div class="canary" id="dataStaleNotice">${vscode.l10n.t('The panel stopped receiving updates — statuses shown may be stale. Reloading the window fixes it.')}</div>
       <!-- Conteneur UNIQUE (2026-08-07) : blocs de groupe et lignes plates
            sont frères. Deux conteneurs (#groups puis #convs) rendaient l'ordre
            STRUCTUREL — un groupe passait forcément avant toute conversation
@@ -1363,7 +1497,6 @@ function renderHtml(webview) {
           <span class="chevron" id="newConvChevron">▾</span>
           <h3>${vscode.l10n.t('New conversation')}</h3>
           <span class="spacer"></span>
-          <span class="tip-restore" id="newConvTipRestore" title="${vscode.l10n.t('Show this tip again')}" style="display:none">?</span>
         </div>
         <div class="sec-body" id="newConvBody">
           <div class="notice" id="batchNotice"></div>
@@ -1402,6 +1535,10 @@ function renderHtml(webview) {
   const soundsToggleEl = document.getElementById('soundsToggle');
   const canaryEl = document.getElementById('canary');
   const tabsFrozenEl = document.getElementById('tabsFrozenNotice');
+  const dataStaleEl = document.getElementById('dataStaleNotice');
+  const hooksBannerEl = document.getElementById('hooksBanner');
+  const hooksBannerTextEl = document.getElementById('hooksBannerText');
+  const hooksBannerInstallEl = document.getElementById('hooksBannerInstall');
   const convHeadEl = document.getElementById('convHead');
   const convChevronEl = document.getElementById('convChevron');
   const convBodyEl = document.getElementById('convBody');
@@ -1412,7 +1549,6 @@ function renderHtml(webview) {
   const newConvHeadEl = document.getElementById('newConvHead');
   const newConvChevronEl = document.getElementById('newConvChevron');
   const newConvBodyEl = document.getElementById('newConvBody');
-  const newConvTipRestoreEl = document.getElementById('newConvTipRestore');
 
   // Le select est DANS le sec-head cliquable : un clic pour ouvrir le menu
   // (ou choisir une option) ne doit pas aussi replier la section. contains()
@@ -1430,12 +1566,15 @@ function renderHtml(webview) {
   });
   // Lot 12 §1 : repli du lanceur unifié, persisté en workspaceState (comme les
   // groupes) — pas un setting global, ce serait le suivre d'un projet à l'autre.
-  newConvHeadEl.addEventListener('click', function (e) {
-    if (newConvTipRestoreEl.contains(e.target)) return;
+  newConvHeadEl.addEventListener('click', function () {
     vscode.postMessage({ type: 'toggleCollapse', section: 'newConversation' });
   });
-  newConvTipRestoreEl.addEventListener('click', function () {
-    vscode.postMessage({ type: 'restoreBatchTip' });
+  // Bouton du bandeau d'onboarding (lot 2026-08-19) : MÊME message que la
+  // commande Palette, extension.js réutilise le chemin de installHooks() tel
+  // quel (confirmation modale, puis proposition de reload) — un clic ici
+  // n'est qu'un raccourci vers ce geste, jamais un second chemin d'install.
+  hooksBannerInstallEl.addEventListener('click', function () {
+    vscode.postMessage({ type: 'installHooksNow' });
   });
 
   // Reflète l'état réel des settings, jamais un état local — même raison que
@@ -1455,6 +1594,26 @@ function renderHtml(webview) {
     if (ui && ui.ctxThresholds) ctxThresholds = ui.ctxThresholds;
     if (ui && ui.costThresholds) costThresholds = ui.costThresholds;
     if (ui && ui.costTurnThresholds) costTurnThresholds = ui.costTurnThresholds;
+  }
+
+  // Bandeau d'onboarding (lot 2026-08-19) — NON masquable : pas de classe
+  // pilotée par un clic, seulement par l'objet setup. setup absent (contrat non
+  // respecté par cette source d'état — un banc, make-store-shots.js) → bandeau
+  // MASQUÉ, jamais affiché sur une supposition (dégradation maison : une
+  // source illisible n'ajoute jamais un avertissement). Les deux manques sont
+  // INDÉPENDANTS : le texte nomme celui qui est réellement absent, jamais un
+  // « il manque quelque chose » générique — hooks manquants d'abord, c'est le
+  // seul qui éteint des icônes/le son/le coût par tour.
+  function renderSetupBanner(setup) {
+    if (!setup) { hooksBannerEl.classList.remove('show'); return; }
+    const hooksOk = setup.hooksInstalled !== false;
+    const handoffsOk = setup.handoffsInstalled !== false;
+    const show = !hooksOk || !handoffsOk;
+    hooksBannerEl.classList.toggle('show', show);
+    if (!show) return;
+    hooksBannerTextEl.textContent = !hooksOk
+      ? t('Claude Code hooks are not installed — status icons stay blank, sounds never play, and per-turn cost is never shown.')
+      : t('The /handoffs command is not installed — paste a claude-convs block directly, or install it to add the shortcut.');
   }
 
   // Icône haut-parleur : reflète l'état réel du setting, pas un état local —
@@ -1615,14 +1774,37 @@ function renderHtml(webview) {
     return parts.join(' · ');
   }
 
+  // Marque « à relire » (lot 2, plan marque_a_relire 2026-08-22) — jeu
+  // d'icônes monochromes au même gabarit que .mk-set/.mk-pin/.link-master
+  // (viewBox 16, currentColor). Chemins repris tels quels de la maquette
+  // mesurée (MOCKUP_pin_ligne_2026-08-22.html). La forme de la marque vit
+  // dans CETTE constante unique (décision 4) : en changer est une ligne.
+  const MK_MARK_PATH = 'M4.2 1.8h7.6c.3 0 .5.2.5.5v11.4c0 .4-.4.6-.7.4L8 11.5l-3.6 2.6c-.3.2-.7 0-.7-.4V2.3c0-.3.2-.5.5-.5z'; // marque-page (bookmark)
+  const MK_HOME_PATH = 'M8 2.2 1.6 7.5h1.7V14h3.2v-3.7h3v3.7h3.2V7.5h1.7L8 2.2z'; // ⌂ rattacher, redessiné en SVG
+  function mkIcon(pathD) { return '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="' + pathD + '"/></svg>'; }
+
   function createRow() {
     const root = el('div', 'conv');
     const ico = el('span', 'ico');
     const body = el('div', 'body');
     const titleRow = el('div', 'title-row');
     const title = el('div', 'title');
+    // Ambiguïté d'appariement (lot 3, plan d'appariement) : signe discret
+    // entre le titre et le coût, jamais une ligne de plus — cf. CSS .amb.
+    const amb = el('span', 'amb', '≈');
+    amb.title = t('Same truncated tab title as another conversation — renaming or closing one would settle it');
     const cost = el('span', 'cost');
+    // Marque « à relire » POSÉE (lot 2) : délibérément DANS le flux, devant
+    // le titre — décalage assumé (décision 2), jamais réservé sur une ligne
+    // non marquée. Masquée/montrée par .mk-pin { display } selon .mk-pinned
+    // (CSS), jamais recréée : évite de relancer une transition à chaque rendu.
+    const mkPin = el('button', 'mk-pin');
+    mkPin.type = 'button';
+    mkPin.innerHTML = mkIcon(MK_MARK_PATH);
+    mkPin.title = t('Pinned “to review” — click to unpin');
+    titleRow.appendChild(mkPin);
     titleRow.appendChild(title);
+    titleRow.appendChild(amb);
     titleRow.appendChild(cost);
     const meta = el('div', 'meta');
     const model = el('span', 'model');
@@ -1650,27 +1832,62 @@ function renderHtml(webview) {
     // exactement ce qui cassait le clic « délier » de la ligne master
     // (querySelector prend le premier match dans
     // l'ordre du DOM), constaté par test-panel-render.js.
-    const linkMaster = el('button', 'chip act link-master', '⌂');
+    const linkMaster = el('button', 'chip act link-master');
     linkMaster.type = 'button';
+    // Le ⌂ était un CARACTÈRE de texte ; redessiné en SVG dans le même jeu que
+    // la marque (décision 5) — côte à côte, un caractère et un emoji couleur
+    // ne peuvent pas s'accorder. Classes .chip/.act conservées (le sélecteur
+    // .chip:not(.link-master) d'un banc existant en dépend) ; leur badge
+    // visuel est neutralisé par les !important de la règle CSS .link-master.
+    linkMaster.innerHTML = mkIcon(MK_HOME_PATH);
     linkMaster.title = t('Link to the active tab’s conversation as master');
     root.appendChild(linkMaster);
-    const row = { root, ico, title, cost, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, data: null };
+    // Marque « à relire » — bouton de POSE/RETRAIT (lot 2, décision 2) :
+    // overlay hover-only APPENDÉ À .conv, jamais un enfant du flux flex, à
+    // gauche du ⌂ (même référence position:relative). Toujours présent
+    // (rowFor() est la fabrique unique) : rien à masquer par contexte, à la
+    // différence du ⌂.
+    const mkSet = el('button', 'mk-set');
+    mkSet.type = 'button';
+    mkSet.innerHTML = mkIcon(MK_MARK_PATH);
+    mkSet.title = t('Pin “to review” — stays until you unpin it, even after the tab closes');
+    root.appendChild(mkSet);
+    const row = { root, ico, title, amb, cost, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, mkSet, mkPin, data: null };
     root.addEventListener('click', function () {
+      if (!row.data) return;
+      // Ligne retenue par sa seule marque, onglet PROUVÉ fermé (lot 3) :
+      // chercher un onglet serait chercher ce qui n'existe plus — le clic
+      // ROUVRE la conversation. C'est le webview qui décide, parce que c'est
+      // lui qui a rendu la ligne « onglet fermé » : le geste et ce qu'on lit
+      // à l'écran ne peuvent pas diverger.
+      if (row.data.tabGone) { vscode.postMessage({ type: 'reopenConv', id: row.data.id }); return; }
       // tabTitle : titre RÉEL de l'onglet quand il diverge de celui du
       // transcript — sans lui, focus.js ne retrouve pas un onglet renommé.
-      if (row.data) vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, tabTitle: row.data.tabTitle || null });
+      vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, tabTitle: row.data.tabTitle || null });
     });
     linkMaster.addEventListener('click', function (e) {
       e.stopPropagation();
       if (row.data) vscode.postMessage({ type: 'linkConvToActiveMaster', id: row.data.id });
     });
+    function togglePin(e) {
+      e.stopPropagation();
+      if (row.data) vscode.postMessage({ type: 'togglePinConv', id: row.data.id });
+    }
+    mkSet.addEventListener('click', togglePin);
+    mkPin.addEventListener('click', togglePin);
     return row;
   }
 
   function updateRow(row, c) {
     row.data = c;
-    setClass(row.root, 'conv' + (c.active ? ' active' : ''));
-    const tip = (c.title || '') + ' — ' + stateLabel(c);
+    // Marque « à relire » (lot 2) : une seule classe pilote tout le rendu
+    // (.mk-pin visible, .mk-set teinté) — cf. règles CSS .conv.mk-pinned.
+    setClass(row.root, 'conv' + (c.active ? ' active' : '') + (c.pinned ? ' mk-pinned' : ''));
+    const tip = (c.title || '') + ' — ' + stateLabel(c)
+      // Ce que la ligne promet au clic, dit en toutes lettres (lot 3) : sur une
+      // conv marquée dont l'onglet est fermé, le clic ne « va pas à l'onglet »,
+      // il en rouvre un.
+      + (c.tabGone ? ' — ' + t('tab closed · click to reopen') : '');
     if (row.root.title !== tip) row.root.title = tip;
     setClass(row.ico, icoClass(c));
     // Le ✓ est du texte, les autres états sont des formes CSS.
@@ -1706,7 +1923,16 @@ function renderHtml(webview) {
     // Terminée · onglet fermé (lot 4 §5) : barré en plus du reste — découle de
     // tabOpen (member-truth), jamais d'une mémoire locale. Rouvrir l'onglet
     // repasse tabOpen à true et efface le barré tout seul au prochain rendu.
-    row.title.classList.toggle('closed', c.state === 'done' && !c.tabOpen);
+    // tabGone (lot 3) : même barré, même sens — « son onglet n'est plus là » —
+    // pour une conversation que seule la marque retient dans la liste, quel que
+    // soit son état. Réutiliser le vocabulaire existant plutôt qu'inventer un
+    // second signe : le panneau n'a qu'un jeu de symboles (CLAUDE.md du dossier).
+    row.title.classList.toggle('closed', c.tabGone || (c.state === 'done' && !c.tabOpen));
+    // Ambiguïté d'appariement onglet (lot 3) : signe discret, jamais de
+    // surlignage sur cette ligne (state.js s'en charge déjà, il ne rend rien
+    // ici) — juste rendre visible ce qui expliquerait « je clique et ça ne
+    // change pas ».
+    row.amb.classList.toggle('show', !!c.tabAmbiguous);
     // Modèle ET effort RÉELS, lus du transcript (décision 6 du plan). L'effort
     // manque sur les conversations qui n'en portent pas : on n'écrit alors rien
     // de plus, jamais une valeur supposée.
@@ -2015,14 +2241,6 @@ function renderHtml(webview) {
     // portait aucune information.
     const label = el('span', 'grp-label');
     const count = el('span', 'grp-count');
-    // « Ce qui reste à faire » (étape 11) : visible dès que tous les MEMBRES
-    // (pas forcément la maîtresse) sont finis, onglet fermé — un groupe où
-    // seuls les membres sont finis n'a plus que sa capsule (maîtresse) à
-    // montrer ; un groupe où la maîtresse l'est AUSSI ne se rend plus du tout
-    // (renderGroups filtre g.done en amont), ce chip n'a alors plus
-    // l'occasion de s'afficher.
-    const done = el('span', 'grp-done', t('✓ done'));
-    done.style.display = 'none';
     const spacer = el('span', 'spacer');
     // ⌂-focus (plan repli-auto étape 9) : visible UNIQUEMENT sans master
     // désignée (toggle en JS, renderGroups) — un clic lie directement
@@ -2052,7 +2270,6 @@ function renderHtml(webview) {
     head.appendChild(label);
     head.appendChild(spacer);
     head.appendChild(count);
-    head.appendChild(done);
     head.appendChild(mas);
     head.appendChild(kill);
     const body = el('div', 'grp-body');
@@ -2112,7 +2329,7 @@ function renderHtml(webview) {
     ghostNew.style.display = 'none';
     ghostRow.appendChild(ghostNew);
     const node = {
-      root, head, chev, label, count, done, body, members: new Map(), id: g.id,
+      root, head, chev, label, count, body, members: new Map(), id: g.id,
       mas, kill, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
       rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow, ghostNew,
       masterHead, masterSlot, masterOut, masterFallback: null,
@@ -2263,9 +2480,11 @@ function renderHtml(webview) {
         t('A task in wave {0} lost its link before sending — press Enter in its tab to relink it, or use “Relaunch”. Auto advance is suspended; ▶ forces wave {1}.', g.launchedWave, g.nextWave)));
   }
 
-  // « Ce qui reste à faire » (étape 11) : un groupe ENTIER terminé (membres ET
-  // maîtresse, si désignée — g.done, group-done.js) n'a plus rien à montrer,
-  // pas même une capsule. Filtré ICI, en amont de la boucle — même principe
+  // « Ce qui reste à faire » (étape 11) : un lot dont TOUS les membres sont
+  // finis, onglet fermé (g.done, group-done.js) n'a plus rien à montrer, pas
+  // même une capsule — et ce, que sa maîtresse soit encore ouverte ou non
+  // (2026-08-18) : elle repart alors dans la liste plate, sans tête de lot.
+  // Filtré ICI, en amont de la boucle — même principe
   // que le filtre !c.groupId appliqué à la liste plate. Le store, lui, GARDE
   // le groupe : rien n'est muté, prune() le nettoiera plus tard (cf. CLAUDE.md).
   //
@@ -2280,6 +2499,84 @@ function renderHtml(webview) {
   // « déplacé une fois pour toutes » : place() ne bouge que ce qui est mal
   // placé, donc l'idempotence est structurelle (la maquette, elle, opérait une
   // chirurgie one-shot et fabriquait des chimères au deuxième rendu).
+  // ── La bulle scindée d'une tête de sous-lot (2026-08-22) ─────────────────
+  // Deux arcs concentriques d'épaisseurs ET de rayons différents (le pourquoi
+  // est dans le bloc « BULLE SCINDÉE » de la feuille de style). Tracés au
+  // stroke : c'est la seule façon d'obtenir une épaisseur exacte par arc et
+  // des bouts nets — une border n'a qu'une couleur et qu'une épaisseur.
+  // Les CANONS sont lus dans la feuille de style, jamais recopiés ici : une
+  // valeur en double finit par diverger, et c'est la feuille qui fait foi
+  // (l'anneau de membre en dépend aussi). Les TEINTES restent en var() dans
+  // le markup — le SVG hérite des variables de la ligne, donc un changement
+  // de thème ou de couleur de lot n'oblige à rien redessiner.
+  const RING_OVERLAP = 5;   // degrés de part et d'autre de l'axe (chevauchement 10°)
+  const RING_BG = 'var(--vscode-sideBar-background, var(--vscode-editor-background))';
+  let ringCanon = null;
+  function splitRingCanon() {
+    if (!ringCanon) {
+      const cs = getComputedStyle(document.documentElement);
+      const px = (name, fallback) => {
+        const v = parseFloat(cs.getPropertyValue(name));
+        return isFinite(v) && v > 0 ? v : fallback;
+      };
+      ringCanon = {
+        dG: px('--member-ring-d', 18), wG: px('--member-ring-w', 1.5),
+        dD: px('--master-ring-d', 24), wD: px('--master-ring-w', 4.25),
+      };
+    }
+    return ringCanon;
+  }
+  function ringPolar(r, deg) {
+    const a = (deg - 90) * Math.PI / 180;   // 0° = midi, sens horaire
+    return [r * Math.cos(a), r * Math.sin(a)];
+  }
+  function ringArc(r, a0, a1) {
+    const [x0, y0] = ringPolar(r, a0), [x1, y1] = ringPolar(r, a1);
+    return 'M ' + x0.toFixed(2) + ' ' + y0.toFixed(2)
+      + ' A ' + r.toFixed(2) + ' ' + r.toFixed(2) + ' 0 '
+      + (Math.abs(a1 - a0) > 180 ? 1 : 0) + ' 1 ' + x1.toFixed(2) + ' ' + y1.toFixed(2);
+  }
+  function ringPie(r, a0, a1) {
+    const [x0, y0] = ringPolar(r, a0), [x1, y1] = ringPolar(r, a1);
+    return 'M 0 0 L ' + x0.toFixed(2) + ' ' + y0.toFixed(2)
+      + ' A ' + r.toFixed(2) + ' ' + r.toFixed(2) + ' 0 '
+      + (Math.abs(a1 - a0) > 180 ? 1 : 0) + ' 1 ' + x1.toFixed(2) + ' ' + y1.toFixed(2) + ' Z';
+  }
+  function splitRingSvg() {
+    const c = splitRingCanon();
+    const j = RING_OVERLAP;
+    const box = Math.max(c.dG + c.wG, c.dD + c.wD) + 4;   // marge : le stroke déborde de son axe
+    const half = box / 2;
+    return '<svg class="split-ring" width="' + box + '" height="' + box + '" viewBox="'
+      + (-half) + ' ' + (-half) + ' ' + box + ' ' + box + '"'
+      + ' style="margin:' + (-half) + 'px 0 0 ' + (-half) + 'px" aria-hidden="true">'
+      // Fond OPAQUE — c'est lui qui troue le rail du parent, qui traverse
+      // encore cette ligne. Il épouse la forme réelle : un disque plein au
+      // plus PETIT des deux rayons (les deux moitiés se rejoignent sur l'axe,
+      // pile où passe le rail : un disque continu supprime la couture au lieu
+      // de la rafistoler), puis une moitié par côté à SON rayon — sans quoi le
+      // trait s'arrêterait dans le vide au lieu de venir toucher son arc.
+      + '<circle cx="0" cy="0" r="' + (Math.min(c.dG, c.dD) / 2).toFixed(2) + '" fill="' + RING_BG + '"/>'
+      + '<path d="' + ringPie(c.dD / 2, 0, 180) + '" fill="' + RING_BG + '"/>'
+      + '<path d="' + ringPie(c.dG / 2, 180, 360) + '" fill="' + RING_BG + '"/>'
+      // Arc DROIT : le sous-lot qu'elle ouvre, au canon d'une tête.
+      + '<path fill="none" stroke="var(--nest-hue, var(--grp-hue, var(--muted)))"'
+      + ' stroke-width="' + c.wD + '" d="' + ringArc((c.dD - c.wD) / 2, -j, 180 + j) + '"/>'
+      // Arc GAUCHE : le lot dont elle est membre, au canon d'un membre.
+      + '<path fill="none" stroke="var(--grp-hue, var(--muted))"'
+      + ' stroke-width="' + c.wG + '" d="' + ringArc((c.dG - c.wG) / 2, 180 - j, 360 + j) + '"/>'
+      + '</svg>';
+  }
+  // Pose (ou retire) la bulle scindée sur la ligne qui sert de tête. Idempotent :
+  // rowFor() remet la ligne à nu à chaque rendu, on repart donc du DOM réel.
+  function setSplitRing(root, on) {
+    const ico = root.querySelector('.m-head .conv .ico');
+    if (!ico) return;
+    const cur = ico.querySelector('.split-ring');
+    if (on && !cur) ico.insertAdjacentHTML('beforeend', splitRingSvg());
+    else if (!on && cur) cur.remove();
+  }
+
   function renderGroups(groups, convById, seen) {
     const live = new Set();
     const blocks = [];
@@ -2355,12 +2652,6 @@ function renderHtml(webview) {
       // porte sur le store COMPLET (g.members, jamais filtré) : « ce qui
       // reste à faire » exige un dénominateur vrai (étape 11, décision 5).
       const doneCount = g.members.filter(function (m) { return m.waveStatus === 'done'; }).length;
-      // Tous les membres sont finis (onglet fermé) : plus rien à montrer sous
-      // la capsule, même quand la maîtresse, elle, est encore ouverte (auquel
-      // cas g.done reste false et le groupe continue de se rendre — cf.
-      // filtre ci-dessus). Simple agrégat des status déjà résolus par
-      // member-truth.js, comme doneCount : rien de nouveau à déduire ici.
-      const allMembersDone = g.members.length > 0 && g.members.every(function (m) { return m.status === 'done-closed'; });
       // Teinte du groupe : DEUX variables posées une seule fois sur le nœud du
       // groupe (étape 13) — la grip, la ligne master, le rail et les anneaux y
       // puisent tous. Avant, la grip portait la teinte en style inline et le
@@ -2383,7 +2674,6 @@ function renderHtml(webview) {
       // gouttière de la grip.
       setText(node.label, g.stamp ? t('batch {0}', g.stamp) : '');
       node.label.style.display = g.stamp ? '' : 'none';
-      node.done.style.display = allMembersDone ? '' : 'none';
       setText(node.chev, g.collapsed ? '▸' : '▾');
       node.body.classList.toggle('collapsed', !!g.collapsed);
 
@@ -2438,7 +2728,7 @@ function renderHtml(webview) {
         }
         // Rien à faire de plus au repli (2026-08-07) : la ligne master est la
         // MÊME ligne, repliée ou dépliée — la grip reste au-dessus et garde le
-        // chevron, le compteur et le chip « ✓ done » du groupe. Le repli
+        // chevron et le compteur du groupe. Le repli
         // n'agit que sur les conversations du groupe, via la classe CSS
         // .collapsed posée plus haut sur le corps.
       } else {
@@ -2456,6 +2746,13 @@ function renderHtml(webview) {
       // (g.members) — seule cette liste de RENDU est restreinte.
       const visibleMembers = g.members.filter(function (m) { return m.status !== 'done-closed'; });
       const waveNums = [...new Set(visibleMembers.map(function (m) { return m.wave; }))].sort(function (a, b) { return a - b; });
+      // Combien de lignes VISIBLES par vague (2026-08-22) : depuis que la vague
+      // est une position et non un numéro figé (groups.js moveQueuedMember), ce
+      // que peut un membre dépend d'abord de s'il est SEUL chez lui. Le même
+      // filtre que waveNums, donc le même dénominateur : une ligne « terminée ·
+      // onglet fermé » n'est plus là pour tenir compagnie à personne.
+      const waveCount = new Map();
+      visibleMembers.forEach(function (m) { waveCount.set(m.wave, (waveCount.get(m.wave) || 0) + 1); });
       const multiWave = waveNums.length > 1;
 
       // Calculé UNE fois, partagé entre la bannière de blocage (renderWaveCtrl)
@@ -2561,6 +2858,10 @@ function renderHtml(webview) {
           mn.root.classList.toggle('nest-host', !!kids);
           if (kids) mn.root.style.setProperty('--nest-hue', 'hsl(' + kids[0].hue + ', 45%, 55%)');
           else mn.root.style.removeProperty('--nest-hue');
+          // La bulle scindée suit exactement la même condition que la classe :
+          // deux façons de dire « tête de sous-lot » ne pourraient pas rester
+          // d'accord bien longtemps.
+          setSplitRing(mn.root, !!kids);
           // Lot 10 — plus AUCUNE déduction de statut ici : canClose,
           // canLink et note viennent de member-truth.js, la table de
           // vérité unique. Le webview ne voit qu'une VUE (convById) ; c'est
@@ -2576,12 +2877,23 @@ function renderHtml(webview) {
           const noteText = m.note || '';
           setText(mn.note, noteText);
           mn.note.style.display = noteText ? '' : 'none';
-          // Un bouton qui ne fait rien ment (cf. lot 1) : moveBack ne
-          // s'affiche que si la vague précédente est ENCORE en file (au-delà
-          // de launchedWave) — groups.js moveQueuedMember refuse sinon.
+          // Un bouton qui ne fait rien ment (cf. lot 1) — et depuis que la
+          // vague est une POSITION (groups.js moveQueuedMember, 2026-08-22),
+          // ce que peut un membre dépend d'abord de s'il est SEUL dans sa
+          // vague. Ces deux conditions sont le MIROIR exact des deux refus du
+          // store, jamais une règle de plus :
+          //   · SEUL → il ne sait que FUSIONNER avec une vague voisine, donc
+          //     seulement si elle existe (▸) et n'est pas déjà partie (◂) ;
+          //   · ACCOMPAGNÉ → il SE DÉTACHE dans une vague neuve, toujours
+          //     possible des deux côtés. C'est ce cas qui crée une vague au
+          //     bout de la file : le ▸ ne doit donc PLUS être masqué sur la
+          //     dernière vague, ce qu'il était depuis le lot 4 — la moitié
+          //     visible du bug du 2026-08-22 (l'autre étant le ◂ affiché mais
+          //     refusé en silence dès qu'une vague s'était vidée).
           const canMove = m.waveStatus === 'queued';
-          mn.moveBack.style.display = canMove && w - 1 > g.launchedWave ? '' : 'none';
-          mn.moveFwd.style.display = canMove && w < waveNums[waveNums.length - 1] ? '' : 'none';
+          const aloneInWave = waveCount.get(w) === 1;
+          mn.moveBack.style.display = canMove && (!aloneInWave || w - 1 > g.launchedWave) ? '' : 'none';
+          mn.moveFwd.style.display = canMove && (!aloneInWave || w < waveNums[waveNums.length - 1]) ? '' : 'none';
           // Le pied ne réserve de hauteur que s'il a vraiment quelque chose à
           // dire (2026-08-09) : ses trois enfants sont masqués un par un, donc
           // il n'est jamais :empty au sens CSS — c'est ici, où l'on SAIT ce qui
@@ -2723,7 +3035,7 @@ function renderHtml(webview) {
   // batchState AVANT form (lot 14) : blankTask() lit désormais batchState.inherit
   // pour pré-sélectionner le défaut résolu — l'inverse lèverait une
   // ReferenceError (zone morte temporelle du let) au tout premier rendu.
-  let batchState = { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null }, lastModel: null, lastEffort: null, tipDismissed: false };
+  let batchState = { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null }, lastModel: null, lastEffort: null };
   let form = { group: '', tasks: [blankTask(1)] };
   let createBtn = null;
 
@@ -3235,11 +3547,10 @@ function renderHtml(webview) {
     }
 
     // Dismiss du feedback de collage (lot micro-allègements 2026-07-24) : état
-    // ÉPHÉMÈRE local à cette tâche de formulaire, jamais persisté (pas de
-    // pendant de dismissBatchTip) — un × qui referme la bannière courante ; elle
-    // se remplace normalement au collage suivant et disparaît déjà au
-    // Create/Cancel (form remis à zéro), ce × n'ajoute qu'un cas de fermeture
-    // manuelle anticipée.
+    // ÉPHÉMÈRE local à cette tâche de formulaire, jamais persisté — un × qui
+    // referme la bannière courante ; elle se remplace normalement au collage
+    // suivant et disparaît déjà au Create/Cancel (form remis à zéro), ce ×
+    // n'ajoute qu'un cas de fermeture manuelle anticipée.
     if (form.errorBanner) batchFormEl.appendChild(dismissibleBanner('banner', form.errorBanner, function () { form.errorBanner = null; renderForm(); }));
     if (form.banner) batchFormEl.appendChild(dismissibleBanner('banner info', form.banner, function () { form.banner = null; renderForm(); }));
     // Transfert multi-vagues en attente (étape 10) : bannière à deux actions,
@@ -3247,43 +3558,6 @@ function renderHtml(webview) {
     // la confirmation).
     if (form.pendingTransfer) {
       batchFormEl.appendChild(confirmBanner(form.pendingTransfer.message, t('Add'), confirmPendingTransfer, cancelPendingTransfer));
-    }
-
-    // Astuce /handoffs (v2.18.13) : visible tant que l'user ne l'a pas
-    // écartée. Le × la masque DÉFINITIVEMENT (globalState, par machine, survit
-    // aux reloads) — « je suis déjà au courant » ne se dit qu'une fois. Le « ? »
-    // de rappel vit dans l'en-tête « New conversation » (aligné à droite du
-    // titre, cf. HTML statique #newConvTipRestore) — plus dans le corps du
-    // formulaire, pour ne pas flotter tout seul au-dessus des tâches.
-    newConvTipRestoreEl.style.display = batchState.tipDismissed ? '' : 'none';
-    if (!batchState.tipDismissed) {
-      const tip = el('div', 'hint tip-container');
-      tip.style.display = 'flex';
-      tip.style.gap = '6px';
-      tip.style.alignItems = 'center';
-      const tipText = el('span');
-      tipText.style.flex = '1';
-      tipText.textContent = t('Make Claude end its handoffs with this block — copy an instruction for your CLAUDE.md.');
-      tip.appendChild(tipText);
-      // Le texte copié DÉCRIT le format claude-convs (contrat invariant, décision
-      // 5 du plan lot 15) : il reste en anglais quelle que soit la locale de
-      // l'UI, comme commands/handoffs.md — seuls le texte, l'infobulle et le
-      // bouton suivent la langue de VS Code.
-      const copyBtn = button('', t('Copy'), function () {
-        const instruction = 'When you propose follow-up conversations (handoffs), end your reply with a \`\`\`claude-convs code block: one section per task separated by a line of [---], optional fields model: <haiku|sonnet|opus|fable>, effort: <low|medium|high|xhigh|max>, stage: <wave number — same number = parallel, higher = waits for previous wave>; the rest of each section is the prompt. After the block, add a one-line readable summary of the ordering. If no follow-up work is warranted, say so and emit no block.';
-        navigator.clipboard.writeText(instruction).catch(function () {
-          console.error('Failed to copy to clipboard');
-        });
-      });
-      copyBtn.style.fontSize = '12px';
-      copyBtn.style.padding = '2px 8px';
-      tip.appendChild(copyBtn);
-      const dismiss = el('button', 'xdel', '×');
-      dismiss.type = 'button';
-      dismiss.title = t('Dismiss this tip — the ? above brings it back');
-      dismiss.addEventListener('click', function () { vscode.postMessage({ type: 'dismissBatchTip' }); });
-      tip.appendChild(dismiss);
-      batchFormEl.appendChild(tip);
     }
 
     const waves = [...new Set(form.tasks.map(function (t) { return t.wave; }))].sort(function (a, b) { return a - b; });
@@ -3366,20 +3640,15 @@ function renderHtml(webview) {
       // prime sur « inherit » dans resolvedModel()/resolvedEffort() ci-dessus.
       lastModel: (b && b.lastModel) || null,
       lastEffort: (b && b.lastEffort) || null,
-      tipDismissed: !!(b && b.tipDismissed),
     };
     // Ne re-rendre le formulaire que si ce qui le CONDITIONNE a bougé : sinon,
-    // chaque push d'état (30 s, transitions) écraserait la saisie en cours. Le
-    // dismiss/restore de l'astuce ne bouge que sur un clic explicite de l'user,
-    // jamais sur un tick — le re-rendre alors est voulu (la saisie survit sur
-    // l'objet form, relue à chaque renderForm).
+    // chaque push d'état (30 s, transitions) écraserait la saisie en cours.
     const changed = next.envConflict.join(',') !== batchState.envConflict.join(',')
       || next.busy !== batchState.busy
       || next.inherit.model !== batchState.inherit.model
       || next.inherit.effort !== batchState.inherit.effort
       || next.lastModel !== batchState.lastModel
-      || next.lastEffort !== batchState.lastEffort
-      || next.tipDismissed !== batchState.tipDismissed;
+      || next.lastEffort !== batchState.lastEffort;
     batchState = next;
     setText(batchNoticeEl, next.notice || '');
     batchNoticeEl.classList.toggle('show', !!next.notice);
@@ -3468,6 +3737,44 @@ function renderHtml(webview) {
   let lastQuota = null;
   let tickTimer = null;
 
+  // ── Heartbeat de fraîcheur (incident 2026-08-21) ─────────────────────────
+  // Le panneau est push-only : l'hôte poste un state sur changement, et RIEN
+  // ne prouve au webview que ce flux vit encore. Une fenêtre restée ouverte
+  // 25 h a gelé son canal hôte→webview (le même gel que tabs.js détecte côté
+  // API onglets) : la conv finissait, l'hôte le savait (recompute 30 s), le
+  // webview a affiché le spinner d'avant pendant 9 min — l'animation CSS,
+  // locale, tourne sans données. Le silence EST le signal ici : pas de paire
+  // de formes à relever (cf. CLAUDE.md « panne asymétrique »), donc pas de
+  // moitié qui casse seule à la prochaine version du CLI.
+  //  - âge > pullAfterMs  : re-demander l'état (ready — l'hôte répond
+  //    toujours par un push complet, cf. extension.js ready:). Le sens
+  //    webview→hôte marchait pendant l'incident (les clics passaient) : ce
+  //    pull seul aurait réparé l'affichage en ≤ 90 s.
+  //  - âge > frozenAfterMs (2 pulls restés sans réponse) : dégradation
+  //    VISIBLE — bandeau + toutes animations en pause (CSS body.data-stale).
+  //    Un panneau qui ne peut rien prouver ne doit surtout pas ANIMER.
+  //  - tout état reçu efface tout : l'accusation ne survit jamais à une
+  //    preuve fraîche.
+  // Réglages surchargeables par le banc (window.QUOTABAR_STALE_TUNING, même
+  // motif que QUOTABAR_FREEZE_DETECT_MS pour tabs.js) : les délais réels se
+  // testent en secondes compressées, la mécanique testée reste celle-ci.
+  const STALE_TUNING = window.QUOTABAR_STALE_TUNING || {};
+  const TICK_MS = STALE_TUNING.tickMs || 30000;
+  const PULL_AFTER_MS = STALE_TUNING.pullAfterMs || 60000;
+  const FROZEN_AFTER_MS = STALE_TUNING.frozenAfterMs || 180000;
+  let lastStateAt = Date.now();
+
+  function setDataStale(on) {
+    document.body.classList.toggle('data-stale', on);
+    dataStaleEl.classList.toggle('show', on);
+  }
+
+  function checkFreshness() {
+    const age = Date.now() - lastStateAt;
+    if (age > PULL_AFTER_MS) vscode.postMessage({ type: 'ready' });
+    setDataStale(age > FROZEN_AFTER_MS);
+  }
+
   function retick(q) {
     if (!q || !q.windows) return q;
     return Object.assign({}, q, {
@@ -3489,7 +3796,8 @@ function renderHtml(webview) {
     if (tickTimer) return;
     tickTimer = setInterval(function () {
       if (lastQuota) renderQuota(retick(lastQuota));
-    }, 30000);
+      checkFreshness();
+    }, TICK_MS);
   }
   function stopTick() {
     if (!tickTimer) return;
@@ -3497,12 +3805,24 @@ function renderHtml(webview) {
     tickTimer = null;
   }
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) stopTick(); else startTick();
+    if (document.hidden) { stopTick(); return; }
+    // Retour à l'écran : le temps caché n'accuse personne (le tick était
+    // coupé, l'horloge repart de zéro), et un ready immédiat garantit du
+    // frais à l'instant précis où l'user regarde — le cas exact de
+    // l'incident : revenir sur la fenêtre et lire un état d'il y a 9 min.
+    lastStateAt = Date.now();
+    setDataStale(false);
+    startTick();
+    vscode.postMessage({ type: 'ready' });
   });
 
   window.addEventListener('message', function (event) {
     const msg = event.data;
     if (!msg || msg.type !== 'state') return;
+    // Preuve de vie du canal hôte→webview : tout état reçu remet l'horloge du
+    // heartbeat à zéro et lève la dégradation (cf. checkFreshness).
+    lastStateAt = Date.now();
+    setDataStale(false);
     const convs = (msg.state && msg.state.conversations) || [];
     const groups = (msg.state && msg.state.groups) || [];
     // Une conversation groupée est rendue DANS son groupe, et nulle part
@@ -3537,7 +3857,20 @@ function renderHtml(webview) {
     // groupe qui apparaît pendant que l'user a déjà tapé un prompt affiche des
     // boutons masqués à tort jusqu'à la prochaine frappe.
     refreshGhostVisibility();
-    const flat = convs.filter(function (c) { return !c.groupId && !masterIds.has(c.id); });
+    // « seen » est rempli par renderGroups juste au-dessus : il porte les convs
+    // qu'un lot vient RÉELLEMENT de rendre. D'où la seconde branche (lot 3) —
+    // un membre de lot TERMINÉ dont l'onglet est fermé est retiré de sa vague
+    // (statut done-closed, filtre de renderGroups) et il était jusqu'ici
+    // retiré de la liste plate par son groupId : marqué « à relire », il
+    // disparaissait donc des deux vues à la fois, très exactement le geste que
+    // la marque doit empêcher. Le test porte sur ce que le DOM a reçu, pas sur
+    // un statut re-déduit ici : l'invariant « UN nœud de conversation, UN
+    // endroit du DOM » tient par construction, une conv rendue dans son lot ne
+    // pouvant pas entrer dans « flat ».
+    const flat = convs.filter(function (c) {
+      if (c.pinned && !seen.has(c.id)) return true;
+      return !c.groupId && !masterIds.has(c.id);
+    });
     layoutFlow(blocks, flat, convs, order, seen);
     // … ici, et pas avant : les blocs viennent seulement d'être posés dans le
     // flux. offsetTop/offsetHeight d'un nœud DÉTACHÉ du document valent 0 —
@@ -3550,6 +3883,7 @@ function renderHtml(webview) {
     renderSoundsToggle(!!(msg.state && msg.state.sounds && msg.state.sounds.enabled));
     canaryEl.classList.toggle('show', !!(msg.state && msg.state.canary));
     tabsFrozenEl.classList.toggle('show', !!(msg.state && msg.state.tabsFrozen));
+    renderSetupBanner(msg.state && msg.state.setup);
     renderBatch(msg.state && msg.state.batch);
   });
 

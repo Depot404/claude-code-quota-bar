@@ -92,5 +92,35 @@ titles = snapshot(undefined, noTabInfo).conversations.map((c) => c.title);
 check('repli lastActivity quand sortOrder est absent',
   titles.join(',') === 'Conv C,Conv B,Conv A', titles.join(','));
 
+// Lot 2 du plan d'appariement (2026-08-21) : deux sœurs au libellé identique
+// ne doivent plus recevoir le MÊME rang (bug d'origine, `labels.findIndex`
+// s'arrêtait au premier des deux pour les deux) — l'appariement bijectif leur
+// donne chacune SA position, dans l'ordre des deux onglets réels.
+console.log('\n6. tabOrder : deux sœurs au même libellé reçoivent des rangs distincts');
+{
+  const dir = state.projectDirFor(WS);
+  const twinTitle = 'Conv jumelle';
+  writeTranscript('twin1', twinTitle, 40);
+  const p2 = path.join(dir, 'twin2.jsonl');
+  fs.writeFileSync(p2, [userMsg('sujet totalement different'), assistant, { type: 'ai-title', aiTitle: twinTitle }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const when = (Date.now() - 35000) / 1000;
+  fs.utimesSync(p2, when, when);
+  // Deux onglets réels distincts, tous deux « Conv jumelle » — avant ce lot,
+  // findIndex donnait l'index 3 (premier match) aux DEUX, et le tri les
+  // laissait dans un ordre non déterminé l'une par rapport à l'autre.
+  titles = snapshot('tabOrder', () => ({ known: true, labels: ['Conv B', 'Conv A', 'Conv C', twinTitle, twinTitle] }))
+    .conversations.filter((c) => c.title === twinTitle);
+  check('les deux sœurs sont toutes deux affichées (bijection : un onglet chacune)',
+    titles.length === 2, JSON.stringify(titles.map((c) => c.sessionId)));
+  const ids = snapshot('tabOrder', () => ({ known: true, labels: ['Conv B', 'Conv A', 'Conv C', twinTitle, twinTitle] }))
+    .conversations.map((c) => c.sessionId);
+  const posTwin1 = ids.indexOf('twin1');
+  const posTwin2 = ids.indexOf('twin2');
+  check('… à des rangs DISTINCTS (positions 3 et 4, plus le même rang pour les deux)',
+    posTwin1 !== -1 && posTwin2 !== -1 && posTwin1 !== posTwin2 && posTwin1 >= 3 && posTwin2 >= 3,
+    ids.join(','));
+}
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

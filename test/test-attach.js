@@ -63,6 +63,16 @@ function run() {
   check('transcript sans message user → null', firstUserText(empty) === null);
   check('fichier absent → null, jamais d\'exception', firstUserText(path.join(TMP, 'nope.jsonl')) === null);
 
+  // Incident 2026-08-18 : 1re ligne user > 32 Ko (contexte de session
+  // incorporé, ~233 Ko relevés en réel) — même défaut que extractTitleInfo,
+  // étage 2 du rattachement (le préfixe de prompt collé à l'ouverture de
+  // l'onglet ne se retrouvait plus dans un transcript pareil).
+  const oversized = writeTranscript('oversized.jsonl', [
+    userLine('<system-reminder>' + 'x'.repeat(60000) + '</system-reminder>' + PROMPT),
+  ]);
+  check('1re ligne user géante (> ancien HEAD_BYTES) → texte lu quand même',
+    firstUserText(oversized) === PROMPT, JSON.stringify(firstUserText(oversized) || '').slice(0, 80));
+
   console.log('\n2. Comparaison de prompts (tolérante aux blancs, à rien d\'autre)');
   check('identique', looksLikeSamePrompt(PROMPT, PROMPT));
   check('indentation/retours à la ligne recopiés différemment',

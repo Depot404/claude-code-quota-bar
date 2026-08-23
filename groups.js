@@ -64,6 +64,28 @@ function hueOf(name) {
   return h % 360;
 }
 
+// Vague la plus avancee deja ouverte (0 = aucune) — TOUJOURS derivee des
+// membres, jamais stockee : c'est le seuil sous lequel plus rien ne se deplace
+// ni ne s'ajoute. Le meme calcul trainait en double (moveQueuedMember, addTask),
+// deux occasions de diverger.
+function launchedWaveOf(g) {
+  return g.members.reduce((max, m) => (m.launchedAt != null && m.wave > max ? m.wave : max), 0);
+}
+
+// Vagues renumerotees en une suite contigue — meme invariant que le
+// compactWaves du formulaire de creation (panel.js, lot 1), pour que les memes
+// glyphes ◂ ▸ veuillent dire la meme chose avant et apres le lancement d'un
+// lot. Une vague videe par un deplacement ne laisse donc pas de trou : ce
+// numero sert aussi de libelle au bouton d'ouverture (« ▶ vague 3 »), et un
+// trou s'y lirait comme une vague perdue. L'ORDRE relatif est preserve, donc
+// les vagues deja lancees restent devant, avec les memes numeros tant que la
+// numerotation part de 1.
+function compactWaves(g) {
+  const waves = [...new Set(g.members.map((m) => m.wave))].sort((a, b) => a - b);
+  const renum = new Map(waves.map((w, i) => [w, i + 1]));
+  g.members.forEach((m) => { m.wave = renum.get(m.wave); });
+}
+
 // `launchedAt` n'est posé QUE pour la vague 1 (lot 4) : à la création, seule
 // la vague 1 part ; les suivantes restent `queued` (launchedAt: null) jusqu'à
 // markLaunched(), appelé par extension.js quand leur tour vient (▶ manuel ou
@@ -106,6 +128,15 @@ function sanitizeGroup(g) {
       sessionId: typeof m.sessionId === 'string' && m.sessionId ? m.sessionId : null,
       launchedAt: Number.isFinite(m.launchedAt) ? m.launchedAt : null,
     }));
+  // Numérotation contiguë dès la LECTURE, pas seulement au prochain clic
+  // (2026-08-22) : un stockage écrit avant ce lot peut porter un trou — une
+  // vague vidée par l'ancien déplacement « +1 sur le numéro », ou par le
+  // retrait de son dernier membre. Le panneau afficherait « vague 1 » puis
+  // « vague 3 », et la flèche ◂ serait morte. L'invariant appartient au store :
+  // il tient à l'entrée, pas au bon vouloir des appelants. Rien n'est réécrit
+  // de force — la valeur assainie est celle que persist() gardera au prochain
+  // changement, comme pour les autres replis de cette fonction.
+  compactWaves({ members });
   const createdAt = Number.isFinite(g.createdAt) ? g.createdAt : 0;
   return {
     id,
@@ -313,20 +344,49 @@ function createGroupStore(deps = {}) {
       return true;
     },
 
-    // Déplacer un membre PAS ENCORE LANCÉ vers la vague voisine (édition en
+    // Déplacer un membre PAS ENCORE LANCÉ d'une vague à l'autre (édition en
     // cours de route, décision 5 du plan : « une tâche lancée ne bouge plus »).
-    // `delta` = +1/-1 ; refuse de descendre sous la vague déjà lancée + 1 (on ne
-    // fait pas rentrer une tâche dans une vague qui est déjà partie).
+    //
+    // Une vague est une POSITION, pas un numéro figé (décision 2026-08-22,
+    // arbitrée sur MOCKUP_vagues_fleches_2026-08-22.html) : la numérotation
+    // reste 1, 2, 3… sans trou, et `delta` vaut UN CRAN, pas « +1 sur le
+    // numéro ». D'où deux gestes, selon que le membre a des voisines ou non :
+    //   · SEUL dans sa vague → il rejoint la vague voisine, la sienne se vide
+    //     et disparaît (c'est la renumérotation qui la supprime).
+    //   · ACCOMPAGNÉ → il se DÉTACHE dans une vague neuve, juste avant ou
+    //     juste après ses voisines. C'est ce geste-là qui fabrique une vague
+    //     au bout de la file — auparavant AUCUN chemin ne savait en créer une,
+    //     d'où le ▸ masqué sur la dernière vague et le ◂ mort dès qu'une vague
+    //     s'était vidée (bug 2026-08-22).
+    // Les deux gestes sont exactement inverses l'un de l'autre : la flèche
+    // opposée annule toujours le clic précédent, ce que « +1 / -1 » ne savait
+    // pas faire (une fusion était sans retour).
+    //
+    // Deux refus, et deux seulement : descendre dans une vague déjà lancée
+    // (elle est partie), et déplacer un membre SEUL vers le vide — ce dernier
+    // ne changerait rien à l'ordre d'exécution, il ne ferait que renuméroter.
     moveQueuedMember(id, key, delta) {
       const g = find(id);
       if (!g) return false;
       const m = g.members.find((x) => x.key === key);
       if (!m || m.launchedAt != null) return false;
-      const lw = g.members.reduce((max, x) => (x.launchedAt != null && x.wave > max ? x.wave : max), 0);
-      const target = m.wave + (delta > 0 ? 1 : -1);
-      if (target <= lw) return false;
-      if (!g.members.some((x) => x.wave === target)) return false; // pas de vague créée par un déplacement
-      m.wave = target;
+      const d = delta > 0 ? 1 : -1;
+      const pivot = m.wave;
+      if (g.members.filter((x) => x.wave === pivot).length === 1) {
+        const target = pivot + d;
+        if (target <= launchedWaveOf(g)) return false;
+        if (!g.members.some((x) => x.wave === target)) return false;
+        m.wave = target;
+      } else {
+        // Scission. Tout ce qui bouge ici est FORCÉMENT en file : le membre est
+        // `queued`, donc sa vague l'est aussi, et on ne décale que sa vague
+        // (vers l'arrière) ou celles qui la suivent (vers l'avant) — jamais une
+        // vague déjà ouverte, qui est toujours devant.
+        const from = d > 0 ? pivot + 1 : pivot;
+        g.members.forEach((x) => { if (x !== m && x.wave >= from) x.wave += 1; });
+        m.wave = from;
+      }
+      compactWaves(g);
       persist();
       return true;
     },
@@ -410,7 +470,7 @@ function createGroupStore(deps = {}) {
       if (!g) return false;
       const prompt = typeof (task && task.prompt) === 'string' ? task.prompt.trim() : '';
       if (!prompt) return false;
-      const lw = g.members.reduce((max, m) => (m.launchedAt != null && m.wave > max ? m.wave : max), 0);
+      const lw = launchedWaveOf(g);
       let targetWave;
       if (wave == null) {
         targetWave = g.members.reduce((max, m) => Math.max(max, m.wave), 0) + 1;

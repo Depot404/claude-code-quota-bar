@@ -6,6 +6,7 @@
   "command.open.title": "Claude Code Quota : ouvrir la page d'usage",
   "command.refresh.title": "Claude Code Quota : actualiser maintenant",
   "command.installHooks.title": "Claude Convs : installer les hooks",
+  "command.installBatchPhilosophy.title": "Claude Convs : ajouter la philosophie de lot au CLAUDE.md",
   "command.showPanel.title": "Claude Convs : afficher le panneau",
   "configuration.title": "Quota Bar pour Claude Code",
   "config.refreshIntervalMinutes.description": "Fréquence de rafraîchissement des données d'usage, en minutes.",
@@ -25,5 +26,19 @@
   "config.collapsedQuota.description": "Si la section Quota est repliée. Basculer en cliquant sur son en-tête.",
   "config.conversationSortOrder.enum.tabOrder": "Même ordre que vos onglets VS Code, le plus à gauche en premier.",
   "config.conversationSortOrder.enum.lastActivity": "Conversation la plus récemment active en premier.",
-  "config.conversationSortOrder.enum.statusFirst": "Conversations occupées ou en attente de vous en premier, quel que soit leur âge."
+  "config.conversationSortOrder.enum.statusFirst": "Conversations occupées ou en attente de vous en premier, quel que soit leur âge.",
+  "walkthrough.title": "Démarrer avec Claude Convs",
+  "walkthrough.description": "Ce qu'il faut savoir avant que ce panneau soit vraiment utile — la dernière étape est facultative.",
+  "walkthrough.step.finishSetup.title": "Terminer l'installation",
+  "walkthrough.step.finishSetup.description": "Rien dans le panneau n'est en direct tant que cette étape n'a pas tourné — pas de rond qui tourne, pas de ✓, pas de son, pas de coût par tour, chaque conversation bloquée en **idle**. Un clic installe les hooks qui rapportent l'état, et la commande `/handoffs` de l'étape 3.\n\n[Installer les hooks](command:claude-code-quota-bar.installHooks)",
+  "walkthrough.step.finishSetup.media.altText": "Une flèche qui descend dans un plateau.",
+  "walkthrough.step.launchBatch.title": "Lancer plusieurs conversations d'un coup",
+  "walkthrough.step.launchBatch.description": "Le cœur de l'extension — rien à installer. Ouvrez le panneau, collez un bloc `claude-convs` dans le formulaire **Nouvelle conversation** : chaque tâche qu'il contient s'ouvre comme sa propre conversation, avec son modèle et son effort, dans l'ordre des vagues.\n\n[Ouvrir le panneau](command:claude-code-quota-bar.showPanel)",
+  "walkthrough.step.launchBatch.media.altText": "Trois cartes de conversation empilées.",
+  "walkthrough.step.handoffsCommand.title": "Boucler un plan avec /handoffs",
+  "walkthrough.step.handoffsCommand.description": "Tapez `/handoffs` à la fin de n'importe quelle conversation Claude : elle termine sa réponse par un bloc `claude-convs`, prêt à coller à l'étape 2. C'est un petit fichier, déjà installé par l'étape 1 — pas un réglage à ajouter soi-même quelque part.",
+  "walkthrough.step.handoffsCommand.media.altText": "Une bulle de discussion avec une barre oblique à l'intérieur.",
+  "walkthrough.step.batchPhilosophy.title": "Savoir quand découper (facultatif, conseillé)",
+  "walkthrough.step.batchPhilosophy.description": "`/handoffs` ci-dessus ne fait que METTRE EN FORME un découpage déjà décidé — ça ne dit rien sur QUAND en proposer un. Ceci ajoute une courte note à votre CLAUDE.md personnel qui apprend ce jugement à Claude : proposer de découper quand les parties diffèrent vraiment, rester en une seule conversation sinon. Facultatif — l'extension fonctionne entièrement sans — et ça tient en une ligne, dans un fichier que vous seul contrôlez.\n\n[Ajouter au CLAUDE.md](command:claude-code-quota-bar.installBatchPhilosophy)",
+  "walkthrough.step.batchPhilosophy.media.altText": "Un seul chemin qui se sépare en trois, l'un d'eux mis en avant."
 }

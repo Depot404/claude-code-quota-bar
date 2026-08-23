@@ -310,6 +310,149 @@ console.log('\n4quater. Transcript vieux, session MORTE, mais onglet resté ouve
     build(() => unknown, store).conversations.length === 0);
 }
 
+// Le cas témoin du 2026-08-20 : la ligne BARRÉE qu'aucun geste ne retire.
+// Une conv sans ai-title porte un titre de repli (1er prompt) — non matchable,
+// donc isGone refuse par construction de conclure quoi que ce soit de l'absence
+// d'onglet. La seule échéance qui restait était l'âge du transcript, et une
+// fiche hooks retamponée 16 h après le dernier travail de la conversation
+// l'annulait : ligne immortelle, une place de maxItems mangée, zéro recours
+// côté user (la flèche de sortie n'existe que sur un membre de lot). Constaté
+// sur données réelles, deux convs du 2026-08-19 signalées par l'user.
+console.log('\n4quinquies. Fiche hooks fraîche + transcript vieux + titre de repli');
+{
+  const statePath = path.join(SANDBOX, '.claude', 'sessions-state.json');
+  const saved = fs.readFileSync(statePath, 'utf8');
+  const ghost = 'C:\\Users\\Test\\Projets VSCODE\\Ghost';
+  const dir = state.projectDirFor(ghost);
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, 'gh.jsonl');
+  // AUCUNE entrée ai-title : le titre affiché sera le 1er message user.
+  fs.writeFileSync(f, [userMsg('Rappel moi ce que fait le hook de Claude convs'), assistant]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const when = (Date.now() - 16 * 3600 * 1000) / 1000;      // 16 h → hors recentMs
+  fs.utimesSync(f, when, when);
+  // …et la fiche hooks vient d'être retamponée, 16 h après le dernier écrit.
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 1,
+    sessions: {
+      gh: { state: 'done', since: Date.now() - 16 * 3600 * 1000, updated_at: Date.now(), transcript: f },
+    },
+  }));
+  const build = (liveIds) => state.buildSnapshot({
+    workspacePath: ghost, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => noTabs, liveSessions: () => new Set(liveIds), sessionTitles: () => new Map(),
+  }, state.createTranscriptReader());
+  const shown = build([]).conversations;
+  check('transcript muet depuis 16 h, aucun onglet → hors liste MALGRÉ la fiche fraîche',
+    shown.length === 0, JSON.stringify(shown.map((c) => c.title)));
+  check('…et un process CLI vivant la garde toujours (exemption légitime intacte)',
+    build(['gh']).conversations.length === 1);
+  fs.writeFileSync(statePath, saved);
+}
+
+// ── La marque « à relire » survit à la fermeture (lot 3 du plan
+// PLAN_marque_a_relire_2026-08-22.md) ─────────────────────────────────────
+// Ce que ce banc verrouille, et que rien d'autre ne verrouille :
+//   - une conv MARQUÉE reste listée quand son onglet est parti ET quand son
+//     transcript a vieilli — les deux seules portes par lesquelles une ligne
+//     quitte la liste ;
+//   - elle est publiée `tabGone: true` / `tabOpen: false` : le rendu la barre
+//     et son clic rouvre, il ne cherche pas un onglet qui n'existe plus ;
+//   - RETIRER la marque la fait re-disparaître aussitôt — autrement dit la
+//     marque est bien la SEULE cause de sa présence, et le filtre d'ancienneté
+//     (avec son Set `aged`, qui empêche la boucle des fiches hooks de repêcher
+//     ce qu'il a écarté) continue de faire son travail ;
+//   - dégradations : source absente (appelant d'avant ce lot), tracker
+//     d'onglets mort, onglet encore ouvert.
+console.log('\n4sexies. Conv MARQUÉE « à relire » : survit à la fermeture de l\'onglet et au vieillissement');
+{
+  const pinnedWs = 'C:\\Users\\Test\\Projets VSCODE\\Pinned';
+  const dir = state.projectDirFor(pinnedWs);
+  fs.mkdirSync(dir, { recursive: true });
+  const mk = (id, title, ageH) => {
+    const f = path.join(dir, id + '.jsonl');
+    fs.writeFileSync(f, [userMsg('p'), assistant, { type: 'ai-title', aiTitle: title }]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+    const when = (Date.now() - ageH * 3600 * 1000) / 1000;
+    fs.utimesSync(f, when, when);
+  };
+  // « pin » : marquée, vieille de 8 h (hors recentMs) ET sans onglet — les deux
+  // causes de disparition à la fois. « old » : sa jumelle NON marquée, témoin.
+  mk('pin', 'Conv marquee a relire', 8);
+  mk('old', 'Conv oubliee non marquee', 8);
+  const build = (extra) => state.buildSnapshot(Object.assign({
+    workspacePath: pinnedWs, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => noTabs, liveSessions: () => new Set(), sessionTitles: () => new Map(),
+  }, extra), state.createTranscriptReader());
+
+  const withPin = build({ pinnedSessions: () => new Set(['pin']) }).conversations;
+  check('marquée, transcript vieux de 8 h, aucun onglet → RESTE listée',
+    withPin.length === 1 && withPin[0].sessionId === 'pin',
+    JSON.stringify(withPin.map((c) => c.sessionId)));
+  check('…publiée tabGone: true (onglet PROUVÉ absent, pas un simple manque de matching)',
+    withPin.length === 1 && withPin[0].tabGone === true);
+  check('…et tabOpen: false (jamais un onglet annoncé par tolérance)',
+    withPin.length === 1 && withPin[0].tabOpen === false);
+  check('sa jumelle NON marquée reste écartée (le filtre d\'ancienneté n\'est pas désarmé pour tout le monde)',
+    !withPin.some((c) => c.sessionId === 'old'));
+
+  check('marque RETIRÉE → la ligne repart (la marque était bien sa seule cause de présence)',
+    build({ pinnedSessions: () => new Set() }).conversations.length === 0);
+  check('source absente (appelant d\'avant ce lot) → comportement d\'avant à l\'octet près',
+    build({}).conversations.length === 0);
+  check('tableau au lieu d\'un Set (l\'appelant sérialise un store) → accepté',
+    build({ pinnedSessions: () => ['pin'] }).conversations.length === 1);
+
+  // Onglet ouvert : cas nominal, rien ne change — et surtout tabGone reste
+  // FAUX, sinon le clic « rouvrirait » une conversation déjà sous les yeux.
+  const openTab = build({
+    pinnedSessions: () => new Set(['pin']),
+    tabs: () => tabs('Conv marquee a relire'),
+    sessionTitles: () => new Map([['pin', 'Conv marquee a relire']]),
+  }).conversations.find((c) => c.sessionId === 'pin');
+  check('marquée AVEC son onglet ouvert → tabOpen true, tabGone false (rien de changé)',
+    !!openTab && openTab.tabOpen === true && openTab.tabGone === false,
+    JSON.stringify(openTab && [openTab.tabOpen, openTab.tabGone]));
+
+  // Tracker d'onglets mort : on ne sait RIEN des onglets, donc aucune
+  // fermeture n'est prouvée — la ligne reste (isGone ne masque rien dans ce
+  // cas), mais elle ne doit jamais annoncer un onglet fermé.
+  const blind = build({ pinnedSessions: () => new Set(['pin']), tabs: () => unknown }).conversations
+    .find((c) => c.sessionId === 'pin');
+  check('tracker d\'onglets mort (known:false) → listée, mais tabGone FAUX (on ne prouve rien)',
+    !!blind && blind.tabGone === false, JSON.stringify(blind && blind.tabGone));
+}
+
+console.log('\n4septies. Places de maxItems : une marquée passe devant les fraîches, jamais devant un onglet ouvert');
+{
+  const race = 'C:\\Users\\Test\\Projets VSCODE\\PinRace';
+  const dir = state.projectDirFor(race);
+  fs.mkdirSync(dir, { recursive: true });
+  const mk = (id, title, ageMin) => {
+    const f = path.join(dir, id + '.jsonl');
+    fs.writeFileSync(f, [userMsg('p'), assistant, { type: 'ai-title', aiTitle: title }]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+    const when = (Date.now() - ageMin * 60000) / 1000;
+    fs.utimesSync(f, when, when);
+  };
+  mk('pin', 'Conv marquee ancienne', 200);        // marquée, la plus ancienne
+  mk('tab', 'Conv avec onglet ouvert', 100);      // onglet ouvert, moins ancienne
+  mk('fresh', 'Conv fraiche sans onglet', 1);     // la plus fraîche, mais fermée
+  const build = (maxItems) => state.buildSnapshot({
+    workspacePath: race, recentMs: 4 * 3600 * 1000, maxItems,
+    tabs: () => tabs('Conv avec onglet ouver…'),
+    sessionTitles: () => new Map([['tab', 'Conv avec onglet ouvert']]),
+    pinnedSessions: () => new Set(['pin']),
+  }, state.createTranscriptReader());
+
+  const one = build(1).conversations.map((c) => c.sessionId);
+  check('une seule place : l\'onglet OUVERT la prend (invariant « onglet ouvert ⇒ listée », dont member-truth dépend)',
+    one.length === 1 && one[0] === 'tab', JSON.stringify(one));
+  const two = build(2).conversations.map((c) => c.sessionId);
+  check('deux places : la MARQUÉE prend la seconde, avant la conv fraîche sans onglet',
+    two.length === 2 && two.includes('tab') && two.includes('pin'), JSON.stringify(two));
+}
+
 // ── Les convs masquées ne doivent pas manger les places de la liste ────────
 console.log('\n5. Une conv ouverte reste listée même derrière maxItems convs fermées');
 {
@@ -541,6 +684,109 @@ console.log('\n9. renderKey : tabOpen fait partie de la clé de rendu');
   const keyOpen = state.renderKey([{ ...base, tabOpen: true }]);
   const keyClosed = state.renderKey([{ ...base, tabOpen: false }]);
   check('tabOpen seul change → la clé de rendu change aussi', keyOpen !== keyClosed);
+}
+
+// ── Lot 2 du plan d'appariement (2026-08-21) : la relation onglet↔conv est
+// une BIJECTION, calculée une fois par snapshot, pas cherchée par chacune. ──
+console.log('\n10. Appariement bijectif : plus d\'emprunt d\'onglet entre sœurs');
+{
+  // Deux sœurs au même libellé tronqué (24 car. + …), titres complets
+  // distincts : le scénario réel du constat (2026-08-15), pas un resume
+  // (supersede.js ne les fond pas, leurs premiers messages diffèrent).
+  const twins = 'C:\\Users\\Test\\Projets VSCODE\\Twins';
+  const dir = state.projectDirFor(twins);
+  fs.mkdirSync(dir, { recursive: true });
+  const PREFIX = 'y'.repeat(24);
+  const liveFile = path.join(dir, 'live.jsonl');
+  const closedFile = path.join(dir, 'closed.jsonl');
+  fs.writeFileSync(liveFile, [userMsg('sujet A'), assistant, { type: 'ai-title', aiTitle: `${PREFIX} onglet reellement ouvert` }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  fs.writeFileSync(closedFile, [userMsg('sujet B, tout autre'), assistant, { type: 'ai-title', aiTitle: `${PREFIX} onglet ferme depuis` }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const when = (Date.now() - 5000) / 1000;
+  fs.utimesSync(closedFile, when, when);   // plus ancienne : perd le départage
+  const label = `${PREFIX}…`;
+  const build = (labels) => state.buildSnapshot({
+    workspacePath: twins, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => ({ known: true, labels }),
+    liveSessions: () => new Set(), sessionTitles: () => new Map(),
+  }, state.createTranscriptReader());
+
+  const snap1 = build([label]);   // UN SEUL onglet réel pour les deux sœurs
+  const titlesTwins = snap1.conversations.map((c) => c.title);
+  check('un seul onglet réel pour deux sœurs → une SEULE reste affichée (plus d\'emprunt)',
+    titlesTwins.length === 1, JSON.stringify(titlesTwins));
+  check('… la surnuméraire (la plus ancienne, sans onglet assigné) est MASQUÉE',
+    !titlesTwins.some((t) => t.includes('ferme depuis')), JSON.stringify(titlesTwins));
+  check('… et la conv visible a bien tabOpen:true (elle tient l\'onglet, pas empruntée)',
+    snap1.conversations[0].tabOpen === true);
+
+  const snap2 = build([label, label]);   // DEUX onglets réels distincts (m = k)
+  const titles2 = snap2.conversations.map((c) => c.title);
+  check('deux onglets réels pour deux sœurs → les DEUX restent affichées',
+    snap2.conversations.length === 2, JSON.stringify(titles2));
+  check('… chacune avec tabOpen:true (bijection : un onglet chacune, plus le même rang)',
+    snap2.conversations.every((c) => c.tabOpen === true), JSON.stringify(snap2.conversations.map((c) => c.tabOpen)));
+  check('… et toutes deux marquées tabAmbiguous (l\'appariement entre elles est arbitraire)',
+    snap2.conversations.every((c) => c.tabAmbiguous === true), JSON.stringify(snap2.conversations.map((c) => c.tabAmbiguous)));
+}
+
+console.log('\n11. Lot 3 : ambiguïté résiduelle — se taire plutôt que deviner');
+{
+  // Même scénario de sœurs que §10 (deux onglets réels, appariement arbitraire
+  // dans l'ORDRE), mais cette fois on simule un onglet ACTIF dans ce groupe :
+  // sans identifiant vrai pour trancher, aucune des deux ne doit être surlignée.
+  const twins2 = 'C:\\Users\\Test\\Projets VSCODE\\Twins2';
+  const dir2 = state.projectDirFor(twins2);
+  fs.mkdirSync(dir2, { recursive: true });
+  const PREFIX2 = 'z'.repeat(24);
+  const fileA = path.join(dir2, 'a.jsonl');
+  const fileB = path.join(dir2, 'b.jsonl');
+  fs.writeFileSync(fileA, [userMsg('sujet A2'), assistant, { type: 'ai-title', aiTitle: `${PREFIX2} sujet A2 complet` }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  fs.writeFileSync(fileB, [userMsg('sujet B2'), assistant, { type: 'ai-title', aiTitle: `${PREFIX2} sujet B2 complet` }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const when2 = (Date.now() - 3000) / 1000;
+  fs.utimesSync(fileB, when2, when2);   // A plus récente → ordre d'affichage A puis B
+  const label2 = `${PREFIX2}…`;
+  const ACTIVE_SESSION_PATH2 = path.join(SANDBOX, '.claude', 'active-session.json');
+  function build2(activeIndex, activeSessionId) {
+    try {
+      if (activeSessionId) fs.writeFileSync(ACTIVE_SESSION_PATH2, JSON.stringify({ session_id: activeSessionId }));
+      else fs.rmSync(ACTIVE_SESSION_PATH2, { force: true });
+    } catch {}
+    return state.buildSnapshot({
+      workspacePath: twins2, recentMs: 4 * 3600 * 1000, maxItems: 12,
+      tabs: () => ({
+        known: true, labels: [label2, label2], activeLabel: label2, activeIndex,
+        frozen: false, source: 'fresh', windowFocused: true, sinceFocusMs: 10,
+      }),
+      liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    }, state.createTranscriptReader());
+  }
+
+  // Appariement dans l'ORDRE (comme §10) : A (affichage 1er, plus récente) →
+  // onglet 0, B → onglet 1. L'onglet ACTIF est l'onglet 0 (A), sans
+  // active-session.json pour trancher.
+  const snapNone = build2(0, null);
+  check('groupe ambigu, aucun identifiant vrai → PERSONNE de surligné',
+    snapNone.conversations.every((c) => c.isActive === false),
+    JSON.stringify(snapNone.conversations.map((c) => [c.title, c.isActive])));
+  check('… les deux membres restent marqués tabAmbiguous',
+    snapNone.conversations.every((c) => c.tabAmbiguous === true));
+
+  // active-session.json désigne B (l'AUTRE sœur que celle que l'appariement
+  // arbitraire aurait choisie) : c'est elle qui doit être surlignée, pas A.
+  const bId = snapNone.conversations.find((c) => c.title.includes('sujet B2')).sessionId;
+  const snapSister = build2(0, bId);
+  const activeConv = snapSister.conversations.find((c) => c.isActive === true);
+  check('active-session.json désigne l\'autre sœur → C\'EST ELLE qui est surlignée',
+    !!activeConv && activeConv.sessionId === bId,
+    JSON.stringify(snapSister.conversations.map((c) => [c.title, c.isActive])));
+  check('… une seule conv surlignée à la fois',
+    snapSister.conversations.filter((c) => c.isActive).length === 1);
+
+  try { fs.rmSync(ACTIVE_SESSION_PATH2, { force: true }); } catch {}
 }
 
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}

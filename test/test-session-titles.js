@@ -109,6 +109,12 @@ if (!sqlite) {
     { providerType: 'claude-code', resource: 'claude-code:/sess-2', label: 'Autre conversation Claude' },
     { providerType: 'local', resource: 'vscode-chat-session://local/abcdef', label: 'Chat VS Code local' },
     { providerType: 'claude-code', resource: 'claude-code:/sess-3' },   // sans label
+    // Schéma d'URI RÉCENT, relevé le 2026-08-20 sur le vscdb du workspace
+    // Octopus (411 entrées, toutes sous ce schéma). Un seul préfixe en dur et
+    // la table entière redevient illisible sans la moindre erreur : ce cas est
+    // le témoin de cette panne-là, à garder même quand le vieux schéma aura
+    // disparu des workspaces récents.
+    { providerType: 'agent-host-claude', resource: 'agent-host-claude:/sess-4', label: 'Conversation au schéma récent' },
   ];
   const write = (value) => {
     const db = new sqlite.DatabaseSync(dbPath);
@@ -122,7 +128,9 @@ if (!sqlite) {
   let map = titles.get();
   check('sessionId → libellé d\'onglet', map.get('sess-1') === 'Upload Error TF400898: An Internal…',
     String(map.get('sess-1')));
-  check('les entrées non-Claude sont ignorées', !map.has('abcdef') && map.size === 2, String(map.size));
+  check('schéma agent-host-claude:/ (2026-08) reconnu aussi',
+    map.get('sess-4') === 'Conversation au schéma récent', String(map.get('sess-4')));
+  check('les entrées non-Claude sont ignorées', !map.has('abcdef') && map.size === 3, String(map.size));
   check('entrée sans label ignorée', !map.has('sess-3'));
 
   // Le fichier bouge → la table suit (le cache est indexé sur (mtime, size)).

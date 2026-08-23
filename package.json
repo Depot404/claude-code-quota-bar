@@ -2,7 +2,7 @@
   "name": "claude-code-quota-bar",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "2.47.2",
+  "version": "2.59.0",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -78,6 +78,10 @@
       {
         "command": "claude-code-quota-bar.installHooks",
         "title": "%command.installHooks.title%"
+      },
+      {
+        "command": "claude-code-quota-bar.installBatchPhilosophy",
+        "title": "%command.installBatchPhilosophy.title%"
       },
       {
         "command": "claude-code-quota-bar.showPanel",
@@ -186,7 +190,65 @@
           "description": "%config.collapsedQuota.description%"
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "gettingStarted",
+        "title": "%walkthrough.title%",
+        "description": "%walkthrough.description%",
+        "steps": [
+          {
+            "id": "finishSetup",
+            "title": "%walkthrough.step.finishSetup.title%",
+            "description": "%walkthrough.step.finishSetup.description%",
+            "media": {
+              "svg": "walkthrough/step-install.svg",
+              "altText": "%walkthrough.step.finishSetup.media.altText%"
+            },
+            "completionEvents": [
+              "onCommand:claude-code-quota-bar.installHooks",
+              "onContext:claudeCodeQuotaBar.hooksInstalled && claudeCodeQuotaBar.handoffsInstalled"
+            ]
+          },
+          {
+            "id": "launchBatch",
+            "title": "%walkthrough.step.launchBatch.title%",
+            "description": "%walkthrough.step.launchBatch.description%",
+            "media": {
+              "svg": "walkthrough/step-batch.svg",
+              "altText": "%walkthrough.step.launchBatch.media.altText%"
+            },
+            "completionEvents": [
+              "onCommand:claude-code-quota-bar.showPanel"
+            ]
+          },
+          {
+            "id": "handoffsCommand",
+            "title": "%walkthrough.step.handoffsCommand.title%",
+            "description": "%walkthrough.step.handoffsCommand.description%",
+            "media": {
+              "svg": "walkthrough/step-handoffs.svg",
+              "altText": "%walkthrough.step.handoffsCommand.media.altText%"
+            },
+            "completionEvents": [
+              "onContext:claudeCodeQuotaBar.handoffsInstalled"
+            ]
+          },
+          {
+            "id": "batchPhilosophy",
+            "title": "%walkthrough.step.batchPhilosophy.title%",
+            "description": "%walkthrough.step.batchPhilosophy.description%",
+            "media": {
+              "svg": "walkthrough/step-philosophy.svg",
+              "altText": "%walkthrough.step.batchPhilosophy.media.altText%"
+            },
+            "completionEvents": [
+              "onCommand:claude-code-quota-bar.installBatchPhilosophy"
+            ]
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "package": "vsce package",

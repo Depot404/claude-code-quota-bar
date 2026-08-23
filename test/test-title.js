@@ -97,6 +97,32 @@ info = extractTitleInfo(onlySlash);
 check('conv sans aucun texte humain → pas de titre (repli « Conversation », pas de balisage)',
   info.title === null && info.source === null, JSON.stringify(info));
 
+// Incident 2026-08-18 : 1re ligne user > HEAD_BYTES (32 Ko) — contexte de
+// session incorporé, ~233 Ko relevés en réel. L'ancien readSlice(HEAD_BYTES,
+// 'head') coupait cette ligne en plein milieu → JSON illisible → repli
+// last-prompt (source qui diverge du libellé d'onglet, resté sur le 1er
+// prompt → clic mort dans le panneau, convMatchesLabel ne matchait plus rien).
+console.log('\n4. 1re ligne user géante (> HEAD_BYTES) → titre quand même trouvé');
+const bigPadding = '<system-reminder>' + 'x'.repeat(60000) + '</system-reminder>';
+const oversized = write('oversized.jsonl', [
+  user(bigPadding + 'Corriger le titre du dernier prompt'),
+  { type: 'assistant', message: { model: 'claude-opus-4-8', usage: { input_tokens: 10 } } },
+]);
+info = extractTitleInfo(oversized);
+check('ligne user géante (>32 Ko) → titre lu quand même, pas de repli last-prompt',
+  info.title === 'Corriger le titre du dernier prompt' && info.source === 'first-user', JSON.stringify(info));
+
+// Au-delà de la borne (2 Mo) : jamais de plantage, repli propre sur last-prompt.
+const hugePadding = '<system-reminder>' + 'x'.repeat(2 * 1024 * 1024) + '</system-reminder>';
+const tooHuge = write('too-huge.jsonl', [
+  user(hugePadding + 'Jamais atteint par le scan'),
+  { type: 'last-prompt', lastPrompt: 'Dernier prompt' },
+  { type: 'assistant', message: { model: 'claude-opus-4-8', usage: { input_tokens: 10 } } },
+]);
+info = extractTitleInfo(tooHuge);
+check('au-delà de la borne de scan → pas d\'exception, repli last-prompt',
+  info.title === 'Dernier prompt' && info.source === 'last-prompt', JSON.stringify(info));
+
 fs.rmSync(SANDBOX, { recursive: true, force: true });
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

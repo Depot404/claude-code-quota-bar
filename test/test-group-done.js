@@ -16,16 +16,22 @@ function check(name, cond, detail) {
 
 console.log('1. groupDone — condition de repli');
 
-check('aucun membre → false', groupDone([], null) === false);
-check('tous done-closed, pas de maîtresse → true', groupDone(['done-closed', 'done-closed'], null) === true);
-check('un membre stale parmi des done-closed → false', groupDone(['done-closed', 'stale'], null) === false);
-check('un membre unsent-lost parmi des done-closed → false', groupDone(['done-closed', 'unsent-lost'], null) === false);
-check('un membre done (onglet ouvert) parmi des done-closed → false', groupDone(['done-closed', 'done'], null) === false);
+check('aucun membre → false', groupDone([]) === false);
+check('tous done-closed → true', groupDone(['done-closed', 'done-closed']) === true);
+check('un membre stale parmi des done-closed → false', groupDone(['done-closed', 'stale']) === false);
+check('un membre unsent-lost parmi des done-closed → false', groupDone(['done-closed', 'unsent-lost']) === false);
+check('un membre done (onglet ouvert) parmi des done-closed → false', groupDone(['done-closed', 'done']) === false);
+check('argument absent/non-tableau → false', groupDone() === false && groupDone(null) === false);
+
+// 2026-08-18 — la maîtresse ne retient plus rien : quel que soit son état, seuls
+// les membres décident. Les anciens appels à deux arguments continuent de
+// compiler (le second est simplement ignoré) : ces cas VÉRIFIENT ce fait, ils
+// ne documentent plus une signature.
+console.log('2. la maîtresse ne bloque plus le retrait du lot');
+check('maîtresse busy → true', groupDone(['done-closed'], 'busy') === true);
+check('maîtresse idle → true', groupDone(['done-closed'], 'idle') === true);
 check('maîtresse done-closed → true', groupDone(['done-closed'], 'done-closed') === true);
-check('maîtresse busy → false', groupDone(['done-closed'], 'busy') === false);
-check('maîtresse idle → false', groupDone(['done-closed'], 'idle') === false);
-check('maîtresse hors table connue (statut inattendu) → false', groupDone(['done-closed'], 'weird') === false);
-check('pas de maîtresse (null) → true si membres ok', groupDone(['done-closed'], null) === true);
+check('maîtresse encore ouverte MAIS un membre stale → false', groupDone(['stale'], 'idle') === false);
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

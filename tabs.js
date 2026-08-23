@@ -99,6 +99,30 @@ function localActiveLabel() {
   } catch { return null; }
 }
 
+// Position de l'onglet Claude actif dans localLabels() — MÊME ordre que
+// claudeTabLabels (groupes puis onglets, dans l'ordre de vscode.window.tabGroups.all).
+// Par IDENTITÉ de l'onglet (===), jamais par libellé : c'est précisément
+// l'ambiguïté d'un libellé partagé par deux onglets que cet index sert à
+// lever en aval (state.js, appariement bijectif, lot 2 du plan d'appariement
+// des onglets, 2026-08-21). null si l'onglet actif n'est pas une conv Claude.
+function localActiveIndex() {
+  try {
+    const group = vscode.window.tabGroups.activeTabGroup;
+    const activeTab = group && group.activeTab;
+    if (!activeTab || !isClaudeTab(activeTab) || !activeTab.label) return null;
+    let idx = -1;
+    let i = 0;
+    for (const g of vscode.window.tabGroups.all) {
+      for (const t of (g && g.tabs) || []) {
+        if (!isClaudeTab(t)) continue;
+        if (t === activeTab) idx = i;
+        i++;
+      }
+    }
+    return idx >= 0 ? idx : null;
+  } catch { return null; }
+}
+
 function publish(labels) {
   const tmp = `${OWN_FILE}.tmp`;
   try {
@@ -167,6 +191,9 @@ function createTabTracker(handlers = {}) {
   // aussi sur `changed` (bascule prompt → ai-title pendant que l'onglet est
   // actif), sinon il ne matcherait plus aucun titre après renommage.
   let lastActiveLabel = localActiveLabel();
+  // Compagnon de lastActiveLabel, même cycle de vie : la position REMEMBERED
+  // pour le repli (bascule sur un fichier — cf. lastActiveLabel plus haut).
+  let lastActiveIndex = localActiveIndex();
 
   // ── Acte vs API : la preuve la plus fraîche gagne (2026-08-17) ────────────
   // Quand NOUS activons un onglet (clic panneau → focusTab()), on SAIT qui
@@ -188,6 +215,46 @@ function createTabTracker(handlers = {}) {
   let frozen = false;
   let freezeTimer = null;
 
+  // Focus de LA FENÊTRE (pas de l'onglet) : lu à la création, puis tenu à jour
+  // par onDidChangeWindowState ci-dessous. Sert au journal du lot 0 — reconnaître
+  // les verdicts « juste après un alt-tab » sans avoir à corréler à la main.
+  // `vscode.window.state` peut être absent d'un bouchon de banc : le doute
+  // profite à « fenêtre au premier plan », comme le repli déjà en place plus bas.
+  let windowFocused = true;
+  try { windowFocused = vscode.window.state.focused; } catch {}
+  let lastFocusGainedAt = Date.now();
+
+  // ── Activation FANTÔME : une bascule hors focus n'est jamais un choix ─────
+  // (2026-08-23, prouvé au journal : la conversation « Nahimic Companion »
+  // finit de répondre à 00:05:20.655, fenêtre SANS focus, aucun geste — et
+  // 0,4 s après, l'onglet actif de la copie miroir EST devenu son onglet,
+  // alors que l'écran, lui, affichait toujours l'onglet que l'utilisateur
+  // avait quitté. La capture de l'utilisateur montre les deux à la fois :
+  // onglet visible « Survie… », surlignage « Nahimic ». L'API ment donc par
+  // rapport au VISIBLE quand une conversation se termine en arrière-plan.)
+  //
+  // La règle qui neutralise la classe entière : un humain ne peut pas changer
+  // d'onglet dans une fenêtre qui n'a pas le focus. Même le clic direct sur
+  // l'onglet d'une fenêtre en arrière-plan donne D'ABORD le focus à la
+  // fenêtre, et l'activation arrive ~110 ms APRÈS le regain (mesuré, deux
+  // occurrences au journal du 2026-08-23) — donc toute activation légitime
+  // est observée fenêtre focusée. D'où :
+  //  - à la PERTE de focus, on fige le dernier choix de l'utilisateur (une
+  //    dernière lecture fraîche : une bascule légitime sans événement juste
+  //    avant la perte — le chemin de 2026-08-15 — est encore capturée) ;
+  //  - hors focus, ni les événements ni la lecture fraîche ne réécrivent ce
+  //    choix (seul le RENOMMAGE de l'onglet déjà actif — même position,
+  //    libellé neuf, prompt → ai-title — reste suivi, et l'acte du relais,
+  //    qui est un geste de l'utilisateur dans une autre fenêtre) ;
+  //  - au regain, la lecture fraîche ne reprend la main que CONFIRMÉE : un
+  //    événement d'onglet reçu sous focus (tout clic en produit), ou la
+  //    simple concordance fresh === souvenir (rien à confirmer). Tant que la
+  //    copie miroir diverge sans confirmation, on sert le souvenir,
+  //    `source: 'held'` au journal.
+  // L'auto-réparation de 2026-08-15 reste entière sous focus : fenêtre au
+  // premier plan, fresh est adopté à chaque lecture, événement ou pas.
+  let apiTrusted = true;
+
   // Un événement d'onglet RÉEL (onDidChangeTabs ou onDidChangeTabGroups) est
   // la seule preuve que le canal RPC est vivant — l'un ou l'autre suffit, les
   // deux meurent ensemble dans l'incident constaté. Toute réception éteint le
@@ -195,6 +262,11 @@ function createTabTracker(handlers = {}) {
   // de prouver qu'il répond, même si aucun autre champ n'a changé.
   function noteTabsEventReceived() {
     lastTabsEventAt = ++seq;
+    // Un événement d'onglet reçu FENÊTRE FOCUSÉE ne peut venir que d'un geste
+    // (tout clic d'onglet en produit un) : il rend sa confiance à la copie
+    // miroir. Hors focus, il peut porter l'activation fantôme — il compte
+    // pour l'ordre acte/API, jamais comme confirmation.
+    if (windowFocused) apiTrusted = true;
     if (freezeTimer) { clearTimeout(freezeTimer); freezeTimer = null; }
     if (frozen) {
       frozen = false;
@@ -206,7 +278,15 @@ function createTabTracker(handlers = {}) {
   function refreshActiveLabel() {
     const l = localActiveLabel();
     if (!l || l === lastActiveLabel) return false;
+    const idx = localActiveIndex();
+    // Hors focus, une BASCULE (position différente) est le fantôme possible :
+    // on ne réécrit pas le choix de l'utilisateur. Le renommage de l'onglet
+    // déjà actif (même position, libellé neuf), lui, reste suivi — sans lui,
+    // le souvenir garderait un libellé qui n'existe plus et ne matcherait
+    // plus rien après la bascule prompt → ai-title.
+    if (!windowFocused && idx !== lastActiveIndex) return false;
     lastActiveLabel = l;
+    lastActiveIndex = idx;
     return true;
   }
 
@@ -222,10 +302,44 @@ function createTabTracker(handlers = {}) {
   // renvoie donc déjà `label`, aucune divergence, rien à armer (l'événement,
   // lui, suivra de toute façon dans la foulée). Une divergence ne peut venir
   // que d'un canal mort : c'est exactement le signal qu'on cherche.
+  //
+  // ET C'EST LA MÊME CONDITION QUI DÉCIDE DE POSER L'ACTE (lot 1 du plan
+  // d'appariement, 2026-08-21). Auparavant `actReport` était posé dans TOUS les
+  // cas, divergence ou non — or l'activation d'un onglet DÉJÀ actif ne produit
+  // jamais d'événement d'onglet (extension.js le dit noir sur blanc : « clic =
+  // acte observé explicite, même si l'onglet est déjà actif — le seul cas où
+  // aucune bascule ne peut jamais se produire »). `lastTabsEventAt` ne bougeait
+  // donc plus JAMAIS au-dessus de cet acte, qui écrasait la lecture fraîche
+  // recompute après recompute, indéfiniment.
+  //
+  // Ce que ça cassait : l'auto-réparation du 2026-08-15 (cf. getTabs ci-dessous
+  // — « même si AUCUN événement ne tire, le prochain recompute remet le
+  // surlignage d'aplomb tout seul »). Un acte éternel la neutralisait, et le
+  // symptôme ressortait à l'instant où l'on REGARDE le panneau : au retour
+  // d'alt-tab, le recompute a bien lieu, mais l'acte périmé répond à sa place.
+  // Aggravant, identique à 2026-08-15 : cliquer sur la bonne ligne ne réparait
+  // rien, puisque ce clic reposait un acte de plus.
+  //
+  // Un acte non divergent n'apporte STRICTEMENT rien : `localActiveLabel()`
+  // renvoie déjà la même chose, la lecture fraîche est juste et reste
+  // auto-réparable. On ne le pose donc plus. L'acte redevient ce pour quoi il a
+  // été créé le 2026-08-17 : la seule vérité disponible quand la copie miroir
+  // est GELÉE — cas où, par construction, il diverge.
   function reportActivation(label) {
     if (disposed || !label) return;
+    // Un acte est un GESTE de l'utilisateur (clic panneau, ici ou relayé par
+    // une autre fenêtre) : il confirme le souvenir, focus ou pas — c'est le
+    // seul chemin légitime par lequel l'onglet actif change dans une fenêtre
+    // sans focus, et sans cette écriture la parade anti-fantôme le tiendrait
+    // en quarantaine comme un fantôme.
+    if (label === localActiveLabel()) {
+      lastActiveLabel = label;
+      lastActiveIndex = localActiveIndex();
+      return;
+    }
+    lastActiveLabel = label;
+    lastActiveIndex = null;
     actReport = { label, at: ++seq };
-    if (label === localActiveLabel()) return;
     clearTimeout(freezeTimer);
     freezeTimer = setTimeout(() => {
       freezeTimer = null;
@@ -320,7 +434,20 @@ function createTabTracker(handlers = {}) {
   let focusSub = { dispose() {} };
   try {
     focusSub = vscode.window.onDidChangeWindowState((e) => {
-      if (disposed || (e && e.focused === false)) return;
+      if (disposed) return;
+      const focused = e ? e.focused : true;
+      windowFocused = focused;
+      if (focused) lastFocusGainedAt = Date.now();
+      if (focused === false) {
+        // FIGER le choix de l'utilisateur au moment où il part : une dernière
+        // lecture fraîche (tout ce qui a précédé la perte s'est fait sous
+        // focus, donc est de lui — y compris une bascule sans événement, le
+        // chemin de 2026-08-15). Le fantôme, lui, arrive APRÈS cet instant.
+        const l = localActiveLabel();
+        if (l) { lastActiveLabel = l; lastActiveIndex = localActiveIndex(); }
+        apiTrusted = false;
+        return;
+      }
       onChange();
     }) || focusSub;
   } catch {}
@@ -371,16 +498,96 @@ function createTabTracker(handlers = {}) {
     // (fenêtre saine, ou fenêtre qui se dégèle) ; s'il n'arrive jamais, l'acte
     // reste vrai indéfiniment (fenêtre gelée). `frozen` : cf. reportActivation
     // et noteTabsEventReceived — indicateur de gel, publié tel quel.
+    // `source` (lot 0 du plan d'appariement) — d'où vient `activeLabel` :
+    // `fresh` (lecture instantanée de l'API), `remembered` (repli sur le
+    // souvenir, l'onglet actif n'est pas une conv Claude), `act-report` (l'acte
+    // mémorisé l'emporte sur l'API, cf. la note « Acte vs API » ci-dessus),
+    // `held` (2026-08-23 : la lecture fraîche diverge du dernier choix de
+    // l'utilisateur sans avoir été confirmée sous focus — activation fantôme
+    // possible, cf. la note en tête de tracker ; on sert le souvenir).
+    // C'est le champ qui départage la piste du lot 1 (fraîcheur au retour de
+    // focus) sans avoir à deviner depuis les symptômes.
     getTabs() {
-      if (disposed) return { known: false, labels: allLabels(), activeLabel: null, frozen: false };
+      if (disposed) {
+        return {
+          known: false, labels: allLabels(), activeLabel: null, activeIndex: null, frozen: false,
+          source: null, windowFocused, sinceFocusMs: Date.now() - lastFocusGainedAt,
+        };
+      }
       const fresh = localActiveLabel();
-      if (fresh) lastActiveLabel = fresh;
-      let activeLabel = fresh || lastActiveLabel;
-      if (actReport && actReport.at > lastTabsEventAt) {
+      // `activeIndex` suit exactement le même cycle fresh/remembered que
+      // `activeLabel` ci-dessous — MÊME lecture instantanée (localActiveIndex),
+      // MÊME souvenir de repli. Consommé par state.js (lot 2 du plan
+      // d'appariement) pour distinguer, parmi deux onglets au libellé
+      // identique, LEQUEL est physiquement actif — chose que le libellé seul
+      // ne peut plus dire dès qu'il y a collision.
+      const freshIndex = fresh ? localActiveIndex() : null;
+      // Parade anti-fantôme (2026-08-23, cf. la note en tête de tracker) :
+      // fresh n'est adopté que CONFIRMÉ — confiance intacte (`apiTrusted`,
+      // rendue par tout événement d'onglet reçu sous focus), ou concordance
+      // avec le souvenir (rien à confirmer). Une divergence non confirmée —
+      // l'activation fantôme d'une conversation qui finit en arrière-plan —
+      // est tenue en quarantaine : on sert le dernier choix de l'utilisateur,
+      // `source: 'held'`, jusqu'à ce qu'un geste sous focus tranche.
+      const freshConfirmed = fresh && (apiTrusted || fresh === lastActiveLabel);
+      if (freshConfirmed) {
+        // La concordance n'efface le doute que fenêtre au premier plan : hors
+        // focus, elle autorise l'adoption (identique de toute façon) mais un
+        // fantôme ULTÉRIEUR dans la même absence doit encore être retenu.
+        if (windowFocused) apiTrusted = true;
+        lastActiveLabel = fresh;
+        lastActiveIndex = freshIndex;
+      }
+      let activeLabel = freshConfirmed ? fresh : lastActiveLabel;
+      let activeIndex = freshConfirmed ? freshIndex : lastActiveIndex;
+      let source = freshConfirmed ? 'fresh' : (fresh ? 'held' : 'remembered');
+      // L'acte ne l'emporte que TANT QU'IL A ENCORE UNE RAISON D'EXISTER (lot 1
+      // du plan d'appariement, 2026-08-21) — deux états, et deux seulement :
+      //  - `freezeTimer !== null` : l'acte vient d'être posé et attend sa
+      //    confirmation. C'est la latence qu'il sert à combler (quelques ms sur
+      //    une fenêtre saine) ; pendant cette fenêtre-là il prime, inchangé.
+      //  - `frozen` : le délai est passé sans qu'aucun événement n'arrive, le
+      //    canal RPC est mort. L'acte est alors la SEULE vérité disponible et le
+      //    reste indéfiniment — c'est l'incident du 2026-08-17 (fenêtre
+      //    SalaireADC, 3 h), que la ligne ci-dessous préserve mot pour mot.
+      // Hors de ces deux états, la lecture fraîche reprend la main. Sans cette
+      // borne, un acte que rien ne supplante (aucun événement d'onglet ne suit
+      // l'activation d'un onglet déjà actif) écrasait `fresh` pour toujours sur
+      // une fenêtre PARFAITEMENT SAINE, et le surlignage restait faux jusqu'au
+      // prochain événement sans rapport. Cf. `reportActivation` ci-dessus, qui
+      // ferme l'autre moitié du trou (ne plus poser d'acte inutile) : les deux
+      // ensemble rendent à la lecture fraîche son auto-réparation de 2026-08-15,
+      // celle qui se voit au retour d'alt-tab.
+      // La distinction saine/gelée est celle que le plan exige, et elle existait
+      // déjà : `frozen` / `noteTabsEventReceived`. On ne périme jamais l'acte au
+      // jugé (pas de timer arbitraire, pas d'horloge) — on lui demande seulement
+      // s'il est encore le mieux informé.
+      // Honnêteté sur cette ligne : avec `reportActivation` corrigé, tout acte
+      // posé arme le détecteur, et le seul chemin qui le désarme monte aussi
+      // `lastTabsEventAt` — `actUsable` est donc AUJOURD'HUI impliqué par la
+      // condition d'ordre qui la précède. Elle est gardée parce qu'elle ÉCRIT la
+      // règle au lieu de la laisser dépendre de cet enchaînement : le jour où un
+      // acte serait posé sans armer le détecteur, ou `frozen` levé par un autre
+      // chemin, le trou se rouvrirait ici en silence.
+      const actUsable = frozen || freezeTimer !== null;
+      if (actReport && actReport.at > lastTabsEventAt && actUsable) {
         activeLabel = actReport.label;
         lastActiveLabel = actReport.label;
+        source = 'act-report';
+        // Pas d'index pour l'acte : `reportActivation` ne connaît que le
+        // LIBELLÉ activé (focus.js n'a pas cherché sa position dans la liste
+        // aplatie), et le calculer ici relirait la même copie miroir gelée
+        // que `fresh` — sans valeur ajoutée sur canal mort. `null` fait
+        // retomber le consommateur (state.js) sur le matching par libellé
+        // d'avant ce lot, exactement le comportement déjà en place sur ce
+        // chemin rare (fenêtre gelée) avant l'appariement bijectif.
+        activeIndex = null;
+        lastActiveIndex = null;
       }
-      return { known: true, labels: allLabels(), activeLabel, frozen };
+      return {
+        known: true, labels: allLabels(), activeLabel, activeIndex, frozen,
+        source, windowFocused, sinceFocusMs: Date.now() - lastFocusGainedAt,
+      };
     },
     // Câblage : extension.js appelle ceci juste après avoir fait activer un
     // onglet — ici (focus.js `focusConversation`) ou dans une autre fenêtre

@@ -42,7 +42,7 @@ VS Code's own Claude Code extension doesn't show which of your open conversation
 The **New conversation** form at the bottom of the conversation list opens real Claude Code conversations — the official extension's own tabs — but parameterized:
 
 - **One prompt = one conversation**, with an explicit **model** (haiku / sonnet / opus / fable) and **effort** (low → max), applied through per-conversation environment variables (`ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`) so the choice governs that CLI without touching your defaults.
-- **Several prompts = a batch.** Click **+ Add task**, or simply **paste a `claude-convs` block into any prompt field** — the form recognizes it and prefills everything: one task per section, model, effort, waves, group name. The ? tip in the section header offers a one-line instruction to copy into your `CLAUDE.md` so Claude ends its planning handoffs with exactly that block: plan in one conversation, paste once, launch everything.
+- **Several prompts = a batch.** Click **+ Add task**, or simply **paste a `claude-convs` block into any prompt field** — the form recognizes it and prefills everything: one task per section, model, effort, waves, group name. Type **`/handoffs`** in any Claude conversation to have it end its reply with exactly that block, ready to paste: plan in one conversation, paste once, launch everything.
 - **Waves order the batch.** Tasks in wave 1 open immediately; the next wave opens on its own once every conversation of the previous one has finished. Move a task between waves with ◂ ▸, or add a **wave divider** to split what runs in parallel from what must wait.
 
 A launched batch lives on as a **group** in the panel:
@@ -187,9 +187,18 @@ The ✓ of a finished conversation stays **bright until you have actually looked
 
 Earlier versions faded the ✓ after 30 min. An arbitrary delay knows nothing about you: it erased the ✓ of a result you never read, and kept bright one you'd read 29 minutes ago. A later version acknowledged any dwell in progress at `Stop`, regardless of when it started — the incident above. The version after that still keyed the dwell on the tab's label, so the official extension's end-of-turn `rename_tab` fabricated a visit and dimmed the ✓ by itself — visible as an ack timestamp landing a constant `done + 2266 ms`.
 
+### Pinning a conversation "to review"
+
+Sometimes a conversation needs a real look later — read the result, make a decision — and closing its tab because "the work is done" would lose exactly that. Hovering a row reveals a small bookmark button next to ⌂; clicking it pins the conversation, and a bookmark then sits in front of its title, on the row itself, for as long as it stays pinned.
+
+- **100% manual — pose and lift.** Nothing pins or unpins a conversation on your behalf: no read state, no age, no heuristic. Click the bookmark again (or the one now showing in front of the title) to unpin.
+- **Survives closing the tab.** A pinned conversation whose tab closes, or whose transcript ages past the usual cutoff, stays in the list instead of disappearing — struck through, tagged "tab closed", its tooltip saying so. Clicking it **reopens** the conversation instead of trying to focus a tab that no longer exists.
+- **Costs a row.** A pinned, closed conversation still occupies one of the list's slots, behind every conversation with a tab still open. That's the deliberate trade for not losing it.
+- Identified by session id, so a conversation that gets a brand-new session (e.g. reopened after a VS Code reload that changes its identity) won't carry the pin over — the limitation of matching on an id rather than the conversation's own continuity.
+
 ### When a conversation disappears
 
-**Closing the tab makes the conversation vanish from the panel, within ~200 ms** — even if it was `busy`.
+**Closing the tab makes the conversation vanish from the panel, within ~200 ms** — even if it was `busy`. A pinned conversation is the one exception — see [Pinning a conversation "to review"](#pinning-a-conversation-to-review) above.
 
 This does *not* rely on the `SessionEnd` hook, which is unreliable by nature: it doesn't fire on `/exit` or `/clear` ([#17885](https://github.com/anthropics/claude-code/issues/17885), [#6428](https://github.com/anthropics/claude-code/issues/6428)) and is erratic when a tab is closed ([#14760](https://github.com/anthropics/claude-code/issues/14760), [#45424](https://github.com/anthropics/claude-code/issues/45424)). When it doesn't fire, the conversation would only leave the list once the 4 h recency window expired — the latency this panel used to show. The hook is *kept* as an opportunistic cleanup, but nothing depends on it.
 
@@ -232,6 +241,10 @@ There's no way to detect the rename itself, but the *symptom* is detectable: a c
 ### Frozen tab mirror
 
 VS Code's extension host only ever sees tabs through a mirror synced from the renderer over RPC. On rare occasions that mirror can freeze for an entire window — no error, no event — while the real tab bar keeps changing normally. When that happens, clicking the right row in the panel still moves the highlight (the click itself is trusted, ahead of a mirror that no longer is), but the automatic self-repair on tab switches stops working until the window is reloaded. A `VS Code stopped reporting tab changes — highlight may lag. Reloading the window fixes it.` line appears under the conversation list when this is detected, and clears on its own once the mirror responds again.
+
+### Frozen panel feed
+
+The same class of freeze can hit the opposite direction: the channel that carries state pushes from the extension host *to* the panel's webview. The engine keeps computing correct states, but the panel keeps painting the last one it received — and since a CSS spinner animates locally, a finished conversation can keep "working" on screen indefinitely, which is the worst possible lie. The panel therefore watches its own feed: while visible, 60 s without receiving anything makes it re-request the state (that direction survives these freezes in practice — clicks kept working during the incident that motivated this); after 3 minutes with no answer it shows `The panel stopped receiving updates — statuses shown may be stale. Reloading the window fixes it.` and pauses **every** animation, so nothing on screen claims activity the panel cannot prove. The first state that arrives clears all of it, and returning to the panel after it was hidden requests a fresh state immediately.
 
 ### API
 
@@ -290,9 +303,11 @@ Written by the hooks **and by the extension** (`ack_ts` only), merged per `sessi
 
 **Hooks are optional.** Without them the panel still shows every conversation in the workspace (title, model, `ctx:%`), just without live `busy`/`waiting`/`done` state — every conversation renders `idle` (see the states table above), since that state is exactly what "no hook entry for this session" means. The quota bars and everything else work the same either way.
 
-To get live state, deploy the hooks with the **Claude Convs: Install Hooks** command (Command Palette) — it shows exactly what will be written before doing anything, then runs the installer below for you. Or run it yourself:
+To get live state, deploy the hooks with the **Claude Convs: Install Hooks** command (Command Palette) — one click, on Windows, macOS or Linux: it shows exactly what will be written, then does it itself (no PowerShell required; nothing runs until you confirm). The same command also deploys the [`/handoffs`](#launching-conversations--one-or-a-whole-batch) command. A panel installed from the Marketplace has neither yet — a banner at the top of the conversation list says so and offers the same one-click install, and it disappears on its own once both are in place.
 
-The hooks and their shared libs live under `hooks/` in this repo, the canonical source. Run the installer to deploy them to `~/.claude/scripts/` and wire `~/.claude/settings.json` (idempotent — backs up `settings.json` and only edits it if an entry is missing):
+A **Get started with Claude Convs** walkthrough opens the first time the extension runs and covers this same install button plus the other things worth knowing (pasting a `claude-convs` block, `/handoffs`, and the optional batching philosophy below) — reopen it anytime from the Command Palette: **Welcome: Open Walkthrough...** → Claude Convs.
+
+The hooks and their shared libs live under `hooks/` in this repo, the canonical source. If you'd rather deploy them yourself — or from a script — `install.ps1` (Windows/PowerShell) does the exact same thing the command does, still idempotent (backs up `settings.json` and only edits it if an entry is missing):
 
 ```powershell
 .\install.ps1
@@ -334,9 +349,15 @@ This configures:
 
 The installer always appends **its own** `matcher: ""` group rather than joining an existing one: on `Notification`/`SessionEnd` an existing group may carry a restrictive matcher (`permission_prompt`), and grafting onto it would silently narrow the hook. Existing hooks are never touched.
 
-Deployed files: the three hooks (`usage-statusline.js`, `track-active-session.js`, `hook-session-state.js`) plus the libs they `require` — `sessions-state.js` (locked atomic writes), `model-id.js` (model id → display name, window detection), `transcript.js` (JSONL tail/head reads), `turn-cost.js` (last-turn cost, [handover notice](#when-a-turn-gets-expensive-claude-offers-to-hand-over)) and `cost.js`, which `turn-cost.js` requires so that price list and turn boundary are defined in exactly one place. `state.js` requires the same libs from `hooks/`, so both sides always agree on what a model id means.
+Deployed files: the three hooks (`usage-statusline.js`, `track-active-session.js`, `hook-session-state.js`) plus the libs they `require` — `sessions-state.js` (locked atomic writes), `model-id.js` (model id → display name, window detection), `transcript.js` (JSONL tail/head reads), `turn-cost.js` (last-turn cost, [handover notice](#when-a-turn-gets-expensive-claude-offers-to-hand-over)) and `cost.js`, which `turn-cost.js` requires so that price list and turn boundary are defined in exactly one place. `state.js` requires the same libs from `hooks/`, so both sides always agree on what a model id means. Alongside the hooks, the same install also copies `commands/handoffs.md` to `~/.claude/commands/handoffs.md`, the `/handoffs` command.
 
-Edit the hooks in `hooks/` (not the deployed copies in `~/.claude/scripts/`), then re-run `install.ps1`.
+Edit the hooks in `hooks/` (not the deployed copies in `~/.claude/scripts/`), then re-run **Claude Convs: Install Hooks** (or `install.ps1`).
+
+### Batching philosophy (optional)
+
+`/handoffs` only formats a split you've already decided on — it says nothing about *when* to offer one. The **Claude Convs: Add Batching Philosophy to CLAUDE.md** command deposits a short, extension-maintained note at `~/.claude/claude-convs-batching.md` and adds a single `@claude-convs-batching.md` line to your personal `~/.claude/CLAUDE.md` (a relative [import](https://code.claude.com/docs/en/memory#import-additional-files), so nothing machine-specific ever gets written to a file you might version or share). The note teaches Claude the judgment call: offer to split a request into a batch only when the split is real (independent parts, or a chain where a later step needs an earlier one), stay in one conversation otherwise.
+
+This is entirely optional — every other part of the extension works the same without it — and strongly recommended, since it's what makes Claude reach for batches at all instead of defaulting to one conversation on the current model for everything. It's asked as a **separate** question, right after hooks finish installing (at most once per machine — declining is remembered so it won't ask again on its own, but the command stays available any time from the Command Palette or the walkthrough), and it shows the exact text that will be imported into every future conversation before asking, never just the technical line that pulls it in. Re-running it re-deploys the note itself every time, like a hook: a future version of the extension improves it for everyone without anyone re-pasting anything, while your own `CLAUDE.md` is only ever touched to add that one line, never overwritten (a timestamped backup is made first if it already contains other content).
 
 ## Requirements
 
@@ -440,6 +461,7 @@ Regression bench, plain Node — `node test/test-sounds.js` (debounce, the Stop�
 - **Claude Code Quota: Open Usage Page** — opens `claude.ai/settings/usage`.
 - **Claude Code Quota: Refresh Now** — forces an immediate quota refresh.
 - **Claude Convs: Install Hooks** — deploys the hooks (see [Setup](#setup)) after showing exactly what will be written, for live conversation state.
+- **Claude Convs: Add Batching Philosophy to CLAUDE.md** — optional, see [Batching philosophy](#batching-philosophy-optional); shows the exact text before adding it.
 
 ## Privacy and data handling
 
@@ -455,8 +477,10 @@ Regression bench, plain Node — `node test/test-sounds.js` (debounce, the Stop�
 - `~/.claude/quota-session-key.json` holds a **live `claude.ai` `sessionKey` cookie in clear text** — the same trust level as `.credentials.json`. It grants full account access for as long as the cookie is valid, not just usage-page reads. Treat it accordingly (same filesystem ACLs as the rest of `~/.claude`, never copied out, never logged). Only written when `claudeCodeQuotaBar.braveUserDataDir` is configured (empty by default) — see [Configuration](#configuration).
 - `~/.claude/quota-org-id.json` and `~/.claude/quota-brave-pid.json` hold, respectively, a cached Claude organization UUID and the PID of an ephemeral Brave Octopus process while it's running (used to shut it back down). No prompt or chat content. Same `braveUserDataDir` opt-in as above.
 - `~/.claude/quotabar-turns/<session>.json` (one small file per conversation, written by the `UserPromptSubmit` hook) holds the byte offset reached in that conversation's transcript, the running cost figures, and whether the [handover notice](#when-a-turn-gets-expensive-claude-offers-to-hand-over) has already been shown. Numbers and an offset — no prompt, no chat content. Files untouched for 7 days are deleted automatically.
+- `~/.claude/quotabar-cost-daily.json` (written by the same hook, at most once per calendar day) holds a running history of what every conversation on the machine has cost, one entry per day: a total, a message count, and a breakdown by model — nothing else, no prompt or chat content. It's rebuilt from your local transcripts (never uploaded anywhere), going back to whatever history is already on disk the first time it runs, so it isn't limited to "from today on". Purely a data log for now — there's no view for it in the panel yet.
 - `~/.claude/sessions-state.json` is written **by the hooks** (not by this extension, except for `ack_ts` — see [Read receipts](#read-receipts)): per-conversation state, a working directory, a transcript path, and — for `waiting` — the text of the `Notification` hook payload (typically "Claude is waiting for your input" or similar, not your prompt). Only present if you've run [Setup](#setup); without it, every conversation just shows `idle`.
-- **Every file above lives under `~/.claude/`.** Nothing this extension writes goes anywhere else on disk, and nothing leaves the machine except the two network calls in the first bullet (quota fetch) and the "install hooks" command in [Setup](#setup), which itself only ever touches `~/.claude/scripts/` and `~/.claude/settings.json` — never silently, always behind an explicit confirmation dialog listing what will be written.
+- `~/.claude/claude-convs-batching.md` (see [Batching philosophy](#batching-philosophy-optional), opt-in) holds a short, fixed, extension-authored text — no prompt or chat content. `~/.claude/CLAUDE.md`, your own personal file, only ever receives one line pointing at it (`@claude-convs-batching.md`), never overwritten; a timestamped backup is made first if the file already has other content.
+- **Every file above lives under `~/.claude/`.** Nothing this extension writes goes anywhere else on disk, and nothing leaves the machine except the two network calls in the first bullet (quota fetch), the "install hooks" command in [Setup](#setup) (touches only `~/.claude/scripts/` and `~/.claude/settings.json`), and the batching-philosophy command above (touches only `~/.claude/claude-convs-batching.md` and `~/.claude/CLAUDE.md`) — never silently, always behind an explicit confirmation dialog listing what will be written.
 
 ## Known limitations
 

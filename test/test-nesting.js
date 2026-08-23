@@ -27,7 +27,7 @@ const group = (id, members, master) => ({
 });
 // Rôle de la maîtresse (plan « la maîtresse n'engage que son dernier lot »).
 const role = (r, id) => (r.masterRole[id] || {}).role;
-const blocks = (r, id) => !!(r.masterRole[id] || {}).blocksDone;
+const blocks = (r, id) => !!(r.masterRole[id] || {}).latest;
 const under = (n, groupId, memberKey) => !!n && n.groupId === groupId && n.memberKey === memberKey;
 
 console.log('1. Cas nominal — la maîtresse du lot B EST un membre du lot A');

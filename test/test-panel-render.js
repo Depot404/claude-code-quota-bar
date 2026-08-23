@@ -213,8 +213,14 @@ async function run() {
     // acquireVsCodeApi n'existe qu'à l'intérieur de VS Code : le webview
     // l'appelle à la première ligne. Injecté par le debugger, donc sans se faire
     // bloquer par la CSP stricte de la page.
+    // Heartbeat de fraîcheur NEUTRALISÉ pour les sections 1-24 (seuils
+    // repoussés à l'infini) : ses `ready` spontanés tomberaient tôt ou tard
+    // dans une des fenêtres « __sent doit contenir exactement X » et rendraient
+    // le banc flaky. La mécanique réelle, elle, est testée en §25 sur une
+    // page rechargée avec des délais compressés.
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
-      source: `window.acquireVsCodeApi = () => ({ postMessage: (m) => { (window.__sent = window.__sent || []).push(m); } });`,
+      source: `window.acquireVsCodeApi = () => ({ postMessage: (m) => { (window.__sent = window.__sent || []).push(m); } });
+window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     });
     await cdp.send('Page.navigate', { url: 'file:///' + file.replace(/\\/g, '/') });
     await sleep(600);
@@ -511,9 +517,6 @@ async function run() {
       await cdp.evaluate(`(document.querySelector('.m-pending .m-prompt')||{}).textContent`) === 'Pas encore lancée');
     check('compteur « terminées » du groupe',
       await cdp.evaluate(`document.querySelector('.grp-count').textContent`) === '1/3 done');
-    // Étape 11 : aucun membre n'est `done-closed` ici → chip masquée.
-    check('groupe pas terminé : chip « ✓ done » absente',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('.grp-done')).display`) === 'none');
 
     console.log('\n9ter. « Ce qui reste à faire » (étape 11) — masquage au rendu, jamais le store');
     // Groupe à 3 vagues : vague 1 (m1, m2) ENTIÈREMENT done-closed → doit
@@ -521,9 +524,9 @@ async function run() {
     // `unsent-lost`, qui restent visibles (il reste un remède : aller voir /
     // relier / relancer) ; vague 3 (m5, `queued`) force `multiWave` pour que
     // l'absence de l'en-tête « wave 1 » soit un fait mesuré, pas un effet de
-    // bord d'une vague unique restante. Maîtresse ENCORE VIVANTE (`busy`) :
-    // `g.done` (calculé côté extension.js, group-done.js) reste false — un
-    // groupe ne disparaît ENTIER que maîtresse comprise (décision 90 du plan).
+    // bord d'une vague unique restante. `g.done` (calculé côté extension.js,
+    // group-done.js) reste false : il reste des membres à faire — la maîtresse,
+    // elle, n'entre plus dans ce calcul (2026-08-18).
     const hidden = JSON.parse(JSON.stringify(grouped));
     hidden.groups[0] = {
       id: 'g1', name: 'Refonte paiements', hue: 210, collapsed: false,
@@ -553,7 +556,7 @@ async function run() {
       waveLabels.includes('wave 2') && waveLabels.includes('▶ wave 3'), JSON.stringify(waveLabels));
     check('compteur « terminées » : calculé sur le store COMPLET (les cachés comptent)',
       await cdp.evaluate(`document.querySelector('.grp-count').textContent`) === '2/5 done');
-    check('groupe pas ENTIÈREMENT terminé (maîtresse encore vivante) : toujours rendu',
+    check('des membres restent à faire : le lot est toujours rendu',
       await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 1);
 
     // Onglet rouvert (extension.js relisterait la conv sous un id réel,
@@ -569,37 +572,37 @@ async function run() {
     check('… réapparaît une fois l\'onglet rouvert (statut `done`, plus `done-closed`)',
       await cdp.evaluate(`[...document.querySelectorAll('#flow .conv .title')].some(e => e.textContent === 'Terminée jamais lue')`));
 
-    // Maîtresse ENCORE VIVANTE, mais tous les membres finis : « capsule seule +
-    // chip ✓ done » (cas dégradé de la décision 90 — rien à faire côté
-    // membres, la maîtresse reste la seule chose à montrer).
+    // Tous les membres finis, onglets fermés, MAÎTRESSE ENCORE VIVANTE
+    // (2026-08-18) : c'est désormais la condition suffisante — extension.js
+    // pose `done` vrai sur les seuls statuts des membres, et le lot entier
+    // quitte le DOM. La conv de cadrage, elle, n'est plus tête de lot : elle
+    // retourne dans la liste plate (`masterIds` ne la retient plus, même
+    // filtre `!g.done`), ce que la section suivante mesure sur un état réel.
     const allDoneMasterOpen = JSON.parse(JSON.stringify(hidden));
+    allDoneMasterOpen.groups[0].done = true;   // ce que group-done.js conclut
     allDoneMasterOpen.groups[0].members.forEach(function (m) {
       m.status = 'done-closed'; m.waveStatus = 'done';
       m.canLink = false; m.canClose = false; m.canRelaunch = false; m.note = '✓ done · closed';
     });
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: allDoneMasterOpen })}, '*')`);
     await sleep(150);
-    check('capsule seule : le groupe reste rendu (maîtresse pas done-closed)',
-      await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 1);
-    check('… chip « ✓ done » visible (plus aucun membre à faire)',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('.grp-done')).display`) !== 'none'
-      && await cdp.evaluate(`document.querySelector('.grp-done').textContent`) === '✓ done');
-    check('… plus aucun membre ni en-tête de vague sous la capsule',
-      await cdp.evaluate(`document.querySelectorAll('#flow .member').length`) === 0
-      && await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr').length`) === 0);
-    check('… la maîtresse (encore vivante) reste rendue',
-      await cdp.evaluate(`!!document.querySelector('.grp-master-fallback')`));
-
-    // Maîtresse AUSSI done-closed : `g.done` (group-done.js, côté extension)
-    // devient vrai — le groupe entier disparaît du DOM. Le store, lui, n'est
-    // jamais consulté par ce banc : seul le rendu est en cause ici.
-    const fullyDone = JSON.parse(JSON.stringify(allDoneMasterOpen));
-    fullyDone.groups[0].master.status = 'done-closed';
-    fullyDone.groups[0].done = true;
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: fullyDone })}, '*')`);
-    await sleep(150);
-    check('groupe ENTIÈREMENT terminé (maîtresse comprise) : plus rendu du tout',
+    check("tous les membres finis+fermés : le lot n'est plus rendu, maîtresse vivante ou non",
       await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 0);
+    check('… et plus aucune capsule de maîtresse ne traîne',
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp-master-fallback').length`) === 0);
+
+    // La maîtresse LISTÉE d'un lot ainsi retiré redevient une ligne plate —
+    // c'est tout l'objet du changement : elle perd son « tag » de lot sans que
+    // rien n'ait été écrit dans le store ni fermé.
+    const freedMaster = JSON.parse(JSON.stringify(allDoneMasterOpen));
+    freedMaster.groups[0].master = {
+      convId: 'c3', title: 'Terminée déjà lue', listed: true, tabTitle: null,
+      hint: 'Finished.', status: 'done',
+    };
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: freedMaster })}, '*')`);
+    await sleep(150);
+    check("… l'ex-maîtresse reprend sa ligne dans la liste plate (une seule fois)",
+      await cdp.evaluate(`[...document.querySelectorAll('#flow > .conv .title')].filter(e => e.textContent === 'Terminée déjà lue').length`) === 1);
 
     // Retour à l'état de base de la section 9 pour la suite du banc (9bis).
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
@@ -1123,6 +1126,91 @@ async function run() {
     check('… mouveurs et ⤴ côte à côte, dans les bords de la ligne',
       hoverGeom.overlap === false && hoverGeom.inside === true, JSON.stringify(hoverGeom));
 
+    console.log('\n10quinquies. ◂ / ▸ : ce qui est PROPOSÉ à l\'écran = ce que le store accepte (2026-08-22)');
+    // Bug signalé par l'user : déplacer la seule ligne d'une vague la faisait
+    // disparaître SANS RETOUR (le ◂ restait affiché, le store refusait en
+    // silence), et rien ne savait créer une vague au bout de la file (le ▸
+    // était masqué sur la dernière vague). Depuis que la vague est une POSITION
+    // (groups.js moveQueuedMember), ce que peut un membre dépend de s'il est
+    // SEUL chez lui — et l'affichage doit dire EXACTEMENT ça, sinon on remet un
+    // bouton menteur. C'est le seul banc qui peut le voir : la condition est du
+    // CSS (display), pas une valeur de retour.
+    const movers = JSON.parse(JSON.stringify(grouped));
+    movers.groups[0].members.push(
+      { key: 'm4', prompt: 'Vague 2, accompagnée', wave: 2, asked: { model: null, effort: null }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' },
+      { key: 'm5', prompt: 'Vague 3, toute seule', wave: 3, asked: { model: null, effort: null }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: movers })}, '*')`);
+    await sleep(150);
+    const seenBtns = `(() => {
+      const seen = function (b) { return getComputedStyle(b).display !== 'none'; };
+      return Array.from(document.querySelectorAll('#flow .member')).map(function (m) {
+        const p = m.querySelector('.m-prompt');
+        const btns = Array.from(m.querySelectorAll('.m-move .m-mv'));
+        return {
+          prompt: p ? p.textContent : null,
+          queued: !!m.querySelector('.m-pending'),
+          back: btns.length ? seen(btns[0]) : false,
+          fwd: btns.length > 1 ? seen(btns[1]) : false,
+        };
+      });
+    })()`;
+    const mvs = await cdp.evaluate(seenBtns);
+    const mvRow = function (list, txt) { return list.find(function (r) { return r.prompt === txt; }) || {}; };
+    check('membre ACCOMPAGNÉ (vague 2, deux lignes) : les DEUX flèches sont offertes',
+      mvRow(mvs, 'Pas encore lancée').back === true && mvRow(mvs, 'Pas encore lancée').fwd === true, JSON.stringify(mvs));
+    check('… y compris le ◂, alors que la vague d\'avant est déjà partie : il se DÉTACHE devant ses voisines',
+      mvRow(mvs, 'Vague 2, accompagnée').back === true, JSON.stringify(mvRow(mvs, 'Vague 2, accompagnée')));
+    check('membre SEUL de la DERNIÈRE vague : ▸ masqué (le pousser ne ferait que renuméroter)',
+      mvRow(mvs, 'Vague 3, toute seule').fwd === false, JSON.stringify(mvRow(mvs, 'Vague 3, toute seule')));
+    check('… mais son ◂ reste offert : il refusionne avec la vague d\'avant, encore en file',
+      mvRow(mvs, 'Vague 3, toute seule').back === true, JSON.stringify(mvRow(mvs, 'Vague 3, toute seule')));
+    check('une tâche DÉJÀ LANCÉE n\'a aucune flèche (elle ne bouge plus)',
+      mvs.filter(function (r) { return !r.queued; }).every(function (r) { return !r.back && !r.fwd; }),
+      JSON.stringify(mvs.filter(function (r) { return !r.queued; })));
+    // Contre-épreuve du bug : sur la MÊME dernière vague, dès qu'une seconde
+    // ligne l'accompagne, le ▸ réapparaît — c'est lui qui fabrique la vague
+    // suivante, et c'est ce chemin-là qui n'existait pas.
+    const moversPair = JSON.parse(JSON.stringify(movers));
+    moversPair.groups[0].members.push(
+      { key: 'm6', prompt: 'Vague 3, plus seule', wave: 3, asked: { model: null, effort: null }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: moversPair })}, '*')`);
+    await sleep(150);
+    const mvs2 = await cdp.evaluate(seenBtns);
+    check('même ligne, désormais accompagnée sur la dernière vague : le ▸ REVIENT (une vague naît au bout)',
+      mvRow(mvs2, 'Vague 3, toute seule').fwd === true, JSON.stringify(mvs2));
+    // Géométrie du cas à DEUX flèches, devenu la norme depuis ce lot (avant, un
+    // membre de dernière vague n'en montrait qu'une). Le gabarit est celui de
+    // 10quater, mais mesuré là où il est le plus large : deux disques PLUS le ⤴.
+    const mvGeom = await cdp.evaluate(`(() => {
+      const m = Array.from(document.querySelectorAll('#flow .member')).find(function (x) {
+        const p = x.querySelector('.m-prompt');
+        return p && p.textContent === 'Vague 3, toute seule';
+      });
+      const before = m.getBoundingClientRect().height;
+      const ev = function (t) { m.dispatchEvent(new MouseEvent(t, { bubbles: true })); };
+      ev('mouseover'); ev('mouseenter');
+      const head = m.querySelector('.m-head').getBoundingClientRect();
+      const mv = m.querySelector('.m-move').getBoundingClientRect();
+      const out = m.querySelector('.m-out').getBoundingClientRect();
+      return { before: Math.round(before * 10) / 10, after: Math.round(m.getBoundingClientRect().height * 10) / 10,
+               shown: Array.from(m.querySelectorAll('.m-move .m-mv')).filter(function (b) { return getComputedStyle(b).display !== 'none'; }).length,
+               overlap: Math.round(mv.right) > Math.round(out.left),
+               inside: Math.round(mv.left) >= Math.round(head.left) && Math.round(mv.right) <= Math.round(head.right) };
+    })()`);
+    check('deux flèches visibles à la fois : la ligne ne grandit toujours pas d\'un pixel',
+      mvGeom.shown === 2 && mvGeom.before === mvGeom.after, JSON.stringify(mvGeom));
+    check('… et les deux disques + le ⤴ tiennent côte à côte dans les bords de la ligne',
+      mvGeom.overlap === false && mvGeom.inside === true, JSON.stringify(mvGeom));
+    // Ce que l'ŒIL a validé (2026-08-22) : sur la ligne survolée de la DERNIÈRE
+    // vague, les trois pastilles ◂ ▸ ⤴ apparaissent côte à côte, dans les bords
+    // de la ligne, sans la faire grandir — le ▸ étant précisément celui que ce
+    // lot rend possible. La capture a été prise par un vrai mouvement de souris
+    // (Input.dispatchMouseEvent : un MouseEvent synthétique n'allume pas :hover)
+    // et REGARDÉE. Elle ne reste pas dans le banc : ce geste laisse le pointeur
+    // posé sur la ligne pour toutes les sections suivantes, et la lecture de
+    // :hover juste après s'est montrée instable d'un passage à l'autre. Les
+    // mesures ci-dessus, elles, ne dépendent d'aucun survol.
+
     // Modèle · effort PRÉVUS grisés sur une tâche en file (m3, pas encore liée).
     const intentState = JSON.parse(JSON.stringify(grouped));
     intentState.groups[0].members[2].asked = { model: 'haiku', effort: null };
@@ -1149,6 +1237,26 @@ async function run() {
     await sleep(150);
     check('… réouverture de l\'onglet : le barré disparaît de lui-même (découle de tabOpen, aucune mémoire)',
       await cdp.evaluate(`getComputedStyle(document.querySelectorAll('#flow > .conv')[1].querySelector('.title')).textDecorationLine`) === 'none');
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(150);
+
+    // Ambiguïté d'appariement onglet (lot 3, plan d'appariement 2026-08-21) :
+    // signe discret + infobulle, jamais de nouvelle ligne (gabarit inchangé).
+    const ambiguousState = JSON.parse(JSON.stringify(STATE));
+    ambiguousState.conversations[1].tabAmbiguous = true;   // c2
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: ambiguousState })}, '*')`);
+    await sleep(150);
+    const ambInfo = await cdp.evaluate(`(() => {
+      const rows = document.querySelectorAll('#flow > .conv');
+      return { c1: getComputedStyle(rows[0].querySelector('.amb')).display,
+               c2: getComputedStyle(rows[1].querySelector('.amb')).display,
+               c2Title: rows[1].querySelector('.amb').title };
+    })()`);
+    check('conv NON ambiguë : le signe reste masqué (display:none)', ambInfo.c1 === 'none', JSON.stringify(ambInfo));
+    check('conv ambiguë (tabAmbiguous) : le signe apparaît', ambInfo.c2 !== 'none', JSON.stringify(ambInfo));
+    check('… avec une infobulle qui explique la collision', ambInfo.c2Title.length > 0, JSON.stringify(ambInfo));
+    check('aucune ligne ajoutée pour autant — même gabarit qu\'une ligne plate ordinaire',
+      await cdp.evaluate(`document.querySelectorAll('#flow > .conv').length`) === STATE.conversations.length);
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
 
@@ -3062,33 +3170,54 @@ async function run() {
       rails.sub.height > 0 && rails.sub.railTop <= rails.sub.firstIco + 0.5
       && rails.sub.railBottom >= rails.sub.lastIco - 0.5, JSON.stringify(rails.sub));
 
-    // (e) RÉVISÉ 2026-08-17 — la ligne de TÊTE d'un sous-lot n'a plus de
-    // capsule du tout : elle suit la ligne maîtresse, dont elle reprend le
-    // canon (les deux cadres sont partis ensemble, sinon le panneau dirait la
-    // même chose de deux façons). Ce qui se mesure désormais : aucun trait sur
-    // la ligne, une bulle au canon de tête, RESTÉE À LA COULEUR DU PARENT
-    // (elle est un membre du parent : c'est la structure, pas un détail), et
-    // son fond opaque — le rail du parent, lui, la traverse toujours.
+    // (e) RÉVISÉ 2026-08-17, puis 2026-08-22 (« bulle scindée », choix user
+    // sur MOCKUP_bulle_scindee_2026-08-22.html) — la ligne de TÊTE d'un
+    // sous-lot n'a plus de capsule du tout : elle suit la ligne maîtresse,
+    // dont elle reprend le canon. Sa bulle, elle, porte désormais les DEUX
+    // couleurs (double rôle = membre du parent ET tête du sous-lot) : anneau
+    // scindé verticalement, moitié gauche parent, moitié droite enfant —
+    // peint en backgrounds (border transparente : une border n'a qu'une
+    // couleur), avec un trou central radial OPAQUE qui continue de trouer le
+    // rail du parent, lequel traverse toujours la ligne.
+    // La peinture scindée passe par var(--vscode-sideBar-background, …) (même
+    // chaîne que le fond du body, invariant étape 12) : sans hôte VS Code la
+    // substitution est invalide et TOUT le background tombe à « none » — on
+    // injecte donc la variable le temps de la mesure, comme les sections
+    // thème plus haut (le vrai webview l'a toujours).
+    // La bulle scindée peint son fond avec var(--vscode-sideBar-background) —
+    // même chaîne que le body, invariant de l'étape 12. Sans hôte VS Code la
+    // substitution est invalide et le fond disparaît : on injecte la variable
+    // le temps de la mesure, comme les sections « thème » plus haut.
+    await cdp.evaluate(`document.documentElement.style.setProperty('--vscode-sideBar-background', '#252526')`);
     const caps = await cdp.evaluate(`(() => {
       const probe = document.createElement('span');
       probe.style.color = 'hsl(30, 45%, 55%)';
       document.body.appendChild(probe);
       const hueB = getComputedStyle(probe).color;
+      probe.style.color = 'hsl(210, 45%, 55%)';
+      const hueA = getComputedStyle(probe).color;
       probe.remove();
       const host = Array.from(document.querySelectorAll('#flow .member'))
         .find(m => (m.querySelector('.title') || {}).textContent === 'A task two — opens B');
       const head = host.querySelector('.m-head');
       const cs = getComputedStyle(head, '::after');
-      const headRect = head.getBoundingClientRect();
-      // Bulle de la ligne de tête vs bulle d'un membre ordinaire du PARENT :
-      // taille (canon de tête) et teinte (celle du parent, jamais celle de
-      // l'enfant) se prouvent l'une par l'autre, sans valeur écrite ici.
-      const headIco = getComputedStyle(head.querySelector('.conv .ico'), '::after');
+      const headIcoEl = head.querySelector('.conv .ico');
+      const headIco = getComputedStyle(headIcoEl, '::after');
+      // Le tracé qui remplace le pseudo : deux arcs au stroke + le fond opaque.
+      const svg = headIcoEl.querySelector('svg.split-ring');
+      const strokes = svg ? Array.from(svg.querySelectorAll('path[stroke-width]')).map((pth) => {
+        const st = getComputedStyle(pth);
+        const d = pth.getAttribute('d') || '';
+        const m = d.match(/^M (-?[\\d.]+) (-?[\\d.]+) A ([\\d.]+)/);
+        return { stroke: st.stroke, w: parseFloat(st.strokeWidth), r: m ? parseFloat(m[3]) : null, startX: m ? parseFloat(m[1]) : null };
+      }) : [];
+      const fills = svg ? svg.querySelectorAll('circle[fill], path[fill]:not([stroke-width])').length : 0;
+      // Comparaisons : un membre ordinaire du PARENT, et la maîtresse racine.
       const plainMember = Array.from(document.querySelectorAll('#flow .grp-body > .member'))
         .find((m) => m !== host && m.querySelector('.conv .ico'));
       const plainIco = plainMember ? getComputedStyle(plainMember.querySelector('.conv .ico'), '::after') : null;
-      // Un CADRE (border réelle) qui contiendrait une ligne de conversation est
-      // interdit dans tout le panneau : une capsule n'encadre qu'un EN-TÊTE.
+      const masterIcoEl = document.querySelector('.grp-master-head .conv .ico');
+      const masterIco = masterIcoEl ? getComputedStyle(masterIcoEl, '::after') : null;
       const framedConvs = Array.from(document.querySelectorAll('#flow .conv')).filter((c) => {
         for (let a = c.parentElement; a && a.id !== 'flow'; a = a.parentElement) {
           if (parseFloat(getComputedStyle(a).borderTopWidth) > 0) return true;
@@ -3096,33 +3225,41 @@ async function run() {
         return false;
       }).length;
       return {
-        hueB,
-        shadow: cs.boxShadow, bg: cs.backgroundColor,
-        radiusTL: cs.borderTopLeftRadius, radiusTR: cs.borderTopRightRadius,
-        radiusBL: cs.borderBottomLeftRadius, radiusBR: cs.borderBottomRightRadius,
-        left: parseFloat(cs.left), zIndex: cs.zIndex, pointer: cs.pointerEvents,
-        // 3 bords désormais (gauche/droite/bas), une couche box-shadow par
-        // bord — jamais l'ancien inset unique « 0 0 0 1.5px » qui peignait
-        // les 4 à la fois. Compter les « inset », pas les virgules : chaque
-        // rgb(r, g, b) en contient déjà deux.
-        threeSided: (cs.boxShadow.match(/inset/g) || []).length === 3 && cs.boxShadow.indexOf('1.5px') !== -1,
-        hostHasBorder: getComputedStyle(host).borderTopWidth,
-        headWidth: headRect.width,
+        hueA, hueB,
+        shadow: cs.boxShadow, hostHasBorder: getComputedStyle(host).borderTopWidth,
+        headPseudoDisplay: headIco.display,
+        hasSvg: !!svg, strokes, fills,
+        plainRing: plainIco ? { d: parseFloat(plainIco.width), w: parseFloat(plainIco.borderTopWidth), color: plainIco.borderTopColor } : null,
+        masterRing: masterIco ? { display: masterIco.display, d: parseFloat(masterIco.width), color: masterIco.borderTopColor } : null,
         framedConvs,
-        headRing: { d: parseFloat(headIco.width), w: parseFloat(headIco.borderTopWidth),
-                    color: headIco.borderTopColor, bg: headIco.backgroundColor },
-        plainRing: plainIco ? { d: parseFloat(plainIco.width), w: parseFloat(plainIco.borderTopWidth),
-                    color: plainIco.borderTopColor } : null,
         headWeight: getComputedStyle(head.querySelector('.conv .title')).fontWeight,
       };
     })()`);
+    const near = (a, b, tol) => a !== null && Math.abs(a - b) <= (tol || 0.3);
+    // Les deux arcs, reconnus par leur COULEUR (pas par leur ordre dans le DOM) :
+    // c'est le rôle qui décide du canon, la mesure doit suivre le même chemin.
+    const arcParent = (caps.strokes || []).find((k) => k.stroke === caps.hueA);
+    const arcChild = (caps.strokes || []).find((k) => k.stroke === caps.hueB);
     check('ligne de tête : AUCUN cadre (ni pseudo, ni bordure sur la ligne)',
       caps.shadow === 'none' && caps.hostHasBorder === '0px', JSON.stringify(caps));
-    check('… bulle au canon de tête : plus grosse et plus épaisse que celle d\'un membre ordinaire',
-      caps.plainRing !== null && caps.headRing.d > caps.plainRing.d + 2
-      && caps.headRing.w > caps.plainRing.w + 1, JSON.stringify(caps));
-    check('… mais RESTÉE à la couleur du parent (jamais celle de l\'enfant : la ligne appartient au parent)',
-      caps.headRing.color === caps.plainRing.color && caps.headRing.color !== caps.hueB, JSON.stringify(caps));
+    check('… son anneau mono-couleur s\'efface au profit du tracé scindé (2026-08-22)',
+      caps.headPseudoDisplay === 'none' && caps.hasSvg === true, JSON.stringify(caps));
+    check('… DEUX arcs : le lot parent au canon d\'un MEMBRE, le sous-lot au canon d\'une TÊTE',
+      !!arcParent && !!arcChild
+      && near(arcParent.w, 1.5) && near(arcParent.r, (18 - 1.5) / 2)
+      && near(arcChild.w, 4.25) && near(arcChild.r, (24 - 4.25) / 2), JSON.stringify(caps.strokes));
+    check('… ils se chevauchent sur l\'axe : chaque arc démarre du CÔTÉ de l\'autre',
+      !!arcParent && !!arcChild && arcParent.startX > 0 && arcChild.startX < 0, JSON.stringify(caps.strokes));
+    check('… le fond reste opaque et épouse la forme (disque plein + une moitié par rayon)',
+      caps.fills === 3, JSON.stringify(caps));
+    check('… un membre ordinaire garde son anneau mono-couleur, au canon 18px de SON lot',
+      caps.plainRing !== null && near(caps.plainRing.d, 18)
+      && caps.plainRing.w > 0 && caps.plainRing.w < 4.25
+      && caps.plainRing.color === caps.hueA, JSON.stringify(caps.plainRing));
+    check('… et la maîtresse RACINE, qui n\'a qu\'UN rôle, garde sa bulle d\'une seule couleur',
+      caps.masterRing !== null && caps.masterRing.display !== 'none'
+      && near(caps.masterRing.d, 24) && caps.masterRing.color === caps.hueA, JSON.stringify(caps.masterRing));
+    await cdp.evaluate(`document.documentElement.style.removeProperty('--vscode-sideBar-background')`);
     check('… titre en gras, comme une maîtresse', Number(caps.headWeight) >= 700, String(caps.headWeight));
     check('AUCUN élément à bordure ne contient une ligne de conversation (une capsule n\'encadre qu\'un en-tête)',
       caps.framedConvs === 0, JSON.stringify(caps));
@@ -3639,6 +3776,387 @@ async function run() {
     fs.mkdirSync(qDir, { recursive: true });
     qShots.forEach((b, i) => fs.writeFileSync(path.join(qDir, `quota-${['dark', 'light'][i]}.png`), b));
     console.log(`       captures : ${qDir}`);
+
+    console.log('\n24. Bandeau d\'onboarding (lot 2026-08-19) — NON masquable, deux manques séparés, disparaît de lui-même');
+    // Moyenne RGB d'une zone captée en écran RÉEL (Page.captureScreenshot),
+    // décodée dans la PAGE (createImageBitmap — la CSP interdit img.src data:
+    // mais pas une image construite en mémoire), même motif que la preuve par
+    // pixels de l'arc busy (§9bis) : ce qui suit prouve un encre PEINTE, pas
+    // seulement un getComputedStyle qui pourrait décrire une règle jamais
+    // appliquée (spécificité, cascade, media query oubliée…).
+    async function avgColorOfRect(rect) {
+      if (!rect || rect.width < 1 || rect.height < 1) return null;
+      const shot = (await cdp.send('Page.captureScreenshot', {
+        format: 'png', captureBeyondViewport: false,
+        clip: { x: rect.left, y: rect.top, width: rect.width, height: rect.height, scale: 1 },
+      })).data;
+      await cdp.evaluate(`(() => {
+        window.__avgColor = null;
+        const bin = atob('` + shot + `');
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        createImageBitmap(new Blob([bytes], { type: 'image/png' })).then(function (img) {
+          const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
+          const g = cv.getContext('2d'); g.drawImage(img, 0, 0);
+          const d = g.getImageData(0, 0, cv.width, cv.height).data;
+          let r = 0, gg = 0, b = 0, n = 0;
+          for (let i = 0; i < d.length; i += 4) { r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++; }
+          window.__avgColor = { r: r / n, g: gg / n, b: b / n };
+        });
+      })()`);
+      let out = null;
+      for (let i = 0; i < 30 && !out; i++) { await sleep(50); out = await cdp.evaluate(`window.__avgColor`); }
+      return out;
+    }
+    function rectOf(sel) {
+      return cdp.evaluate(`(() => { const n = document.querySelector('${sel}'); if (!n) return null;
+        const r = n.getBoundingClientRect(); return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }; })()`);
+    }
+    async function bannerProbe() {
+      return cdp.evaluate(`(() => {
+        const n = document.getElementById('hooksBanner');
+        const cs = getComputedStyle(n);
+        const txt = document.getElementById('hooksBannerText');
+        const btn = document.getElementById('hooksBannerInstall');
+        return {
+          shown: n.classList.contains('show'),
+          display: cs.display,
+          text: txt ? txt.textContent : null,
+          btnText: btn ? btn.textContent : null,
+          buttonCount: n.querySelectorAll('button').length,
+          hasXdel: !!n.querySelector('.xdel'),
+          hasAnyDismissTitle: Array.from(n.querySelectorAll('*')).some((e) => /dismiss|masquer|fermer/i.test(e.title || '')),
+        };
+      })()`);
+    }
+
+    console.log('       24a. état SANS champ setup (contrat non respecté par cette source) → bandeau masqué, jamais affiché sur une supposition');
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
+    let bp = await bannerProbe();
+    check('setup absent → bandeau masqué (display:none)', bp.shown === false && bp.display === 'none', JSON.stringify(bp));
+
+    console.log('       24b. hooks ET /handoffs manquants → bandeau visible, nomme ce qui est éteint');
+    const bothMissing = Object.assign({}, STATE, { setup: { hooksInstalled: false, handoffsInstalled: false } });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: bothMissing })}, '*')`);
+    await sleep(120);
+    bp = await bannerProbe();
+    check('bandeau visible', bp.shown === true && bp.display === 'block', JSON.stringify(bp));
+    check('le texte nomme ce qui est éteint (icônes/son/coût), pas un vague "something is missing"',
+      /icon/i.test(bp.text || '') && /sound/i.test(bp.text || '') && /cost/i.test(bp.text || ''), bp.text);
+    check('le bouton "Install hooks" est présent', bp.btnText === 'Install hooks', bp.btnText);
+    check('AUCUN mécanisme de fermeture : pas de .xdel, pas de titre "dismiss", UN SEUL bouton (Install)',
+      bp.hasXdel === false && bp.hasAnyDismissTitle === false && bp.buttonCount === 1, JSON.stringify(bp));
+    check('aucun × littéral dans le bandeau', !/×/.test((bp.text || '') + (bp.btnText || '')));
+
+    console.log('       24c. preuve par les PIXELS : la zone du bandeau est réellement peinte, pas juste "display:block" sans encre');
+    const bannerRect = await rectOf('#hooksBanner');
+    // Bande de contrôle : même largeur, prise dans #convBody juste AU-DESSUS du
+    // bandeau (le fond nu de la sidebar, avant toute peinture de bandeau).
+    const aboveRect = bannerRect && { left: bannerRect.left, top: Math.max(0, bannerRect.top - 10), width: bannerRect.width, height: 6 };
+    const insideRect = bannerRect && { left: bannerRect.left + 4, top: bannerRect.top + 3, width: Math.max(1, bannerRect.width - 8), height: 4 };
+    // Séquentiel, jamais Promise.all : les deux appels décodent leur image via
+    // le MÊME global de page (window.__avgColor) — en parallèle, le second
+    // écrase `null` par-dessus le résultat du premier avant qu'il soit lu, une
+    // course qui donnait deux fois (255,255,255) au premier essai de ce banc.
+    const aboveColor = await avgColorOfRect(aboveRect);
+    const insideColor = await avgColorOfRect(insideRect);
+    const delta = aboveColor && insideColor
+      ? Math.abs(aboveColor.r - insideColor.r) + Math.abs(aboveColor.g - insideColor.g) + Math.abs(aboveColor.b - insideColor.b)
+      : -1;
+    check('la couleur moyenne À L\'INTÉRIEUR du bandeau diffère nettement du fond nu juste au-dessus (delta RVB cumulé > 20)',
+      delta > 20, JSON.stringify({ aboveColor, insideColor, delta }));
+
+    console.log('       24d. SEULS les hooks manquent (poste avec une install antérieure à /handoffs, ou fichier supprimé à la main) → message DIFFÉRENT, séparé');
+    const onlyHandoffsMissing = Object.assign({}, STATE, { setup: { hooksInstalled: true, handoffsInstalled: false } });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: onlyHandoffsMissing })}, '*')`);
+    await sleep(120);
+    bp = await bannerProbe();
+    check('bandeau toujours visible (un seul des deux suffit)', bp.shown === true, JSON.stringify(bp));
+    check('le texte nomme /handoffs, PAS "icons blank / sounds never play" (message du cas hooks manquants)',
+      /handoffs/i.test(bp.text || '') && !/icon/i.test(bp.text || ''), bp.text);
+
+    console.log('       24e. les deux sont installés → le bandeau disparaît DE LUI-MÊME (test principal de la maquette)');
+    const bothInstalled = Object.assign({}, STATE, { setup: { hooksInstalled: true, handoffsInstalled: true } });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: bothInstalled })}, '*')`);
+    await sleep(120);
+    bp = await bannerProbe();
+    check('bandeau remasqué automatiquement, sans action de l\'user', bp.shown === false && bp.display === 'none', JSON.stringify(bp));
+
+    console.log('       24f. clic du bouton → poste installHooksNow (même chemin que la commande Palette)');
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: bothMissing })}, '*')`);
+    await sleep(120);
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.getElementById('hooksBannerInstall').click()`);
+    await sleep(50);
+    const sentInstall = await cdp.evaluate(`window.__sent`);
+    check('un SEUL message installHooksNow posté, rien d\'autre', Array.isArray(sentInstall) && sentInstall.length === 1 && sentInstall[0].type === 'installHooksNow', JSON.stringify(sentInstall));
+
+    console.log('       24g. non-régression du formulaire « New conversation » après le retrait de l\'astuce CLAUDE.md');
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
+    const tipResidue = await cdp.evaluate(`({
+      tipRestoreNode: document.getElementById('newConvTipRestore'),
+      tipRestoreClass: document.querySelectorAll('.tip-restore').length,
+      tipText: document.body.textContent.indexOf('copy an instruction for your CLAUDE.md'),
+    })`);
+    check('aucune trace DOM de l\'ancienne astuce (#newConvTipRestore, .tip-restore, son texte)',
+      tipResidue.tipRestoreNode === null && tipResidue.tipRestoreClass === 0 && tipResidue.tipText === -1, JSON.stringify(tipResidue));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.getElementById('newConvHead').click()`);
+    await sleep(50);
+    const sentCollapse = await cdp.evaluate(`window.__sent`);
+    check('l\'en-tête « New conversation » replie toujours la section (le guard retiré ne l\'a pas cassé)',
+      Array.isArray(sentCollapse) && sentCollapse.length === 1 && sentCollapse[0].type === 'toggleCollapse' && sentCollapse[0].section === 'newConversation',
+      JSON.stringify(sentCollapse));
+
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
+
+    console.log('\n25. Heartbeat de fraîcheur — un panneau privé d\'états le dit et fige ses spinners (incident 2026-08-21)');
+    // Page rechargée avec des délais compressés (tick 150 ms, pull 400 ms,
+    // gel 900 ms) : ce script d'injection s'exécute APRÈS celui du début de
+    // banc (ordre d'ajout), il écrase donc la neutralisation. La mécanique
+    // testée est le vrai code du webview, seules les constantes de temps
+    // changent — même compromis que QUOTABAR_FREEZE_DETECT_MS pour tabs.js.
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `window.QUOTABAR_STALE_TUNING = { tickMs: 150, pullAfterMs: 400, frozenAfterMs: 900 };`,
+    });
+    await cdp.send('Page.navigate', { url: 'file:///' + file.replace(/\\/g, '/') });
+    await sleep(600);
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
+    check('état frais : aucune dégradation affichée, spinner en marche',
+      await cdp.evaluate(`(() => {
+        const ps = getComputedStyle(document.querySelector('.ico-busy'), '::before').animationPlayState;
+        return !document.body.classList.contains('data-stale')
+          && !document.getElementById('dataStaleNotice').classList.contains('show')
+          && ps.indexOf('paused') === -1;
+      })()`) === true);
+    await cdp.evaluate(`window.__sent = []`);
+    // t+700 ms sans état : au-delà de pullAfterMs (400) mais sous frozenAfterMs
+    // (900) — le webview re-demande l'état, sans accuser personne à l'écran.
+    await sleep(700);
+    const pulled = await cdp.evaluate(`(window.__sent || []).filter((m) => m && m.type === 'ready').length`);
+    check('silence > pullAfterMs : le webview re-demande l\'état de lui-même (ready ≥ 1)', pulled >= 1, `ready envoyés: ${pulled}`);
+    check('mais pas encore de bandeau : le gel ne s\'affiche qu\'après frozenAfterMs',
+      await cdp.evaluate(`document.body.classList.contains('data-stale')`) === false);
+    // t+1500 ms sans état : les pulls sont restés sans réponse — dégradation
+    // VISIBLE, et plus une seule animation ne prétend que « ça travaille ».
+    await sleep(800);
+    check('silence > frozenAfterMs : bandeau affiché + classe data-stale posée',
+      await cdp.evaluate(`document.body.classList.contains('data-stale')
+        && document.getElementById('dataStaleNotice').classList.contains('show')`) === true);
+    check('toutes les animations sont en pause (le spinner ne ment plus)',
+      await cdp.evaluate(`getComputedStyle(document.querySelector('.ico-busy'), '::before').animationPlayState.indexOf('paused')`) !== -1);
+    // Un état arrive : preuve fraîche, tout se rétablit immédiatement.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(120);
+    check('un état reçu efface tout : bandeau retiré, spinner relancé',
+      await cdp.evaluate(`(() => {
+        const ps = getComputedStyle(document.querySelector('.ico-busy'), '::before').animationPlayState;
+        return !document.body.classList.contains('data-stale')
+          && !document.getElementById('dataStaleNotice').classList.contains('show')
+          && ps.indexOf('paused') === -1;
+      })()`) === true);
+
+    console.log('\n26. Marque « à relire » (lot 2, plan marque_a_relire 2026-08-22, variante B) — zéro chevauchement marque/geste/⌂/coût, au repos ET au survol, ligne marquée et non marquée');
+    // Page rechargée, tuning neutralisé de nouveau (le script §25 gagne sinon
+    // sur toute nouvelle navigation, cf. son commentaire) : ce banc part d'un
+    // DOM frais, sans résidu d'une ligne c1/c2 déjà passée par un groupe (§19).
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
+    });
+    await cdp.send('Page.navigate', { url: 'file:///' + file.replace(/\\/g, '/') });
+    await sleep(600);
+
+    const pinState = JSON.parse(JSON.stringify(STATE));
+    pinState.conversations[0].pinned = true;
+    pinState.conversations[0].cost = { total: 0.42, input: 0.02, cacheRead: 0.16, cacheWrite: 0.06, output: 0.16, tools: 0, messages: 12, lastTurn: 0.1, turns: 3 };
+    pinState.conversations[1].pinned = false;
+    pinState.conversations[1].cost = { total: 1.1, input: 0.05, cacheRead: 0.4, cacheWrite: 0.15, output: 0.4, tools: 0, messages: 8, lastTurn: 0.6, turns: 5 };
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: pinState })}, '*')`);
+    await sleep(150);
+
+    const PIN_PROBE = `(() => {
+      const rows = Array.from(document.querySelectorAll('#flow > .conv'));
+      const g = (row, sel) => {
+        const n = row.querySelector(sel);
+        if (!n) return null;
+        const cs = getComputedStyle(n);
+        const r = n.getBoundingClientRect();
+        return { visible: cs.display !== 'none' && parseFloat(cs.opacity) > 0.02,
+                 rect: { l: +r.left.toFixed(2), r: +r.right.toFixed(2), t: +r.top.toFixed(2), b: +r.bottom.toFixed(2) } };
+      };
+      const at = (i) => {
+        const row = rows[i]; if (!row) return null;
+        const ctxBar = row.querySelector('.bar-ctx');
+        return {
+          pinned: row.classList.contains('mk-pinned'),
+          titleLeft: +row.querySelector('.title').getBoundingClientRect().left.toFixed(2),
+          ctxBarLeft: ctxBar ? +ctxBar.getBoundingClientRect().left.toFixed(2) : null,
+          mkPin: g(row, '.mk-pin'), mkSet: g(row, '.mk-set'), linkMaster: g(row, '.link-master'), cost: g(row, '.cost'),
+          rowRect: (() => { const r = row.getBoundingClientRect();
+            return { l: +r.left.toFixed(2), t: +r.top.toFixed(2), r: +r.right.toFixed(2), b: +r.bottom.toFixed(2) }; })(),
+        };
+      };
+      return { r0: at(0), r1: at(1) };
+    })()`;
+
+    // Rectangles qui se touchent au pixel près (bord commun) ne comptent pas
+    // comme un chevauchement — seule une aire de recouvrement réelle compte.
+    function overlaps(a, b) {
+      const eps = 0.5;
+      return a.rect.l < b.rect.r - eps && b.rect.l < a.rect.r - eps
+        && a.rect.t < b.rect.b - eps && b.rect.t < a.rect.b - eps;
+    }
+    function checkNoOverlap(label, probe, expectedVisible) {
+      const items = Object.entries(probe).filter(([k, v]) => ['mkPin', 'mkSet', 'linkMaster', 'cost'].includes(k) && v && v.visible);
+      const names = items.map(([n]) => n).sort();
+      check(`${label} : exactement les gestes attendus sont visibles (${expectedVisible.join(', ')})`,
+        names.length === expectedVisible.length && expectedVisible.every((n) => names.includes(n)),
+        `visibles: ${names.join(', ') || '(aucun)'}`);
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          const [na, a] = items[i], [nb, b] = items[j];
+          check(`${label} : ${na} et ${nb} ne se chevauchent pas`, !overlaps(a, b),
+            JSON.stringify({ [na]: a.rect, [nb]: b.rect }));
+        }
+      }
+    }
+
+    console.log('       26a. au repos (souris hors de toute ligne) : la marque posée (si marquée) et le coût sont visibles, la pose et le ⌂ restent invisibles');
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, buttons: 0 });
+    await sleep(150);
+    const rest = await cdp.evaluate(PIN_PROBE);
+    check('ligne 0 (marquée) : classe .mk-pinned posée', rest.r0.pinned === true);
+    check('ligne 1 (non marquée) : classe .mk-pinned absente', rest.r1.pinned === false);
+    checkNoOverlap('repos · marquée', rest.r0, ['mkPin', 'cost']);
+    checkNoOverlap('repos · non marquée', rest.r1, ['cost']);
+    check('le titre de la ligne marquée est décalé par la marque (décision 2, ~15px assumés, jamais réservés sur les autres lignes)',
+      rest.r0.titleLeft - rest.r1.titleLeft > 8 && rest.r0.titleLeft - rest.r1.titleLeft < 30,
+      `titleLeft r0=${rest.r0.titleLeft} r1=${rest.r1.titleLeft}`);
+    check('la barre de contexte des deux lignes démarre au MÊME x (la marque ne rogne rien hors du title-row, invariant §16)',
+      Math.abs(rest.r0.ctxBarLeft - rest.r1.ctxBarLeft) < 0.5, `${rest.r0.ctxBarLeft} vs ${rest.r1.ctxBarLeft}`);
+
+    console.log('       26b. au survol de la ligne MARQUÉE : la pose et le ⌂ apparaissent, le coût cède la place, la marque posée reste');
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: (rest.r0.rowRect.l + rest.r0.rowRect.r) / 2, y: (rest.r0.rowRect.t + rest.r0.rowRect.b) / 2, buttons: 0,
+    });
+    await sleep(180);
+    const hoverPinned = await cdp.evaluate(PIN_PROBE);
+    checkNoOverlap('survol · marquée', hoverPinned.r0, ['linkMaster', 'mkPin', 'mkSet']);
+
+    console.log('       26c. au survol de la ligne NON marquée : la pose et le ⌂ apparaissent, le coût cède la place, aucune marque posée');
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, buttons: 0 });
+    await sleep(120);
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: (rest.r1.rowRect.l + rest.r1.rowRect.r) / 2, y: (rest.r1.rowRect.t + rest.r1.rowRect.b) / 2, buttons: 0,
+    });
+    await sleep(180);
+    const hoverUnpinned = await cdp.evaluate(PIN_PROBE);
+    checkNoOverlap('survol · non marquée', hoverUnpinned.r1, ['linkMaster', 'mkSet']);
+
+    console.log('       26d. le clic pose/retire — un seul message togglePinConv, avec le bon id, jamais autre chose');
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelectorAll('#flow > .conv')[1].querySelector('.mk-set').click()`);
+    await sleep(50);
+    const sentSet = await cdp.evaluate(`window.__sent`);
+    check('clic sur la pose (.mk-set) de la ligne non marquée → togglePinConv id=c2',
+      Array.isArray(sentSet) && sentSet.length === 1 && sentSet[0].type === 'togglePinConv' && sentSet[0].id === 'c2',
+      JSON.stringify(sentSet));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelectorAll('#flow > .conv')[0].querySelector('.mk-pin').click()`);
+    await sleep(50);
+    const sentPin = await cdp.evaluate(`window.__sent`);
+    check('clic sur la marque posée (.mk-pin) de la ligne marquée → togglePinConv id=c1, jamais focusConv',
+      Array.isArray(sentPin) && sentPin.length === 1 && sentPin[0].type === 'togglePinConv' && sentPin[0].id === 'c1',
+      JSON.stringify(sentPin));
+
+    console.log('\n27. Marque « à relire » (lot 3) — une ligne dont l\'onglet est PROUVÉ fermé : barrée, cliquable pour rouvrir, et jamais perdue entre son lot et la liste plate');
+    // Ce que ce banc verrouille : la ligne que seule la marque retient dit à
+    // l'écran ce que le clic fera. Un titre non barré + un clic qui cherche un
+    // onglet inexistant, c'était le no-op silencieux d'avant ce lot.
+    const goneState = JSON.parse(JSON.stringify(STATE));
+    goneState.conversations = [
+      // c1 : marquée, onglet PROUVÉ fermé (tabGone), état terminé.
+      { id: 'c1', title: 'Marquee onglet ferme', model: 'Opus 4.8', ctx: { pct: 34 }, state: 'done', acked: true, active: false, pinned: true, tabOpen: false, tabGone: true },
+      // c2 : ligne ordinaire, onglet ouvert — témoin de non-régression du clic.
+      { id: 'c2', title: 'Ligne ordinaire', model: 'Sonnet 5', ctx: { pct: 20 }, state: 'done', acked: true, active: false, tabOpen: true },
+      // c3 : marquée, INTERROMPUE, onglet fermé — l'ancien barré ne visait que
+      // les convs `done` : le fait « son onglet n'est plus là » ne dépend pas
+      // de l'état.
+      { id: 'c3', title: 'Marquee interrompue fermee', model: 'Haiku 4.5', ctx: { pct: 8 }, state: 'interrupted', acked: true, active: false, pinned: true, tabOpen: false, tabGone: true },
+    ];
+    goneState.groups = [];
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: goneState })}, '*')`);
+    await sleep(180);
+    const goneProbe = await cdp.evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('#flow > .conv'));
+      return rows.map((r) => ({
+        title: r.querySelector('.title').textContent,
+        closed: r.querySelector('.title').classList.contains('closed'),
+        pinned: r.classList.contains('mk-pinned'),
+        tip: r.title,
+      }));
+    })()`);
+    check('les trois lignes sont rendues (aucune n\'est perdue)', goneProbe.length === 3, JSON.stringify(goneProbe.map((r) => r.title)));
+    check('la ligne marquée · onglet fermé est BARRÉE', goneProbe[0].closed === true && goneProbe[0].pinned === true, JSON.stringify(goneProbe[0]));
+    check('la ligne ordinaire (onglet ouvert, terminée) n\'est PAS barrée', goneProbe[1].closed === false, JSON.stringify(goneProbe[1]));
+    check('la marquée INTERROMPUE dont l\'onglet est parti est barrée aussi (le fait ne dépend pas de l\'état)',
+      goneProbe[2].closed === true, JSON.stringify(goneProbe[2]));
+    check('l\'infobulle annonce ce que le clic fera', /reopen|rouvrir/i.test(goneProbe[0].tip), goneProbe[0].tip);
+
+    console.log('       27a. le clic : rouvrir sur une ligne fermée, focus sur une ligne ordinaire');
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelectorAll('#flow > .conv')[0].click()`);
+    await sleep(50);
+    const sentReopen = await cdp.evaluate(`window.__sent`);
+    check('clic sur la ligne marquée · onglet fermé → reopenConv id=c1, jamais focusConv',
+      Array.isArray(sentReopen) && sentReopen.length === 1 && sentReopen[0].type === 'reopenConv' && sentReopen[0].id === 'c1',
+      JSON.stringify(sentReopen));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelectorAll('#flow > .conv')[1].click()`);
+    await sleep(50);
+    const sentFocus = await cdp.evaluate(`window.__sent`);
+    check('clic sur la ligne ordinaire → focusConv (non-régression)',
+      Array.isArray(sentFocus) && sentFocus.length === 1 && sentFocus[0].type === 'focusConv' && sentFocus[0].id === 'c2',
+      JSON.stringify(sentFocus));
+
+    console.log('       27b. membre de lot terminé · onglet fermé et MARQUÉ : sa vague le retire, la liste plate le récupère — jamais les deux vues à la fois');
+    const orphan = JSON.parse(JSON.stringify(goneState));
+    orphan.conversations = [
+      { id: 'c1', title: 'Membre fini ferme marque', model: 'Opus 4.8', ctx: { pct: 34 }, state: 'done', acked: true, active: false, pinned: true, tabOpen: false, tabGone: true, groupId: 'g1' },
+      { id: 'c2', title: 'Membre encore ouvert', model: 'Sonnet 5', ctx: { pct: 20 }, state: 'busy', acked: true, active: false, tabOpen: true, groupId: 'g1' },
+    ];
+    orphan.groups = [{
+      id: 'g1', name: 'Lot en cours', hue: 210, collapsed: false,
+      launchedWave: 1, nextWave: 2, waveNotice: null, done: false,
+      members: [
+        // done-closed : renderGroups le retire de sa vague (filtre existant).
+        { key: 'm1', prompt: 'Membre fini ferme marque', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'c1', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '✓ done · closed', hint: '' },
+        { key: 'm2', prompt: 'Membre encore ouvert', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'c2', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
+      ],
+    }];
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: orphan })}, '*')`);
+    await sleep(200);
+    const orphanProbe = await cdp.evaluate(`(() => {
+      const nodes = Array.from(document.querySelectorAll('#flow .conv'));
+      const find = (id) => nodes.filter((n) => n.querySelector('.title') && n.querySelector('.title').textContent.indexOf(id) === 0);
+      return {
+        marked: find('Membre fini ferme marque').length,
+        markedInGroup: find('Membre fini ferme marque').filter((n) => !!n.closest('.grp')).length,
+        markedFlat: find('Membre fini ferme marque').filter((n) => !n.closest('.grp')).length,
+        open: find('Membre encore ouvert').length,
+        openInGroup: find('Membre encore ouvert').filter((n) => !!n.closest('.grp')).length,
+      };
+    })()`);
+    check('le membre marqué, terminé et fermé est rendu UNE fois — et une seule (invariant : un nœud, un endroit)',
+      orphanProbe.marked === 1, JSON.stringify(orphanProbe));
+    check('…dans la LISTE PLATE, puisque sa vague ne le rend plus (sinon il disparaissait des deux vues)',
+      orphanProbe.markedFlat === 1 && orphanProbe.markedInGroup === 0, JSON.stringify(orphanProbe));
+    check('le membre encore ouvert, lui, reste DANS son lot (aucun effet de bord)',
+      orphanProbe.open === 1 && orphanProbe.openInGroup === 1, JSON.stringify(orphanProbe));
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(120);

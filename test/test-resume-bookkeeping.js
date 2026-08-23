@@ -55,6 +55,35 @@ console.log('\n1. lastActivityTs : seuls les messages conversationnels datés co
   check('fichier absent → null', lastActivityTs(path.join(SANDBOX, 'absent.jsonl')) === null);
 }
 
+console.log('\n1bis. Une <task-notification> stopped livrée au respawn n\'est pas une activité (incident 2026-08-22)');
+{
+  // Forme RÉELLE relevée sur le transcript témoin f04f6836 (2026-08-22 23:12:43,
+  // spinner post-reload n°3) : content en STRING brute, pas en blocs, livrée
+  // 77 s avant le screenshot de l'user — aucun assistant ne suit jamais.
+  const stoppedNotif = (ms) => ({
+    type: 'user', timestamp: iso(ms),
+    message: { role: 'user', content: '<task-notification>\n<task-id>bk000demo</task-id>\n<tool-use-id>toolu_demo</tool-use-id>\n<status>stopped</status>\n<summary>No completion record was found for this background shell command from the previous session.</summary>\n</task-notification>' },
+  });
+  const p = write('notif-stopped.jsonl', [assistant('réponse finale', T0), stoppedNotif(NOW - 77 * 1000)]);
+  check('notification stopped livrée après le Stop → l\'activité reste le Stop', lastActivityTs(p) === T0, String(lastActivityTs(p)));
+  const entry = { state: 'done', since: T0 };
+  const verdict = effectiveState(entry, NOW, NOW, true, lastActivityTs(p));
+  check('done + notification stopped fraîche → reste done (plus de spinner post-reload)', verdict === 'done', verdict);
+
+  // Le jumeau completed annonce une VRAIE ré-invocation : il reste une
+  // activité — l'ignorer rouvrirait le faux-done de l'incident vagues.
+  const completedNotif = { type: 'user', timestamp: iso(NOW - 3000), message: { role: 'user', content: '<task-notification>\n<task-id>bk000demo</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>' } };
+  const p2 = write('notif-completed.jsonl', [assistant('réponse finale', T0), completedNotif]);
+  check('notification completed → compte comme activité (la reprise réelle reste busy)',
+    effectiveState({ state: 'done', since: T0 }, NOW, NOW, true, lastActivityTs(p2)) === 'busy');
+
+  // Une CITATION de la balise au fil d'un vrai message user ne doit rien
+  // changer non plus dans l'autre sens : message non ancré = vraie activité.
+  const citing = { type: 'user', timestamp: iso(NOW - 3000), message: { role: 'user', content: 'regarde, le harnais écrit <task-notification>…<status>stopped</status> dans le transcript' } };
+  const p3 = write('notif-cite.jsonl', [assistant('réponse finale', T0), citing]);
+  check('un vrai message user qui CITE la balise reste une activité', lastActivityTs(p3) === NOW - 3000, String(lastActivityTs(p3)));
+}
+
 console.log('\n2. effectiveState : le write de respawn ne relance plus le spinner');
 {
   const entry = { state: 'done', since: T0 };

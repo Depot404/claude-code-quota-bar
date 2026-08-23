@@ -66,7 +66,7 @@ const HIDDEN_MEMBER_STATUS = 'done-closed';
 //   childrenOf  : { [groupId]: [groupId, …] } — l'inverse, dans l'ordre des
 //                 groupes reçus (deux sous-lots sous la même ligne se suivent
 //                 dans l'ordre du store, jamais dans un ordre inventé ici).
-//   masterRole  : { [groupId]: {role, blocksDone} } pour les seuls groupes qui
+//   masterRole  : { [groupId]: {role, latest} } pour les seuls groupes qui
 //                 DÉSIGNENT une maîtresse — cf. section 5 ci-dessous.
 function computeNesting(groups) {
   const list = (Array.isArray(groups) ? groups : []).filter((g) => g && g.id);
@@ -152,9 +152,9 @@ function computeNesting(groups) {
   // garde une capsule VIDE. Et tant qu'elle vit — elle pilote le lot suivant —
   // sa présence empêche les DEUX groupes de se retirer une fois finis.
   //
-  // Règle : le claimant le plus RÉCEMMENT lié garde tout (la ligne de tête, ou
-  // son repli dégradé quand la conv est hors de la fenêtre du panneau, et le
-  // blocage du « groupe terminé ») ; les plus anciens la CÈDENT — ils se
+  // Règle : le claimant le plus RÉCEMMENT lié garde la ligne de tête (ou son
+  // repli dégradé quand la conv est hors de la fenêtre du panneau) ; les plus
+  // anciens la CÈDENT — ils se
   // rendent alors comme un lot sans maîtresse (branche existante de panel.js,
   // aucun rendu neuf) et ne dépendent plus que de leurs propres membres, si
   // bien qu'un vieux lot tout terminé s'efface enfin de lui-même.
@@ -170,8 +170,14 @@ function computeNesting(groups) {
   //   • EXCEPTION filiation : si la conv est rendue comme MEMBRE d'un autre
   //     lot, aucun claimant ne rend de tête propre — ils nestent tous sous
   //     cette ligne (`childrenOf` est un tableau, le plan filiation le prévoit
-  //     déjà). Le rôle vaut alors 'nested', et seul le blocage du « terminé »
-  //     reste réservé au plus récent.
+  //     déjà). Le rôle vaut alors 'nested', et `latest` reste la seule marque
+  //     du claimant le plus récent.
+  //
+  // NB (2026-08-18) : ce départage ne porte plus QUE sur le rendu. Le retrait
+  // d'un lot terminé, lui, ne regarde plus la maîtresse du tout — il ne dépend
+  // que de ses membres (group-done.js). D'où le nom `latest` : ce booléen ne
+  // bloque plus rien, il dit seulement « c'est ce lot-ci qui l'a liée en
+  // dernier ».
   const claims = new Map();               // convId → [{ id, at, i }]
   list.forEach((g, i) => {
     const m = g.master;
@@ -199,11 +205,11 @@ function computeNesting(groups) {
     }
     if (!g.master) continue;
     // Maîtresse sans convId : rien à départager (aucun autre lot ne peut
-    // revendiquer « rien ») — comportement d'avant, elle garde tout.
-    const blocksDone = !g.master.convId || latest.has(g.id);
+    // revendiquer « rien ») — elle garde la tête.
+    const isLatest = !g.master.convId || latest.has(g.id);
     masterRole[g.id] = {
-      role: p ? 'nested' : (blocksDone ? 'host' : 'ceded'),
-      blocksDone,
+      role: p ? 'nested' : (isLatest ? 'host' : 'ceded'),
+      latest: isLatest,
     };
   }
   return { nestedUnder, childrenOf, masterRole };

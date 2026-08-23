@@ -241,7 +241,13 @@ async function run() {
   check('perte de focus → aucun recompute inutile', changes === changesBefore);
 
   console.log('\n7. Acte vs API — la preuve la plus fraîche gagne (2026-08-17)');
-  // L'API dit encore « Conv B » (rien n'a bougé côté vscode.window.tabGroups) :
+  // Retour de focus d'abord : ce paragraphe teste l'ORDRE acte/événement, pas
+  // la parade anti-fantôme (§8quater) — ses événements doivent donc arriver
+  // fenêtre focusée, comme dans l'incident d'origine (clic panneau, fenêtre
+  // au premier plan). Hors focus, un événement divergent serait retenu en
+  // quarantaine, et c'est le §8quater qui prouve CE comportement-là.
+  onDidChangeWindowState({ focused: true });
+  // L'API dit encore « Conv A » (rien n'a bougé côté vscode.window.tabGroups) :
   // c'est exactement la signature d'une activation qu'on vient de commander
   // (focusTab() a réussi) mais dont l'événement n'est pas encore arrivé — ou
   // n'arrivera jamais, fenêtre gelée.
@@ -277,6 +283,183 @@ async function run() {
   check('un événement d\'onglet reçu → frozen:false (le canal a reparlé)',
     tracker.getTabs().frozen === false);
   check('la levée du gel pousse aussi (bandeau retiré)', changes > changesBefore);
+
+  console.log('\n8bis. Fraîcheur au retour d\'alt-tab (lot 1 du plan appariement, 2026-08-21)');
+  // Le symptôme : « ces bugs arrivent très fréquemment après une bascule alt+tab ».
+  // Le recompute au retour de focus existe depuis le 2026-08-15 (§6 ci-dessus) —
+  // ce qui restait faux, c'est ce que getTabs() RÉPONDAIT à cet instant, parce
+  // qu'un `actReport` que rien ne pouvait supplanter écrasait la lecture fraîche.
+
+  // (a) Activation d'un onglet DÉJÀ actif : c'est le chemin qui fabriquait
+  // l'acte éternel — aucun événement d'onglet ne peut jamais suivre (cf. le
+  // commentaire de `focusConv`, extension.js). Aucun acte ne doit être posé.
+  const tabP = claude('Conv P déjà active');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabP, tabs: [tabP] }];
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  tracker.reportActivation('Conv P déjà active');          // == localActiveLabel()
+  check('acte sur un onglet DÉJÀ actif → aucun gel armé (rien à confirmer)',
+    tracker.getTabs().frozen === false);
+  check('acte sur un onglet DÉJÀ actif → la lecture fraîche reste la source',
+    tracker.getTabs().source === 'fresh', String(tracker.getTabs().source));
+
+  // L'onglet actif change ensuite SANS qu'aucun événement ne tire (le chemin du
+  // §6, celui qu'aucune API ne garantit exhaustif). Avant le lot 1, l'acte posé
+  // ci-dessus gagnait ici et pour toujours.
+  const tabQ = claude('Conv Q — sans événement');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabQ, tabs: [tabP, tabQ] }];
+  changesBefore = changes;
+  onDidChangeWindowState({ focused: false });
+  onDidChangeWindowState({ focused: true });               // alt-tab : retour dans la fenêtre
+  check('retour d\'alt-tab après un acte non divergent → lecture fraîche, pas l\'acte',
+    tracker.getTabs().activeLabel === 'Conv Q — sans événement', String(tracker.getTabs().activeLabel));
+  check('… et le panneau est bien redemandé au retour de focus', changes > changesBefore);
+  check('windowFocused/sinceFocusMs publiés pour le journal du lot 0',
+    tracker.getTabs().windowFocused === true && tracker.getTabs().sinceFocusMs >= 0,
+    JSON.stringify([tracker.getTabs().windowFocused, tracker.getTabs().sinceFocusMs]));
+
+  // (b) La contrainte à NE PAS casser (incident 2026-08-17) : sur une fenêtre
+  // dont le canal est mort, l'acte reste roi — la lecture fraîche relit le gel.
+  tracker.reportActivation('Conv R — fenêtre gelée');       // diverge de tabQ
+  await sleep(250);                                        // > FREEZE_DETECT_MS
+  check('fenêtre gelée : le gel est bien détecté', tracker.getTabs().frozen === true);
+  const tabS = claude('Conv S — copie miroir gelée');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabS, tabs: [tabQ, tabS] }];  // l'API ment
+  onDidChangeWindowState({ focused: false });
+  onDidChangeWindowState({ focused: true });               // même alt-tab qu'en (a)
+  check('retour d\'alt-tab sur fenêtre GELÉE → l\'acte reste la seule vérité',
+    tracker.getTabs().activeLabel === 'Conv R — fenêtre gelée', String(tracker.getTabs().activeLabel));
+  check('… et il se déclare comme tel au journal (source: act-report)',
+    tracker.getTabs().source === 'act-report', String(tracker.getTabs().source));
+
+  // Le canal reparle : l'acte cède, comme au §8.
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('canal réveillé après le gel → la lecture fraîche reprend la main',
+    tracker.getTabs().activeLabel === 'Conv S — copie miroir gelée' && tracker.getTabs().source === 'fresh',
+    String(tracker.getTabs().activeLabel) + '/' + String(tracker.getTabs().source));
+
+  console.log('\n8ter. activeIndex — position de l\'onglet actif (lot 2 du plan d\'appariement, 2026-08-21)');
+  // Contrairement au libellé, l'index se lit par IDENTITÉ de l'onglet, pas par
+  // texte — c'est ce qui permet à state.js de départager deux onglets au
+  // libellé identique. Deux groupes, plusieurs onglets Claude : l'index doit
+  // être la position dans la liste APLATIE (groupes puis onglets, dans
+  // l'ordre), pas dans le seul groupe actif.
+  const twinLabel = 'Deux onglets au même nom';
+  const tabX = claude(twinLabel);
+  const tabZ = claude(twinLabel);
+  const otherFile = other('notes.md');
+  GROUPS = [
+    { viewColumn: 1, isActive: false, activeTab: null, tabs: [otherFile, tabX] },
+    { viewColumn: 2, isActive: true, activeTab: tabZ, tabs: [tabZ] },
+  ];
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('deux onglets au même libellé, le second (groupe 2) est actif → activeIndex = 1 (aplati : otherFile ignoré, tabX=0, tabZ=1)',
+    tracker.getTabs().activeIndex === 1, String(tracker.getTabs().activeIndex));
+  check('… le libellé seul, lui, ne peut pas les distinguer',
+    tracker.getTabs().activeLabel === twinLabel);
+
+  // Bascule vers le PREMIER des deux (même libellé) : l'index change bien,
+  // contrairement à ce qu'un matching par texte donnerait (indiscernable).
+  GROUPS = [
+    { viewColumn: 1, isActive: true, activeTab: tabX, tabs: [otherFile, tabX] },
+    { viewColumn: 2, isActive: false, activeTab: null, tabs: [tabZ] },
+  ];
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('bascule sur le PREMIER onglet du même libellé → activeIndex = 0',
+    tracker.getTabs().activeIndex === 0, String(tracker.getTabs().activeIndex));
+
+  // Repli (onglet fichier actif) : l'index mémorisé suit le même souvenir que
+  // le libellé — basculer sur un fichier ne doit éteindre ni l'un ni l'autre.
+  GROUPS = [
+    { viewColumn: 1, isActive: true, activeTab: otherFile, tabs: [otherFile, tabX] },
+    { viewColumn: 2, isActive: false, activeTab: null, tabs: [tabZ] },
+  ];
+  onDidChangeTabs({ opened: [], closed: [], changed: [otherFile] });
+  check('onglet fichier sélectionné → activeIndex reste celui du dernier onglet Claude (repli, comme activeLabel)',
+    tracker.getTabs().activeIndex === 0, String(tracker.getTabs().activeIndex));
+  check('source déclarée "remembered" (cohérent avec le repli)',
+    tracker.getTabs().source === 'remembered', String(tracker.getTabs().source));
+
+  // Acte mémorisé (fenêtre gelée, §8 plus haut) : PAS d'index — reportActivation
+  // ne connaît que le libellé, et le calculer ici relirait la même copie
+  // miroir gelée sans valeur ajoutée. state.js retombe alors sur le matching
+  // par libellé d'avant ce lot (comportement inchangé sur ce chemin rare).
+  tracker.reportActivation('Acte sans position connue');
+  check('acte mémorisé → activeIndex null (pas de position fiable sur canal gelé)',
+    tracker.getTabs().activeIndex === null, String(tracker.getTabs().activeIndex));
+  check('… mais le libellé, lui, est bien porté (comportement du lot 1 intact)',
+    tracker.getTabs().activeLabel === 'Acte sans position connue');
+
+  console.log('\n8quater. Activation fantôme — une bascule hors focus n\'est jamais un choix (2026-08-23)');
+  // L'incident prouvé au journal : une conversation FINIT de répondre pendant
+  // que la fenêtre n'a pas le focus, et l'onglet actif de la copie miroir
+  // devient LE SIEN (0,4 s après la fin, « Nahimic Companion », 00:05:21) —
+  // l'écran, lui, affiche toujours l'onglet que l'utilisateur avait quitté.
+  // Sans parade, le panneau surligne la conv terminée et l'utilisateur
+  // revient d'alt-tab sur un surlignage faux — 3e signalement du symptôme.
+
+  // Point de départ propre : un onglet M choisi SOUS focus, par événement.
+  const tabM = claude('Conv M — choisie avant de partir');
+  const tabF = claude('Conv F — finit en arrière-plan');
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabM, tabs: [tabM, tabF] }];
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('départ : M choisie sous focus, lecture fraîche',
+    tracker.getTabs().activeLabel === 'Conv M — choisie avant de partir'
+      && tracker.getTabs().source === 'fresh',
+    tracker.getTabs().activeLabel + '/' + tracker.getTabs().source);
+
+  // L'utilisateur part (alt-tab). La conv F finit : la copie miroir bascule
+  // sur son onglet, un événement d'onglet arrive — HORS focus.
+  onDidChangeWindowState({ focused: false });
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabF, tabs: [tabM, tabF] }];
+  onDidChangeTabs({ opened: [], closed: [], changed: [tabF] });
+  check('bascule hors focus → le choix de l\'utilisateur est tenu (M, pas le fantôme)',
+    tracker.getTabs().activeLabel === 'Conv M — choisie avant de partir',
+    String(tracker.getTabs().activeLabel));
+  check('… et se déclare en quarantaine au journal (source: held)',
+    tracker.getTabs().source === 'held', String(tracker.getTabs().source));
+
+  // Retour d'alt-tab SANS aucun clic : l'écran montre toujours M — le
+  // surlignage doit rester sur M. C'est l'instant exact du signalement.
+  onDidChangeWindowState({ focused: true });
+  check('retour d\'alt-tab, aucun geste → toujours M, jamais le fantôme',
+    tracker.getTabs().activeLabel === 'Conv M — choisie avant de partir',
+    String(tracker.getTabs().activeLabel));
+
+  // Premier geste réel : un clic d'onglet produit un événement SOUS focus —
+  // la confiance revient, l'API reprend la main.
+  onDidChangeTabs({ opened: [], closed: [], changed: [tabF] });
+  check('événement sous focus → l\'API reprend la main',
+    tracker.getTabs().activeLabel === 'Conv F — finit en arrière-plan'
+      && tracker.getTabs().source === 'fresh',
+    tracker.getTabs().activeLabel + '/' + tracker.getTabs().source);
+
+  // Renommage HORS focus de l'onglet déjà actif (prompt → ai-title) : même
+  // position, libellé neuf — pas une bascule, le souvenir doit suivre, sinon
+  // il ne matcherait plus aucun titre au retour.
+  onDidChangeWindowState({ focused: false });
+  tabF.label = 'Conv F — renommée en absence';
+  onDidChangeTabs({ opened: [], closed: [], changed: [tabF] });
+  check('rename in-place hors focus → suivi (le souvenir ne meurt pas sur un titre neuf)',
+    tracker.getTabs().activeLabel === 'Conv F — renommée en absence',
+    String(tracker.getTabs().activeLabel));
+
+  // Fantôme APRÈS le rename, dans la MÊME absence : la concordance du rename
+  // n'a pas rendu la confiance — la bascule reste retenue.
+  GROUPS = [{ viewColumn: 1, isActive: true, activeTab: tabM, tabs: [tabM, tabF] }];
+  onDidChangeTabs({ opened: [], closed: [], changed: [tabM] });
+  check('fantôme après un rename dans la même absence → encore retenu',
+    tracker.getTabs().activeLabel === 'Conv F — renommée en absence'
+      && tracker.getTabs().source === 'held',
+    tracker.getTabs().activeLabel + '/' + tracker.getTabs().source);
+
+  // Alt-tab ordinaire : au retour, l'utilisateur clique un onglet — tout
+  // rentre dans l'ordre, aucun held parasite en usage normal.
+  onDidChangeWindowState({ focused: true });
+  onDidChangeTabGroups({ opened: [], closed: [], changed: GROUPS });
+  check('geste au retour → concordance retrouvée, source fresh',
+    tracker.getTabs().activeLabel === 'Conv M — choisie avant de partir'
+      && tracker.getTabs().source === 'fresh',
+    tracker.getTabs().activeLabel + '/' + tracker.getTabs().source);
 
   console.log('\n9. dispose');
   tracker.dispose();

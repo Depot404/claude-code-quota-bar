@@ -4,10 +4,24 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn, execSync, execFile } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const WebSocket = require('ws');
 const { ClaudePanelProvider } = require('./panel');
 const { createStateEngine, DEFAULTS: STATE_DEFAULTS, projectDirFor, readSessionsState } = require('./state');
+// Installeur des hooks (portage Node de install.ps1, lot onboarding
+// 2026-08-19) : pure Node, aucune dépendance à `vscode` — appelé directement
+// par installHooks() ci-dessous, plus de process PowerShell enfant.
+// installClaudeHooks() jette SettingsParseError (sous-classe d'Error) quand
+// settings.json existe et n'a pas pu être parsé : err.message porte déjà le
+// « quoi faire », pas besoin de la distinguer ici.
+const { installClaudeHooks } = require('./hooks-install');
+// Dépôt de la « philosophie de lot » (lot onboarding 4, 2026-08-19) : même
+// doctrine, module Node pur — cf. philosophy-install.js pour le pourquoi
+// (statut FACULTATIF/CONSEILLÉ, jamais le même consentement que les hooks).
+// Renommé à l'import pour ne jamais entrer en collision avec le nom de la
+// fonction qui l'enrobe ici (promptBatchPhilosophy, plus bas) — même relation
+// que installHooks()/installClaudeHooks() ci-dessus.
+const { installBatchPhilosophy: applyBatchPhilosophy, PHILOSOPHY_FILE: BATCH_PHILOSOPHY_FILE, IMPORT_LINE: BATCH_PHILOSOPHY_IMPORT_LINE } = require('./philosophy-install');
 // Lecteur de coût : un SEUL accumulateur pour deux consommateurs — le montant
 // par conversation (via state.js) et celui d'une fenêtre de quota (timeline
 // globale). Il vit ici, et non dans le moteur d'état, parce que la ligne de
@@ -39,6 +53,7 @@ const { liveSessionIds } = require('./live-sessions.js');
 // Groupes (lot 2) : le store est du Node pur (persistance injectée), le
 // rattachement par préfixe de prompt aussi — les deux se testent sans VS Code.
 const { createGroupStore, hueOf } = require('./groups');
+const { createPinStore } = require('./pins');
 const { matchPending, pendingForRelink } = require('./attach');
 const { firstUserText } = require('./hooks/transcript.js');
 // Moteur de vagues (lot 4) : Node pur, ne connaît que `{wave, status}` — le
@@ -114,6 +129,11 @@ let workspacePath;
 // workspace, comme les conversations qu'il contient.
 let groupStore;
 const GROUPS_KEY = 'batchGroups';
+// Marques « à relire » (lot 1, PLAN_marque_a_relire_2026-08-22.md) —
+// workspaceState comme les groupes : la marque n'a de sens que là où vit la
+// conversation qu'elle désigne.
+let pinStore;
+const PINS_KEY = 'pinnedConversations';
 // Repli de la section « New conversation » (lot 12) — workspaceState comme les
 // groupes (décision du plan) : propre à l'espace de travail, jamais un setting
 // global qui suivrait l'utilisateur d'un projet à l'autre. Pas de canal de
@@ -124,9 +144,6 @@ const GROUPS_KEY = 'batchGroups';
 let workspaceStateRef;
 let globalStateRef;
 const NEW_CONV_COLLAPSED_KEY = 'newConversationCollapsed';
-// Astuce du champ paste écartée : par MACHINE (globalState, comme les prompts
-// sons/accessibilité) — « je suis déjà au courant » ne dépend pas du workspace.
-const BATCH_TIP_DISMISSED_KEY = 'batchTipDismissed';
 // Dernier modèle/effort choisis EXPLICITEMENT dans le formulaire (plan
 // sélecteurs 2026-07-24) — workspaceState comme les groupes : le formulaire
 // doit retomber sur le dernier geste de CE workspace après un Create, jamais
@@ -173,6 +190,37 @@ const ACCESSIBILITY_PROMPT_DISMISSED_KEY = 'soundsAccessibilityPromptDismissed';
 // de toute façon, donc mémoriser le refus ne bloque rien de durable.
 const HOOKS_MARKER_PATH = path.join(os.homedir(), '.claude', 'scripts', 'hook-session-state.js');
 const NO_HOOKS_SOUNDS_PROMPT_DISMISSED_KEY = 'soundsNoHooksPromptDismissed';
+
+// Commande /handoffs (lot onboarding 2026-08-19) : raccourci de frappe
+// déployé par installClaudeHooks() EN MÊME TEMPS que les hooks (hooks-
+// install.js), mais un fichier INDÉPENDANT — un poste où seul l'un des deux
+// manque (une version antérieure à son ajout, un fichier supprimé à la main)
+// existe, donc les deux signaux se testent et se rapportent séparément dans
+// le bandeau du panneau (buildPanelState() `setup`), jamais fondus en un seul
+// booléen.
+const HANDOFFS_COMMAND_PATH = path.join(os.homedir(), '.claude', 'commands', 'handoffs.md');
+
+// Philosophie de découpage en lots (lot onboarding 4, 2026-08-19) — statut
+// DIFFÉRENT des deux marqueurs ci-dessus : ni un hook ni /handoffs, un
+// fichier FACULTATIF que promptBatchPhilosophy() (plus bas) propose d'ajouter
+// au CLAUDE.md PERSONNEL de l'utilisateur, jamais sans un consentement
+// DISTINCT de celui des hooks — l'extension fonctionne entièrement sans.
+// Refusable sans conséquence : le refus n'est mémorisé que pour ne plus
+// RE-proposer automatiquement après un installHooks() (maybeOfferBatchPhilosophy),
+// jamais pour retirer la commande de la Palette.
+const BATCH_PHILOSOPHY_MARKER_PATH = path.join(os.homedir(), '.claude', BATCH_PHILOSOPHY_FILE);
+const BATCH_PHILOSOPHY_PROMPT_DISMISSED_KEY = 'batchPhilosophyPromptDismissed';
+
+// Clés de contexte VS Code (setContext, cf. updateSetupContext() plus bas) —
+// exposées pour un lot FUTUR : un walkthrough natif (contributes.walkthroughs)
+// dont chaque étape se coche via `completionEvents: ["onContext:<clé>"]`. Une
+// clé par signal, jamais une seule clé combinée : les deux manques sont
+// indépendants (cf. commentaire HANDOFFS_COMMAND_PATH), donc les deux étapes
+// d'un futur walkthrough doivent pouvoir se cocher l'une sans l'autre.
+const CTX_HOOKS_INSTALLED = 'claudeCodeQuotaBar.hooksInstalled';
+const CTX_HANDOFFS_INSTALLED = 'claudeCodeQuotaBar.handoffsInstalled';
+let lastHooksCtx = null;
+let lastHandoffsCtx = null;
 
 // Lot 9 : dernier état connu par conv, pour ne détecter que de VRAIES
 // transitions (busy→done, busy→waiting…). renderKey() de state.js notifie
@@ -281,6 +329,12 @@ function activate(context) {
     }),
     vscode.commands.registerCommand('claude-code-quota-bar.refresh', () => fetchAndUpdate(true)),
     vscode.commands.registerCommand('claude-code-quota-bar.installHooks', () => installHooks(context)),
+    // Proposition SÉPARÉE de la philosophie de lot (lot onboarding 4) —
+    // jamais fusionnée à la commande ci-dessus : statut différent (requis vs
+    // facultatif-conseillé), donc consentement différent. Toujours disponible
+    // à la demande, même après un refus (cf. commentaire de
+    // BATCH_PHILOSOPHY_PROMPT_DISMISSED_KEY).
+    vscode.commands.registerCommand('claude-code-quota-bar.installBatchPhilosophy', () => promptBatchPhilosophy(context)),
     // Le panneau est un container à vue unique dans la sidebar secondaire :
     // fermé (X sur l'onglet), VS Code n'offre aucun moyen évident de le
     // rouvrir (pas d'icône activity bar, "View: Open View..." le noie dans une
@@ -359,6 +413,13 @@ function activate(context) {
     renameGroup: (msg) => renameGroup(msg && msg.id),
     dissolveGroup: (msg) => dissolveGroup(msg && msg.id),
     toggleGroupCollapse: (msg) => toggleGroupCollapse(msg && msg.id),
+    // Marque « à relire » (lot 1, plan marque-a-relire) : pose/retrait 100 %
+    // manuels (décision 7 du plan) — seul écrivain de PINS_KEY.
+    togglePinConv: (msg) => togglePinConv(msg && msg.id),
+    // Clic sur une ligne marquée dont l'onglet est fermé (lot 3) : le webview
+    // n'envoie ce message QUE sur une ligne `tabGone` — c'est lui qui sait ce
+    // qu'il a rendu, et le rendu dit déjà « onglet fermé ».
+    reopenConv: (msg) => reopenConv(msg && msg.id),
     removeMember: (msg) => removeMember(msg && msg.id, msg && msg.key),
     linkMember: (msg) => linkMember(msg && msg.id, msg && msg.key),
     // Remède du lien mort-né (plan lien-mort-né 2026-08-04) : rouvrir une
@@ -401,10 +462,12 @@ function activate(context) {
     // membre, la maîtresse est l'onglet VS Code actif. Même doctrine : aucune
     // saisie, aucune liste, échec propre sur toute ambiguïté.
     linkConvToActiveMaster: (msg) => linkConvToActiveMaster(msg && msg.id),
-    // Astuce du champ paste (2026-07-23) : le × la masque définitivement, le
-    // « ? » du label la ramène. Persisté par machine (globalState), push manuel.
-    dismissBatchTip: () => setBatchTipDismissed(true),
-    restoreBatchTip: () => setBatchTipDismissed(false),
+    // Bouton du bandeau d'onboarding (lot 2026-08-19) : MÊME chemin que la
+    // commande Palette « Claude Convs: Install Hooks » — même confirmation
+    // modale, même écriture, même proposition de reload. Le bandeau ne
+    // court-circuite rien, il ouvre juste le même geste en un clic depuis le
+    // panneau plutôt que depuis la Palette.
+    installHooksNow: () => installHooks(context),
     // Dernier choix explicite modèle/effort (plan sélecteurs 2026-07-24).
     setLastBatchChoice: (msg) => setLastBatchChoice(msg && msg.field, msg && msg.value),
   });
@@ -457,10 +520,27 @@ function activate(context) {
   // fois les mêmes centaines de Mo pour la seconde question serait absurde.
   costReader = createCostReader();
 
+  // Marques « à relire » (plan marque-a-relire) — AVANT le moteur d'état, et
+  // pas plus bas avec les autres stores : depuis le lot 3 une marque décide de
+  // la PRÉSENCE d'une ligne (`pinnedSessions` ci-dessous), et le moteur
+  // construit un premier snapshot dès sa construction. Le store construit
+  // après, ce tout premier snapshot naissait sans les marques et une
+  // conversation marquée à onglet fermé manquait à l'affichage jusqu'au premier
+  // recompute.
+  pinStore = createPinStore({
+    load: () => context.workspaceState.get(PINS_KEY, []),
+    save: (ids) => { context.workspaceState.update(PINS_KEY, ids); },
+  });
+
   stateEngine = createStateEngine({
     workspacePath,
     ...STATE_DEFAULTS,
     readCost: costReader,
+    // Ce que l'utilisateur a marqué « à relire » : state.js s'en sert pour
+    // GARDER la ligne quand l'onglet s'est fermé ou que le transcript a vieilli
+    // (lot 3) — la seule source du panneau qui soit une intention déclarée, et
+    // non un fait observé.
+    pinnedSessions: () => new Set(pinStore ? pinStore.list() : []),
     tabs: () => tabTracker.getTabs(),
     sessionTitles: () => sessionTitles.get(),
     sortOrder: () => getConfig().sortOrder,
@@ -1016,6 +1096,19 @@ function conversationsState() {
       groupId: groupIdFor(c.sessionId),
       // Onglet encore ouvert : conditionne le badge « terminé → fermable ».
       tabOpen: !!c.tabOpen,
+      // Onglet PROUVÉ fermé, ligne retenue par la seule marque (lot 3) : le
+      // titre est barré et le clic ROUVRE au lieu de chercher un onglet. À ne
+      // pas confondre avec `tabOpen: false`, qui peut n'être qu'un manque de
+      // matching passager (state.js resolveTabOpen).
+      tabGone: !!c.tabGone,
+      // Groupe où l'appariement conv↔onglet est arbitraire (mêmes titres
+      // tronqués, lot 2/3 du plan d'appariement) : signe discret + infobulle
+      // côté webview, jamais de surlignage sur cette ligne (state.js).
+      tabAmbiguous: !!c.tabAmbiguous,
+      // Marque « à relire » (lot 1, plan marque-a-relire) : posée/retirée à la
+      // main, aucun lien avec l'état du moteur (cf. CLAUDE.md du dossier —
+      // « un seul jeu de symboles d'état »). Le rendu arrive au lot 2.
+      pinned: pinStore ? pinStore.isPinned(c.sessionId) : false,
     };
   });
 }
@@ -1042,8 +1135,8 @@ function groupsState(convs, sources, superseded) {
     const { nestedUnder, masterRole } = computeNesting(demo);
     for (const g of demo) {
       g.nestedUnder = nestedUnder[g.id] || null;
-      const role = (g.master && masterRole[g.id]) || { role: 'host', blocksDone: true };
-      g.done = groupDone(g.members.map((m) => m.status), (g.master && role.blocksDone) ? g.master.status : null);
+      const role = (g.master && masterRole[g.id]) || { role: 'host' };
+      g.done = groupDone(g.members.map((m) => m.status));
       if (role.role === 'ceded') g.master = null;
     }
     return demo;
@@ -1134,11 +1227,12 @@ function groupsState(convs, sources, superseded) {
     // Rôle de la maîtresse (plan « la maîtresse n'engage que son dernier lot ») :
     // repli sur le comportement d'avant si nesting.js n'a rien à en dire —
     // dégradation silencieuse, comme partout ici.
-    const role = (g.master && masterRole[g.id]) || { role: 'host', blocksDone: true };
-    // Une maîtresse encore vivante ne doit retenir QUE le lot qu'elle pilote
-    // vraiment : sans ça, un lot terminé depuis des heures reste affiché
-    // « 3/3 done » tant que la conv de cadrage enchaîne les suivants.
-    g.done = groupDone(memberStatuses.get(g.id), (g.master && role.blocksDone) ? g.master.status : null);
+    const role = (g.master && masterRole[g.id]) || { role: 'host' };
+    // Le lot n'existe que pour ses MEMBRES : tous finis et fermés, il se
+    // retire, que sa maîtresse soit encore ouverte ou non (2026-08-18,
+    // group-done.js) — la conv de cadrage retrouve alors sa ligne plate au
+    // lieu de garder sa tête de lot indéfiniment.
+    g.done = groupDone(memberStatuses.get(g.id));
     // Lot qui a CÉDÉ sa maîtresse à plus récent que lui : le webview reçoit
     // `null` et emprunte sa branche sans-maîtresse (grip seule) — celle-là
     // même qu'utilise un lot qui n'en a jamais eu. Aucun rendu nouveau, et
@@ -1430,29 +1524,38 @@ function buildPanelState() {
       // n'a jamais été cliqué (repli sur `inherit`, premier usage seulement).
       lastModel: (workspaceStateRef && workspaceStateRef.get(LAST_BATCH_MODEL_KEY, null)) || null,
       lastEffort: (workspaceStateRef && workspaceStateRef.get(LAST_BATCH_EFFORT_KEY, null)) || null,
-      // Astuce écartée ? (globalState, par machine) — le webview montre alors
-      // seulement le « ? » de restauration sur le label.
-      tipDismissed: !!(globalStateRef && globalStateRef.get(BATCH_TIP_DISMISSED_KEY, false)),
     },
     // Groupes persistés (lot 2), vagues résolues (lot 4).
     groups: groupsState(convs, sources, superseded),
+    // Bandeau d'onboarding (lot 2026-08-19) : deux booléens INDÉPENDANTS,
+    // recalculés à CHAQUE push (fs.existsSync, pas de cache) — le webview
+    // masque le bandeau tout seul dès que l'un puis l'autre repasse à true,
+    // sans attendre un reload de fenêtre. Même appel que updateSetupContext()
+    // pousse aux clés `setContext` : une seule lecture du disque pour les deux
+    // consommateurs (webview + contexte VS Code), jamais deux résolutions
+    // divergentes.
+    setup: updateSetupContext(),
   };
 }
 
-// Commande « Claude Convs: Install Hooks » (plan 2026-07-16, lot 2 §2) : porte
-// install.ps1, jamais sans consentement explicite — l'installeur écrit hors du
-// dossier de l'extension (~/.claude/scripts/, ~/.claude/settings.json). Sans
-// hooks, le panneau reste utilisable en mode dégradé : les conversations
-// s'affichent quand même (transcripts seuls) mais restent en `idle`, faute
-// d'état busy/waiting/done — voir state.js `readSessionsState`/`idle` et le
-// tableau des états du README.
+// Commande « Claude Convs: Install Hooks » (plan 2026-07-16, lot 2 §2 ;
+// portage Node lot onboarding 2026-08-19) : jamais sans consentement
+// explicite — l'installeur écrit hors du dossier de l'extension
+// (~/.claude/scripts/, ~/.claude/settings.json). Sans hooks, le panneau reste
+// utilisable en mode dégradé : les conversations s'affichent quand même
+// (transcripts seuls) mais restent en `idle`, faute d'état busy/waiting/done —
+// voir state.js `readSessionsState`/`idle` et le tableau des états du README.
+//
+// Portage Node (2026-08-19) : install.ps1 n'était lancé que via
+// execFile('powershell.exe', ...) — absent sur macOS/Linux, le bouton
+// échouait purement et simplement sur ces plateformes, pour une extension
+// publiée au Marketplace pour tout le monde (poste tiers signalé sans hooks
+// ni /handoffs, sans le moindre message). hooks-install.js fait EXACTEMENT ce
+// que faisait install.ps1, en Node pur, appelé ici EN PROCESS — plus de
+// process enfant, plus d'hypothèse PowerShell. install.ps1 reste dans le
+// dossier pour l'usage manuel/scripté (README § Setup) mais n'est plus le
+// chemin par défaut de ce bouton.
 async function installHooks(context) {
-  const scriptPath = path.join(context.extensionPath, 'install.ps1');
-  if (!fs.existsSync(scriptPath)) {
-    vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: install.ps1 not found in the extension folder.'));
-    return;
-  }
-
   const choice = await vscode.window.showWarningMessage(
     vscode.l10n.t('This will deploy Claude Code hooks so the panel can show live conversation state (busy/waiting/done) instead of idle only. It writes to:\n') +
     vscode.l10n.t('• ~/.claude/scripts/ (copies the hook scripts)\n') +
@@ -1463,25 +1566,41 @@ async function installHooks(context) {
   );
   if (choice !== vscode.l10n.t('Install hooks')) return;
 
+  let installed = false;
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Claude Convs: installing hooks…') },
-    () => new Promise((resolve) => {
-      execFile(
-        'powershell.exe',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
-        { windowsHide: true, timeout: 30000 },
-        (err, stdout, stderr) => {
-          if (err) {
-            vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: hook installation failed — {0}', (stderr || err.message || '').trim().slice(0, 500)));
-          } else {
-            vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: hooks installed. Reload the window for the panel to pick up live conversation state.'), vscode.l10n.t('Reload Window'))
-              .then((pick) => { if (pick === vscode.l10n.t('Reload Window')) vscode.commands.executeCommand('workbench.action.reloadWindow'); });
-          }
-          resolve();
-        }
-      );
-    })
+    async () => {
+      try {
+        installClaudeHooks({ extensionRoot: context.extensionPath });
+        // Le bandeau d'onboarding disparaît tout seul dès la réparation
+        // constatée (test principal de la maquette) : hook-session-state.js et
+        // handoffs.md existent déjà sur disque à cet instant, pas besoin
+        // d'attendre le reload proposé ci-dessous pour que le panneau arrête
+        // de dire qu'il manque quelque chose.
+        pushPanelState();
+        installed = true;
+      } catch (err) {
+        // SettingsParseError comme toute autre défaillance (fichier source
+        // manquant, écriture invalide relue) partagent le même message : dans
+        // les deux cas err.message dit déjà quoi faire, cf. hooks-install.js.
+        vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: hook installation failed — {0}', ((err && err.message) || String(err)).trim().slice(0, 500)));
+      }
+    }
   );
+  if (!installed) return;
+
+  // Proposition SÉPARÉE de la philosophie de lot (lot onboarding 4) — APRÈS
+  // la fin de la barre de progression des hooks, jamais dedans, jamais dans
+  // la même modale : statut différent (requis vs facultatif-conseillé), donc
+  // consentement différent. Ne (re)demande jamais toute seule au-delà de la
+  // première fois — cf. maybeOfferBatchPhilosophy().
+  await maybeOfferBatchPhilosophy(context);
+
+  const pick = await vscode.window.showInformationMessage(
+    vscode.l10n.t('Claude Convs: hooks installed. Reload the window for the panel to pick up live conversation state.'),
+    vscode.l10n.t('Reload Window')
+  );
+  if (pick === vscode.l10n.t('Reload Window')) vscode.commands.executeCommand('workbench.action.reloadWindow');
 }
 
 // Icône haut-parleur du panneau (lot 1, point 6) : bascule le setting user en
@@ -1516,15 +1635,6 @@ async function toggleCollapse(section) {
   const cfg = vscode.workspace.getConfiguration('claudeCodeQuotaBar');
   const current = cfg.get(key, false);
   try { await cfg.update(key, !current, vscode.ConfigurationTarget.Global); } catch {}
-}
-
-// Astuce du champ paste : écartée/restaurée, persisté par machine (globalState).
-// Push manuel comme la section « New conversation » — le globalState n'a pas
-// d'événement de propagation type onDidChangeConfiguration.
-async function setBatchTipDismissed(dismissed) {
-  if (!globalStateRef) return;
-  try { await globalStateRef.update(BATCH_TIP_DISMISSED_KEY, !!dismissed); } catch {}
-  pushPanelState();
 }
 
 // Dernier choix explicite modèle/effort du formulaire (plan sélecteurs
@@ -2165,6 +2275,42 @@ function toggleGroupCollapse(id) {
   if (groupStore.setCollapsed(id, !g.collapsed)) pushPanelState();
 }
 
+// Bascule la marque « à relire » d'une conversation (lot 1, plan
+// marque-a-relire). Aucune extinction automatique : le seul chemin est ce
+// message, déclenché par un clic dans le panneau.
+function togglePinConv(id) {
+  if (!pinStore || !id) return;
+  pinStore.toggle(id);
+  // Recompute AVANT le push (lot 3) : la marque ne décore plus seulement une
+  // ligne, elle décide de sa PRÉSENCE (state.js `pinnedSessions`). Retirer la
+  // marque d'une conversation dont l'onglet est fermé doit la faire
+  // disparaître tout de suite ; sans ce refresh, `pushPanelState` republierait
+  // le snapshot en cache — celui d'avant — et la ligne resterait à l'écran
+  // jusqu'au prochain événement sans rapport.
+  if (stateEngine) stateEngine.refresh();
+  pushPanelState();
+}
+
+// Rouvrir une conversation dont l'onglet est fermé — le clic sur une ligne
+// retenue par sa seule marque (`tabGone`, lot 3). `focusConv` ne peut rien pour
+// elle : il cherche un onglet par libellé, ici il n'y en a plus AUCUN, et le
+// clic était un no-op silencieux. `claude-vscode.editor.open(sessionId)` est la
+// seule commande de l'extension officielle qui accepte un identifiant de
+// session (NOTES_api_claude_code_extension.md) ; elle rouvre la conversation
+// telle quelle, sans prompt inséré.
+//
+// PAS de `markProgrammaticOpen` ici, à la différence du lanceur de lots : cette
+// ouverture EST un clic de l'utilisateur (ack.js ne doit la confondre avec rien
+// d'autre — cf. le commentaire du hook `executeCommand` de batchLauncher, « les
+// commandes qui ouvrent un onglet PROGRAMMATIQUEMENT, jamais un clic »).
+function reopenConv(id) {
+  if (!id) return;
+  Promise.resolve(vscode.commands.executeCommand(LAUNCH_OPEN_COMMAND, id))
+    .then(() => { if (stateEngine) stateEngine.refresh(); })
+    .catch((e) => console.log('[QuotaBar] reopen %s failed: %s', id, e && e.message));
+  ackConversationById(id);
+}
+
 function removeMember(id, key) {
   if (!groupStore) return;
   if (groupStore.removeMember(id, key)) pushPanelState();
@@ -2500,6 +2646,109 @@ async function setSortOrder(order) {
 // sortir d'`idle`, donc aucun son ne jouera jamais, quoi que dise le setting.
 function hooksAppearInstalled() {
   try { return fs.existsSync(HOOKS_MARKER_PATH); } catch { return false; }
+}
+
+// Même doctrine que hooksAppearInstalled() ci-dessus, pour le second fichier
+// que installClaudeHooks() déploie — indépendant du premier (cf. commentaire
+// HANDOFFS_COMMAND_PATH en tête de fichier). fs.existsSync qui échoue (droits,
+// chemin exotique) retombe sur `false` : le pire que ça produit est un bouton
+// « Install hooks » proposé à tort, jamais un panneau qui ment en disant tout
+// va bien.
+function handoffsAppearInstalled() {
+  try { return fs.existsSync(HANDOFFS_COMMAND_PATH); } catch { return false; }
+}
+
+// Même doctrine, pour le fichier de philosophie de lot déposé par
+// applyBatchPhilosophy() — un simple signal d'existence, jamais un parse de
+// CLAUDE.md à chaque appel : suffisant pour éviter de RE-proposer (cf.
+// maybeOfferBatchPhilosophy) sans lire le fichier personnel de l'utilisateur
+// en continu.
+function batchPhilosophyAppearInstalled() {
+  try { return fs.existsSync(BATCH_PHILOSOPHY_MARKER_PATH); } catch { return false; }
+}
+
+// Aperçu montré dans la modale de consentement — lu depuis le fichier SOURCE
+// à chaque appel, jamais dupliqué en dur ici : ce que l'utilisateur voit
+// avant d'accepter est TOUJOURS exactement ce qui sera déposé dans
+// ~/.claude/, aucun risque de divergence entre un texte figé dans ce fichier
+// et le contenu réellement écrit.
+function readBatchPhilosophyPreview(context) {
+  try {
+    return fs.readFileSync(path.join(context.extensionPath, 'philosophy', BATCH_PHILOSOPHY_FILE), 'utf8').trim();
+  } catch { return ''; }
+}
+
+// Proposition de la « philosophie de lot » (lot onboarding 4, 2026-08-19) —
+// JAMAIS fondue dans la modale des hooks (cf. commentaire de
+// BATCH_PHILOSOPHY_MARKER_PATH en tête de fichier : statut différent,
+// consentement différent). Le texte qui sera importé dans CHAQUE conversation
+// future est montré EN CLAIR avant tout accord (`detail`, le contenu réel du
+// fichier), pas seulement la ligne technique qui l'importe — on ne fait pas
+// signer à l'aveugle une modification du fichier personnel de l'utilisateur.
+// Appelée par la commande Palette, par le lien du walkthrough, et par le
+// chaînage optionnel de installHooks() (maybeOfferBatchPhilosophy ci-dessous)
+// : toujours le même consentement, jamais un raccourci silencieux.
+async function promptBatchPhilosophy(context) {
+  const preview = readBatchPhilosophyPreview(context);
+  const addIt = vscode.l10n.t('Add it');
+  let choice;
+  try {
+    choice = await vscode.window.showWarningMessage(
+      vscode.l10n.t('Claude Convs can add a short "working in batches" note to your personal CLAUDE.md.\n\n') +
+      vscode.l10n.t('This is optional — the extension works fully without it — and strongly recommended: it teaches Claude to offer splitting work into several conversations, each with the model and effort that part deserves, instead of doing everything in one costly conversation.\n\n') +
+      vscode.l10n.t('It adds one line to ~/.claude/CLAUDE.md: {0}\n\n', BATCH_PHILOSOPHY_IMPORT_LINE) +
+      vscode.l10n.t('Add it?'),
+      { modal: true, detail: preview },
+      addIt
+    );
+  } catch { choice = undefined; }
+
+  // Refusable SANS CONSÉQUENCE : mémorisé pour ne plus RE-proposer
+  // automatiquement après un futur installHooks() (cf.
+  // maybeOfferBatchPhilosophy), mais jamais pour retirer la commande de la
+  // Palette — un refus ici n'éteint rien d'autre.
+  try { context.globalState.update(BATCH_PHILOSOPHY_PROMPT_DISMISSED_KEY, true); } catch {}
+  if (choice !== addIt) return;
+
+  try {
+    applyBatchPhilosophy({ extensionRoot: context.extensionPath });
+    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: batching philosophy added to your CLAUDE.md.'));
+  } catch (err) {
+    vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: could not add the batching philosophy — {0}', ((err && err.message) || String(err)).trim().slice(0, 500)));
+  }
+}
+
+// Chaînage optionnel après un install de hooks réussi (installHooks()) —
+// jamais un second appel silencieux : batchPhilosophyAppearInstalled() saute
+// l'offre si déjà déposé, et le refus mémorisé (BATCH_PHILOSOPHY_PROMPT_
+// DISMISSED_KEY) saute toute proposition AUTOMATIQUE ultérieure — la Palette
+// et le walkthrough restent le chemin pour qui change d'avis plus tard.
+async function maybeOfferBatchPhilosophy(context) {
+  if (batchPhilosophyAppearInstalled()) return;
+  if (context.globalState.get(BATCH_PHILOSOPHY_PROMPT_DISMISSED_KEY)) return;
+  await promptBatchPhilosophy(context);
+}
+
+// Pousse les deux signaux d'onboarding vers les clés `setContext` (CTX_HOOKS_
+// INSTALLED / CTX_HANDOFFS_INSTALLED, cf. leur commentaire) et retourne les
+// mêmes booléens pour buildPanelState() — une seule paire d'appels
+// fs.existsSync par push, jamais une pour le contexte et une autre pour le
+// webview. `executeCommand('setContext', …)` n'est appelé que sur un
+// changement réel (lastHooksCtx/lastHandoffsCtx) : recalculer est gratuit
+// (un stat), mais réémettre le même setContext à chaque tick/poll ne le
+// serait pas forcément côté hôte VS Code.
+function updateSetupContext() {
+  const hooksInstalled = hooksAppearInstalled();
+  const handoffsInstalled = handoffsAppearInstalled();
+  if (hooksInstalled !== lastHooksCtx) {
+    lastHooksCtx = hooksInstalled;
+    try { vscode.commands.executeCommand('setContext', CTX_HOOKS_INSTALLED, hooksInstalled); } catch {}
+  }
+  if (handoffsInstalled !== lastHandoffsCtx) {
+    lastHandoffsCtx = handoffsInstalled;
+    try { vscode.commands.executeCommand('setContext', CTX_HANDOFFS_INSTALLED, handoffsInstalled); } catch {}
+  }
+  return { hooksInstalled, handoffsInstalled };
 }
 
 // Sans hooks, le toggle 🔈 s'allume pour rien : aucune transition busy→done/

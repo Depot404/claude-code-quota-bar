@@ -16,10 +16,20 @@ PUBLISH.md
 CLAUDE.md
 PLAN_*.md
 Publish.ps1
+# Notes de travail en .txt posées à la racine : le dossier du projet sert aussi
+# de bloc-notes, et une idée jetée là part telle quelle dans le paquet, donc sur
+# le Marketplace — en français, au milieu d'une extension anglophone. Motif large
+# assumé, contrairement au reste de ce fichier : aucun .txt n'a jamais eu sa
+# place dans le paquet (vérifié 2026-08-19, `node_modules/ws` réinclus compris),
+# et ces notes ne s'annoncent pas — celle-ci a été arrêtée par le contrôle liste
+# BLANCHE de Publish.ps1 au build de la 2.48.1, pas par une relecture.
+*.txt
+
 # Relevés internes sur le bundle de l'extension officielle et maquette HTML de
 # travail : ni doc utilisateur, ni code exécuté — repérés par le contrôle
 # liste-blanche du 2026-07-24 (embarqués depuis leur création faute de règle).
 NOTES_api_claude_code_extension.md
+NOTES_architecture.md
 MOCKUP_*.html
 # Planches de validation visuelle (captures du panneau, base64) : artefact de
 # revue interne, ~1 Mo — jamais dans le paquet publié.

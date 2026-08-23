@@ -9,9 +9,13 @@
 //        les deux capsules le réclament, le dernier rendu gagne, et le groupe
 //        ANCIEN affiche une capsule VIDE (pas même son repli dégradé, puisque
 //        sa maîtresse est bel et bien listée) ;
-//     2. IMMORTALITÉ — `groupDone` exige que la maîtresse soit `done-closed` ;
-//        tant qu'elle vit (elle pilote le lot suivant), le vieux lot reste
-//        affiché « 3/3 done » pour toujours.
+//     2. IMMORTALITÉ — `groupDone` exigeait alors que la maîtresse soit
+//        `done-closed` ; tant qu'elle vivait (elle pilote le lot suivant), le
+//        vieux lot restait affiché « 3/3 done » pour toujours. Cette seconde
+//        cause a été supprimée le 2026-08-18 : la maîtresse ne compte plus du
+//        tout dans `groupDone` (cf. group-done.js), si bien qu'AUCUN des deux
+//        lots n'est immortel — c'est ce que vérifient désormais les sections 3
+//        et 4, dans les deux sens.
 //
 // Ce banc prouve le CÂBLAGE de bout en bout (groupStore → groupsState →
 // masterState/memberTruth → computeNesting → état poussé au webview) ; la règle
@@ -212,11 +216,11 @@ async function run() {
   check('le lot de 03:01 la CÈDE : master null, donc plus de capsule vide à l\'écran',
     grp('gOld').master === null, JSON.stringify(grp('gOld').master));
 
-  console.log('\n3. Fin de l\'immortalité — un vieux lot fini s\'efface de lui-même');
+  console.log('\n3. Fin de l\'immortalité — un lot fini s\'efface de lui-même');
   check('le lot de 03:01 est « terminé » (ses membres seuls décident)',
     grp('gOld').done === true, JSON.stringify(grp('gOld').done));
-  check('… alors que le lot de 14:34, lui, reste retenu par sa maîtresse vivante',
-    grp('gRecent').done === false, JSON.stringify(grp('gRecent').done));
+  check('… et celui de 14:34 aussi, bien que sa maîtresse soit vivante',
+    grp('gRecent').done === true, JSON.stringify(grp('gRecent').done));
   check('le store n\'a RIEN perdu : les deux liens sont intacts (relation dérivée)',
     (WORKSPACE_STORE.get('batchGroups') || []).every((g) => g.masterSessionId === 'cadrage'),
     JSON.stringify((WORKSPACE_STORE.get('batchGroups') || []).map((g) => [g.id, g.masterSessionId])));
@@ -230,8 +234,8 @@ async function run() {
   await waitFor(() => !!grp('gOld').master, 'lot de 03:01 relié');
   check('la tête est passée au lot re-lié', grp('gOld').master.convId === 'cadrage', JSON.stringify(grp('gOld').master));
   check('… et le lot de 14:34 a cédé la sienne à son tour', grp('gRecent').master === null, JSON.stringify(grp('gRecent').master));
-  check('les rôles de « terminé » ont suivi, dans le même mouvement',
-    grp('gOld').done === false && grp('gRecent').done === true,
+  check('… et le « terminé » ne bouge pas : il ne dépend que des membres',
+    grp('gOld').done === true && grp('gRecent').done === true,
     JSON.stringify([grp('gOld').done, grp('gRecent').done]));
 
   console.log('\n5. Aucun résidu');

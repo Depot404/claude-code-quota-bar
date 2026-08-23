@@ -22,9 +22,13 @@
 //   engine.getSnapshot();        // { conversations: [...], activeSessionId, generatedAt }
 //   engine.markClosed([ids]);    // onglets fermés → retrait immédiat
 //   engine.dispose();
-//   tabs: () => ({ known: boolean, labels: string[], activeLabel: string|null })
+//   tabs: () => ({ known: boolean, labels: string[], activeLabel: string|null,
+//                   activeIndex: number|null })
 //         — union de toutes les fenêtres ; activeLabel = onglet Claude
-//           sélectionné dans CETTE fenêtre (surlignage par fenêtre)
+//           sélectionné dans CETTE fenêtre (surlignage par fenêtre) ;
+//           activeIndex = sa POSITION dans `labels` (lot 2 du plan
+//           d'appariement, 2026-08-21) — départage deux onglets au libellé
+//           identique, ce que le libellé seul ne peut plus faire
 //   liveSessions: () => Set<sessionId>   — sessions CLI vivantes
 //         (live-sessions.js ; défaut = le vrai registre ~/.claude/sessions)
 //   sessionTitles: () => Map<sessionId, label>  — titres d'onglet RÉELS
@@ -34,7 +38,11 @@
 // Une conversation du snapshot :
 //   { sessionId, title, tabTitle, titleSource, state, acked, since, busySince,
 //     model, modelId, effort, ctx: {tokens, denom, pct}, message, isActive,
-//     transcript, mtime }
+//     tabOpen, tabAmbiguous, transcript, mtime }
+//   tabAmbiguous : cette conv appartient à un groupe où l'appariement onglet
+//               ↔ conv est arbitraire (mêmes titres tronqués, cf. pairTabs
+//               dans labels.js) — signal pour le rendu (lot 3), n'affecte
+//               rien ici
 //   effort    : effort RÉEL du dernier tour lu dans le transcript (`high`,
 //               `medium`…), null quand la conv n'en porte pas
 //   title     : ce que l'utilisateur doit lire — le nom de l'ONGLET quand il est
@@ -48,12 +56,13 @@ const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
 const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, pendingInteractiveAt, interruptedAt, lastActivityTs, firstUserText, pendingResumeSignals } = require('./hooks/transcript.js');
-const { labelMatches, convMatchesLabel } = require('./labels.js');
+const { labelMatches, convMatchesLabel, pairTabs } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 const { liveSessionIds, foreignSessionIds, liveSessionEntries, SESSIONS_DIR } = require('./live-sessions.js');
 const { cleanLabel } = require('./session-titles.js');
 const { computeSupersededBy } = require('./supersede.js');
 const { createCostReader } = require('./cost.js');
+const { logEvent, createVerdictFilter } = require('./ack-journal.js');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SESSIONS_STATE_PATH = path.join(CLAUDE_DIR, 'sessions-state.json');
@@ -65,6 +74,10 @@ const ACTIVE_SESSION_PATH = path.join(CLAUDE_DIR, 'active-session.json');
 // en silence (longue réflexion, outil long) — cf. busyOrStale.
 // Affichage seulement : on ne tue rien (garde-fou du plan).
 const STALE_MS = 5 * 60 * 1000;
+// Filtre anti-bavardage du journal de surlignage (lot 0) : une extension héberge
+// une seule fenêtre, donc un seul verdict à la fois — une clé fixe suffit,
+// partagée par tous les appels de buildSnapshot de ce process.
+const highlightVerdictFilter = createVerdictFilter();
 // Marge avant de lire une écriture transcript comme une REPRISE du travail
 // (après une permission accordée, ou après un Stop qui n'a pas fini le tour).
 // Elle absorbe le voisinage immédiat du hook : le dernier message assistant du
@@ -86,13 +99,23 @@ const TRANSCRIPT_MISSING_PURGE_MS = 5 * 60 * 1000;
 const DEFAULTS = { recentMs: 4 * 60 * 60 * 1000, maxItems: 12, debounceMs: 250, tickMs: 30000 };
 
 // ~/.claude/projects/<dir> : VS Code workspace → nom de dossier projet.
-// c:\Users\X\Projets → c--Users-X-Projets (même dérivation que Claude Code).
+// C:\Users\X\Mes Projets → C--Users-X-Mes-Projets.
+//
+// Le CLI remplace CHAQUE caractère non alphanumérique par un tiret, un pour un :
+// il n'en regroupe jamais deux et ne touche pas à la casse. Vérifié en lui
+// faisant fabriquer le dossier d'un chemin témoin (CLI 2.1.235, 2026-08-19) :
+//   ...\slug_test.v1 (a)_é+b  →  C--Users-...-slug-test-v1--a----b
+// Toute autre classe de caractères fait chercher un dossier qui n'existe PAS,
+// donc une liste vide pour toujours, sans le moindre message. La version
+// d'avant ne convertissait que les séparateurs et les espaces : un seul `_`,
+// point ou accent dans le chemin suffisait à vider le panneau — et s'il était
+// dans le nom d'utilisateur Windows (`C:\Users\jean.dupont`), sur TOUS les
+// workspaces de la machine à la fois. Invisible ici parce que ce poste travaille
+// sous un chemin qui ne contient que des espaces, seul cas où les deux
+// dérivations tombent d'accord (signalé 2026-08-19 : panneau vide chez un tiers).
 function projectDirFor(workspacePath) {
   if (!workspacePath) return null;
-  const dirName = workspacePath
-    .replace(/^([A-Za-z]):[\\/]/, (_, d) => d.toLowerCase() + '--')
-    .replace(/[\\/\s]/g, '-');
-  return path.join(CLAUDE_DIR, 'projects', dirName);
+  return path.join(CLAUDE_DIR, 'projects', String(workspacePath).replace(/[^a-zA-Z0-9]/g, '-'));
 }
 
 function readJson(p) {
@@ -384,10 +407,20 @@ const MATCHABLE_TITLE_SOURCES = new Set(['ai-title', 'tab-store']);
 // live    : Set des sessionId dont le process CLI tourne DANS UNE FENÊTRE VS CODE
 // foreign : Set des sessionId vivants dont l'origine prouve le contraire
 //           (Remote Control/mobile, terminal, agent SDK…) — cf. live-sessions.js
-function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE) {
+// `hasTab` (lot 2 du plan d'appariement, 2026-08-21) : booléen PRÉCALCULÉ par
+// l'appelant à partir de l'appariement bijectif (pairTabs), à préférer à
+// `hasOpenTab(c, tabs)` — qui ne répond que « un libellé matche », vrai pour
+// DEUX sœurs homonymes même quand une seule a réellement son onglet. Absent
+// (bancs qui appellent isGone() directement, une conv à la fois) → repli sur
+// hasOpenTab, identique à un appariement sur cette conv seule (aucune
+// ambiguïté possible sans une autre conv pour la disputer) : comportement
+// inchangé pour tous les appels existants.
+function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab) {
   if (!tabs.known) return false;
-  // Ouverte ici ou dans une autre fenêtre (union publiée par tabs.js).
-  if (hasOpenTab(c, tabs)) return false;
+  const open = typeof hasTab === 'boolean' ? hasTab : hasOpenTab(c, tabs);
+  // Ouverte ici ou dans une autre fenêtre (union publiée par tabs.js), ET
+  // c'est bien CETTE conv que l'appariement lui a assigné.
+  if (open) return false;
 
   // Onglet fermé sous nos yeux : règle user explicite, ça prime sur l'état —
   // une conv fermée en plein travail disparaît quand même. Prime AUSSI sur la
@@ -612,6 +645,9 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   const activeSessionId = readActiveSessionId();
   const entries = readSessionsState();
   const byId = new Map();
+  // Sessions dont le TRANSCRIPT a été jugé trop vieux ci-dessous : mémorisées
+  // pour que la boucle des fiches hooks ne les réadmette pas (cf. son commentaire).
+  const aged = new Set();
 
   // Identités STABLES, indépendantes des libellés (lot 2026-07-22).
   const live = (typeof opts.liveSessions === 'function' && opts.liveSessions()) || NO_LIVE;
@@ -627,6 +663,20 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // Lu ICI, et non plus bas dans la fonction : le filtre d'ancienneté juste en
   // dessous en a besoin (cf. tabStillOpenFor).
   const tabs = (typeof opts.tabs === 'function' && opts.tabs()) || NO_TABS;
+  // Marques « à relire » (lot 3 du plan marque-a-relire) : les sessionId que
+  // l'utilisateur a marqués À LA MAIN. Ce n'est pas un état du moteur, c'est
+  // une INTENTION déclarée — « je dois y revenir » —, et c'est ce qui lui donne
+  // le droit de tenir une ligne dans la liste quand les deux preuves d'usage
+  // (process vivant, onglet ouvert) ont disparu : sans ça la marque raterait
+  // très exactement le geste qui la motive, fermer l'onglet en croyant le
+  // travail fini. Thunk absent (bancs d'avant ce lot, usage isolé) ⇒ ensemble
+  // vide ⇒ comportement d'avant à l'octet près, comme toutes les sources
+  // optionnelles de ce module. Tableau toléré autant qu'un Set : l'appelant
+  // sérialise un store, pas une structure interne de state.js.
+  const rawPinned = typeof opts.pinnedSessions === 'function' ? opts.pinnedSessions() : null;
+  const pinnedIds = rawPinned instanceof Set
+    ? rawPinned
+    : new Set(Array.isArray(rawPinned) ? rawPinned : []);
 
   if (projectDir) {
     for (const { sessionId, file } of listTranscripts(projectDir)) {
@@ -648,8 +698,39 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // libellé d'onglet du store croisé avec les onglets ouverts. Store muet ou
       // tracker d'onglets absent → false → comportement d'avant, jamais un
       // masquage de plus.
-      if (!fresh && now - mtime > recentMs && !live.has(sessionId)
-        && !tabStillOpenFor(sessionId, titles, tabs)) continue;
+      // `fresh` (fiche hooks de moins de 24 h) N'EXEMPTE PLUS de ce filtre
+      // (2026-08-20). Il l'a fait longtemps sans dommage visible — les deux
+      // durees se recouvrent dans le cas nominal — mais sur une conversation
+      // SANS ai-title il rendait la ligne IMMORTELLE, et c'est le seul chemin
+      // par lequel elle pouvait l'etre. Enchainement constate sur donnees
+      // reelles (deux convs du 2026-08-19, signalees par l'user) : plus aucun
+      // onglet ne les portait, mais leur titre etant un repli (1er prompt),
+      // isGone refuse par construction de conclure quoi que ce soit d'une
+      // absence de correspondance ; la seule echeance qui restait etait l'age
+      // du transcript, annulee par une fiche hooks retamponnee a 15:35 alors
+      // que la conversation n'avait plus rien ecrit depuis 23:45 la veille.
+      // `updated_at` date la FICHE, pas la conversation : c'est un fait sur un
+      // fichier annexe, jamais une preuve que la conv est encore la. Les deux
+      // exemptions qui restent en sont, elles, de vraies preuves : process CLI
+      // vivant, ou onglet prouve ouvert. `fresh` garde son seul usage
+      // legitime, juste en dessous : decider si l'entree hooks est encore
+      // exploitable pour l'ETAT de la conversation.
+      // …et session MARQUÉE « à relire » (lot 3, 2026-08-22) : troisième
+      // exemption, de nature différente des deux autres — ce n'est pas une
+      // preuve d'usage observée, c'est un ORDRE de l'utilisateur, posé et levé
+      // à la main (décision 7 du plan : jamais d'extinction automatique). Elle
+      // doit être appliquée ICI, dans le filtre lui-même, et surtout PAS en
+      // réadmettant plus bas ce que ce filtre a écarté : `aged` existe
+      // précisément pour que la boucle des fiches hooks ne repêche pas une
+      // conv refusée en connaissance de cause (incident 2026-08-20, deux convs
+      // immortelles) — une conv marquée ne doit donc jamais y entrer, sinon la
+      // marque se retrouverait à contourner un filtre par une porte de service
+      // au lieu d'être une exemption assumée. Coût dit à l'user : une conv
+      // marquée reprend une place de `maxItems`, comme une conv à onglet
+      // ouvert (cf. le tri des candidats plus bas).
+      if (now - mtime > recentMs && !live.has(sessionId)
+        && !tabStillOpenFor(sessionId, titles, tabs)
+        && !pinnedIds.has(sessionId)) { aged.add(sessionId); continue; }
       byId.set(sessionId, { sessionId, transcript: file, mtime, entry: fresh ? entry : null });
     }
   }
@@ -665,6 +746,15 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   const debrisIds = [];
   for (const [sessionId, entry] of Object.entries(entries)) {
     if (byId.has(sessionId) || !entry) continue;
+    // « Pas vue » et « ÉCARTÉE » ne sont pas la même chose (2026-08-20). Cette
+    // boucle est là pour ce que la précédente n'a PAS PU voir — la conv dont le
+    // transcript n'existe pas encore, au tout premier prompt. Sans ce test elle
+    // réadmet aussi ce que la précédente vient d'écarter en connaissance de
+    // cause : le filtre d'ancienneté travaille sur le transcript, cette boucle
+    // ne regarde que la fiche hooks, et la fiche gagnait toujours. C'est par ce
+    // chemin-là que les deux convs du 2026-08-19 revenaient à chaque snapshot,
+    // le fix de la boucle du dessus restant sans aucun effet visible.
+    if (aged.has(sessionId)) continue;
     if (now - (entry.updated_at || 0) > STATE_ENTRY_MAX_AGE_MS) continue;
     if (!belongsToWorkspace(entry, projectDir, workspacePath)) continue;
     if (entry.transcript && !fs.existsSync(entry.transcript)) {
@@ -707,11 +797,23 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // places : la marge n'est pas théorique. À onglet égal, le mtime tranche
   // comme avant — et sans store d'onglets, tout le monde est à égalité, donc
   // l'ordre est celui d'avant à l'octet près.
+  // Les conversations MARQUÉES passent juste derrière (lot 3) : entrer dans les
+  // candidats ne suffit pas, il faut aussi entrer dans les `maxItems` places,
+  // sinon une conv marquée ancienne se ferait couper par 12 conversations plus
+  // fraîches et la marque ne survivrait à rien. Derrière, jamais devant :
+  // l'invariant « onglet ouvert ⇒ listée » fonde member-truth.js (« pas dans la
+  // liste ⇒ terminée · fermée »), une marque ne doit pas pouvoir le reprendre.
+  // Effet de bord utile : une marquée étant en tête des candidats, elle est
+  // toujours dans les SCAN_LIMIT transcripts réellement lus, si vieille soit-elle.
   const hasTab = new Map();
   for (const c of byId.values()) hasTab.set(c.sessionId, tabStillOpenFor(c.sessionId, titles, tabs) ? 1 : 0);
+  const pinRank = (id) => (pinnedIds.has(id) ? 1 : 0);
   const candidates = [...byId.values()].sort((a, b) => {
     const d = hasTab.get(b.sessionId) - hasTab.get(a.sessionId);
-    return d !== 0 ? d : (b.mtime || 0) - (a.mtime || 0);
+    if (d !== 0) return d;
+    const p = pinRank(b.sessionId) - pinRank(a.sessionId);
+    if (p !== 0) return p;
+    return (b.mtime || 0) - (a.mtime || 0);
   });
   const SCAN_LIMIT = maxItems * 4;
 
@@ -735,11 +837,21 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // besoin de le VOIR pour le comparer au successeur ; il n'a pas besoin d'être
   // RENDU (`conversations`) pour ça, seulement présent dans ce tableau.
   const supersedeCandidates = [];
+
+  // PASSE 1 — lire chaque candidat (état, titre affiché) SANS encore décider
+  // qui est visible. L'appariement bijectif ci-dessous (lot 2 du plan
+  // d'appariement, 2026-08-21) a besoin de voir TOUS les titres à la fois
+  // pour départager deux sœurs homonymes — décider `gone` conv par conv,
+  // comme avant, referait exactement l'erreur d'origine (chacune cherche son
+  // onglet toute seule). Les transcripts sont de toute façon lus jusqu'à
+  // SCAN_LIMIT : cette passe ne coûte rien de plus, elle ne fait que reporter
+  // la décision de visibilité après le calcul de l'appariement.
+  const prepared = [];
   for (const c of candidates.slice(0, SCAN_LIMIT)) {
     const t = c.transcript ? readTranscript(c.transcript) : null;
     // `live.has` : process CLI vivant ⇒ un `busy` muet reste `busy` (travail en
     // cours), jamais `stale` par simple vieillissement du mtime.
-    let state = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId), t && t.activityTs,
+    let convState = effectiveState(c.entry, c.mtime, now, live.has(c.sessionId), t && t.activityTs,
       // Reprise autonome (tâche de fond, réveil programmé) : thunk — le scan ne
       // tourne que si effectiveState en a besoin (entrée `done` d'une session
       // vivante), et le lecteur le cache par (mtime, size). Reader de banc sans
@@ -765,22 +877,48 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     // n'émet que sur done/waiting). Il s'efface tout seul à la reprise :
     // le marqueur cesse d'être le dernier mot dès qu'un vrai prompt ou une
     // réponse assistant le suit.
-    state = applyTranscriptTruth(state, c.entry, t);
+    convState = applyTranscriptTruth(convState, c.entry, t);
     // `tabTitle` = libellé BRUT du store (matching), `title` = ce qui s'affiche.
     const tabTitle = titles.get(c.sessionId) || null;
     const picked = pickTitle((t && t.title) || 'Conversation', t && t.titleSource, tabTitle, tabs);
-    const title = picked.title;
+    prepared.push({ c, t, state: convState, tabTitle, title: picked.title, titleSource: picked.titleSource });
+  }
+
+  // Appariement bijectif (lot 2 du plan d'appariement, 2026-08-21) : chaque
+  // onglet n'est consommé qu'UNE fois. `prepared` est déjà dans l'ordre de
+  // `candidates` (onglet connu d'abord, puis mtime décroissant) — c'est cet
+  // ordre qui départage les groupes ambigus dans pairTabs (labels.js).
+  const pairing = pairTabs(
+    prepared.map((p) => ({ sessionId: p.c.sessionId, title: p.title, tabTitle: p.tabTitle })),
+    (tabs && tabs.labels) || [],
+  );
+
+  // PASSE 2 — décide qui est visible, dans le même ordre, avec l'appariement
+  // déjà connu.
+  for (const p of prepared) {
+    const { c, t, state, tabTitle, title, titleSource } = p;
+    const hasTab = pairing.index.has(c.sessionId);
     const gone = isGone(
-      { sessionId: c.sessionId, title, tabTitle, titleSource: picked.titleSource, state, mtime: c.mtime },
-      tabs, closedAt, live, foreign
+      { sessionId: c.sessionId, title, tabTitle, titleSource, state, mtime: c.mtime },
+      tabs, closedAt, live, foreign, hasTab
     );
-    if (gone) {
+    // Marquée « à relire » ET plus aucun onglet : la ligne RESTE, c'est tout
+    // l'objet du lot 3 — l'user ferme des onglets en croyant le travail fini,
+    // la marque est là pour que la conversation ne parte pas avec. `gone` est
+    // ici une preuve POSITIVE (isGone n'y arrive qu'après avoir écarté onglet
+    // apparié, process vivant et titre non matchable) : on la publie telle
+    // quelle sous `tabGone`, au lieu de la laisser se deviner d'un `tabOpen`
+    // faux — qui, lui, peut n'être qu'un manque de matching passager
+    // (resolveTabOpen). C'est ce fait-là que le rendu barre et que le clic
+    // transforme en réouverture.
+    const keptByPin = gone && pinnedIds.has(c.sessionId);
+    if (gone && !keptByPin) {
       // Jamais rendue — mais son identité reste candidate à la supplantation
       // (cf. commentaire au-dessus de `supersedeCandidates`). `gone` implique
-      // déjà `!hasOpenTab` (isGone retourne plus tôt sinon) : tabOpen est donc
+      // déjà `!hasTab` (isGone retourne plus tôt sinon) : tabOpen est donc
       // toujours faux ici, pas besoin de resolveTabOpen.
       supersedeCandidates.push({
-        sessionId: c.sessionId, title, titleSource: picked.titleSource,
+        sessionId: c.sessionId, title, titleSource,
         mtime: c.mtime, live: live.has(c.sessionId), tabOpen: false, transcript: c.transcript,
       });
       continue;
@@ -796,16 +934,33 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // Sert au badge « terminé, l'onglet peut être fermé » des membres de
       // groupe (lot 2). `tabs.known` faux = on ne sait rien des onglets → false,
       // et le badge ne s'affiche pas : ne rien proposer vaut mieux que proposer
-      // de fermer un onglet dont on ignore l'existence. Sinon, le match brut
-      // passe par resolveTabOpen (lot « bascule au focus ») pour absorber un
-      // manque isolé plutôt que de le croire tout de suite.
-      tabOpen: tabs.known
-        ? resolveTabOpen(c.sessionId, hasOpenTab({ title, tabTitle }, tabs), tabOpenMisses, live.has(c.sessionId))
-        : false,
+      // de fermer un onglet dont on ignore l'existence. Sinon, l'appariement
+      // bijectif (`hasTab`, plus haut) passe par resolveTabOpen (lot « bascule
+      // au focus ») pour absorber un manque isolé plutôt que de le croire
+      // tout de suite.
+      // `keptByPin` : la question est déjà tranchée, et dans l'autre sens —
+      // repasser par resolveTabOpen rendrait `true` sur le premier manque
+      // (tolérance), c'est-à-dire annoncer un onglet dont isGone vient de
+      // prouver l'absence. Le doute ne profite à l'affichage que là où il y a
+      // un doute.
+      tabOpen: keptByPin ? false : (tabs.known
+        ? resolveTabOpen(c.sessionId, hasTab, tabOpenMisses, live.has(c.sessionId))
+        : false),
+      // Onglet PROUVÉ absent, ligne retenue par la seule marque (lot 3) : le
+      // rendu la barre et son clic ROUVRE la conversation
+      // (claude-vscode.editor.open) au lieu de chercher un onglet qui n'existe
+      // plus. Faux partout ailleurs, y compris sur une conv simplement
+      // `tabOpen: false` — les deux ne disent pas la même chose.
+      tabGone: keptByPin,
+      // Cette conv appartient-elle à un groupe où l'appariement est arbitraire
+      // (mêmes titres tronqués) ? Lot 3 du plan d'appariement : consommé par
+      // le surlignage plus bas (se taire plutôt que deviner) et par le webview
+      // (signe discret + infobulle sur la ligne).
+      tabAmbiguous: pairing.ambiguous.has(c.sessionId),
       // Le consommateur (focus.js, extension.js) rematche des libellés
       // d'onglets contre ces DEUX titres — cf. convMatchesLabel.
       tabTitle,
-      titleSource: picked.titleSource,
+      titleSource,
       state,
       acked: isAcked(c.entry),
       since: (c.entry && (c.entry.since || c.entry.updated_at)) || c.mtime || null,
@@ -869,20 +1024,21 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // borner la lecture des transcripts — cf. SCAN_LIMIT). 3 modes exposés au
   // panneau (claudeCodeQuotaBar.conversationSortOrder) :
   //  - lastActivity : ordre déjà obtenu par le tri des candidats, rien à faire.
-  //  - tabOrder : ordre des onglets VS Code (tabs.labels, gauche → droite,
-  //    union de toutes les fenêtres — cf. tabs.js). Une conv sans onglet
-  //    matché (CLI, ou tabs.known false) part en Infinity : Array.prototype.sort
-  //    étant stable (garanti ES2019+), ces convs gardent entre elles leur ordre
-  //    mtime d'origine au lieu d'être mélangées.
+  //  - tabOrder : ordre des onglets VS Code (position dans l'appariement
+  //    bijectif `pairing`, lot 2 du plan d'appariement — plus le premier match
+  //    par libellé d'avant ce lot, qui donnait le MÊME rang à deux sœurs
+  //    homonymes). Une conv sans onglet assigné (CLI, ou tabs.known false)
+  //    part en Infinity : Array.prototype.sort étant stable (garanti ES2019+),
+  //    ces convs gardent entre elles leur ordre mtime d'origine au lieu d'être
+  //    mélangées.
   //  - statusFirst : busy/waiting en tête, peu importe l'ancienneté ; le reste
   //    garde l'ordre mtime (même stabilité de tri).
   const sortOrder = typeof opts.sortOrder === 'function' ? opts.sortOrder() : opts.sortOrder;
   if (sortOrder === 'tabOrder') {
-    const labels = (tabs && tabs.labels) || [];
     const posOf = new Map();
     for (const c of conversations) {
-      const idx = labels.findIndex((l) => convMatchesLabel(l, c));
-      posOf.set(c.sessionId, idx === -1 ? Infinity : idx);
+      const idx = pairing.index.get(c.sessionId);
+      posOf.set(c.sessionId, typeof idx === 'number' ? idx : Infinity);
     }
     conversations.sort((a, b) => posOf.get(a.sessionId) - posOf.get(b.sessionId));
   } else if (sortOrder === 'statusFirst') {
@@ -898,14 +1054,73 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // sélectionné (fenêtre fraîche, panneau seul). Un activeLabel qui ne matche
   // AUCUNE conv listée (titre renommé onglet inactif, conv hors maxItems) ne se
   // rabat PAS sur le repli : aucun surlignage vaut mieux qu'un surlignage faux.
-  // findIndex = premier match dans l'ordre d'AFFICHAGE (ci-dessus), même
-  // arbitrage d'ambiguïté de préfixe tronqué que focus.js.
+  //
+  // « la conversation appariée à CET INDEX » (lot 2 du plan d'appariement,
+  // 2026-08-21) — plus « le premier libellé qui matche », qui désignait
+  // n'importe laquelle de deux sœurs homonymes selon l'ordre d'affichage du
+  // moment (le bug d'origine : le surlignage suivait l'activité, pas
+  // l'onglet réellement sélectionné). `tabs.activeIndex` n'est valable dans
+  // l'union `tabs.labels` que si les libellés locaux en restent le PRÉFIXE
+  // (cf. tabs.js `allLabels()`) — vérifié ici plutôt que supposé, en
+  // comparant le libellé à cet index à `activeLabel`.
   const activeLabel = (tabs && tabs.activeLabel) || null;
+  const rawActiveIndex = tabs && typeof tabs.activeIndex === 'number' ? tabs.activeIndex : null;
+  const activeIndex = (rawActiveIndex != null && tabs.labels && tabs.labels[rawActiveIndex] === activeLabel)
+    ? rawActiveIndex : null;
+  let highlightVia = 'none';
+  let highlightSessionId = null;
+  let highlightMatches = 0;
   if (activeLabel) {
-    const i = conversations.findIndex((c) => convMatchesLabel(activeLabel, c));
-    if (i >= 0) conversations[i].isActive = true;
+    highlightMatches = conversations.reduce((n, c) => n + (convMatchesLabel(activeLabel, c) ? 1 : 0), 0);
+    // Repli sur l'ancien matching par libellé (premier match dans l'ordre
+    // d'affichage) quand l'index n'est pas disponible — acte mémorisé,
+    // souvenir de repli, ou index qui ne désigne aucune conv visible.
+    let target = activeIndex != null
+      ? conversations.find((c) => pairing.index.get(c.sessionId) === activeIndex)
+      : null;
+    if (!target) target = conversations.find((c) => convMatchesLabel(activeLabel, c));
+    // Groupe ambigu (lot 3 du plan d'appariement) : l'appariement qui a
+    // désigné `target` est ARBITRAIRE (ordre d'affichage vs ordre des
+    // onglets, cf. pairTabs) — se taire vaut mieux qu'un surlignage au hasard,
+    // le symptôme même du signalement d'origine. Seule exception :
+    // active-session.json (identifiant VRAI, pas un titre) désigne une des
+    // sœurs du groupe — alors c'est elle, jamais l'appariement arbitraire.
+    if (target && pairing.ambiguous.has(target.sessionId)) {
+      const sister = activeSessionId
+        ? conversations.find((c) => c.sessionId === activeSessionId
+            && pairing.ambiguous.has(c.sessionId) && convMatchesLabel(activeLabel, c))
+        : null;
+      target = sister || null;
+      if (sister) highlightVia = 'active-session';
+    }
+    if (target) {
+      target.isActive = true;
+      if (highlightVia !== 'active-session') highlightVia = 'label';
+      highlightSessionId = target.sessionId;
+    }
   } else {
     for (const c of conversations) c.isActive = c.sessionId === activeSessionId;
+    if (activeSessionId) { highlightVia = 'active-session'; highlightSessionId = activeSessionId; }
+  }
+  // Journal du lot 0 (préalable au fix d'appariement) — un OBSERVATEUR : aucune
+  // décision ci-dessus n'en dépend, l'absence de journal ne change rien au
+  // rendu. Ne trace qu'un CHANGEMENT de verdict (verdictFilter), sinon le
+  // panneau produirait des dizaines de lignes par minute. Cf. lot 0 du
+  // PLAN_appariement_onglets_2026-08-15.md pour le détail des champs.
+  {
+    const sig = JSON.stringify([activeLabel, highlightSessionId, highlightVia, highlightMatches,
+      tabs && tabs.frozen, tabs && tabs.source]);
+    const taken = highlightVerdictFilter.take('highlight', sig);
+    if (taken) {
+      logEvent('highlight-verdict', {
+        activeLabel, sessionId: highlightSessionId, matches: highlightMatches,
+        activeSessionId, via: highlightVia,
+        frozen: !!(tabs && tabs.frozen), source: (tabs && tabs.source) || null,
+        windowFocused: tabs ? tabs.windowFocused : null,
+        sinceFocusMs: tabs ? tabs.sinceFocusMs : null,
+        repeatsSkipped: taken.repeatsSkipped,
+      });
+    }
   }
 
   // Purge des compteurs de sessions qui ne sont même plus candidates (fermées
@@ -952,6 +1167,13 @@ function renderKey(convs) {
     // panneau tant qu'aucun AUTRE champ n'a changé — le chip resterait faux
     // jusqu'à un événement sans rapport.
     c.tabOpen,
+    // `tabGone` (lot 3, marque « à relire ») : une conv marquée dont l'onglet
+    // vient d'être prouvé fermé garde `tabOpen: false` — il l'était peut-être
+    // déjà d'un manque de matching passager. Sans ce champ dans la clé, le
+    // passage « listée » → « listée · onglet fermé » ne pousserait rien et la
+    // ligne resterait cliquable-vers-nulle-part jusqu'au prochain changement
+    // sans rapport.
+    c.tabGone,
   ]));
 }
 
