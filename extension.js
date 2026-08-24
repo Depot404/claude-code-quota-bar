@@ -1992,8 +1992,16 @@ function memberSources(getConv) {
     // markClosed), avant même que le registre des sessions ou les hooks aient
     // eu le temps de purger leur propre trace. Sans ce signal, member-truth
     // retombe sur la course hooks/registre (bug n°6, cf. member-truth.js).
+    // …complété par l'onglet prouvé ABSENT du dernier snapshot (2026-08-24) :
+    // `isTabClosed` ne connaît que les fermetures observées EN DIRECT, donc ni
+    // celles faites pendant que la fenêtre était éteinte, ni le cas du process
+    // orphelin (un CLI survit à son onglet — cf. CLAUDE.md du dossier). Sans
+    // ça, un membre de lot restait « ouverte » indéfiniment et retenait son lot
+    // à l'écran alors que la conversation, elle, avait bien quitté la liste.
     tabClosed(id) {
-      return !!(stateEngine && typeof stateEngine.isTabClosed === 'function' && stateEngine.isTabClosed(id));
+      if (!stateEngine) return false;
+      if (typeof stateEngine.isTabClosed === 'function' && stateEngine.isTabClosed(id)) return true;
+      return !!(typeof stateEngine.isTabGone === 'function' && stateEngine.isTabGone(id));
     },
   };
 }

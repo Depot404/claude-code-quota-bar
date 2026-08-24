@@ -139,6 +139,24 @@ function createSessionTitles(stateDbPath, options = {}) {
       if (k === key) return titles;
       const next = read();
       if (!next) return titles;   // lecture ratée → on ne mémorise pas la clé
+      // …et une lecture qui rend ZÉRO là où l'on connaissait des sessions n'est
+      // pas une lecture réussie non plus. Relevé le 2026-08-24 sur la base du
+      // workspace ouvert : deux lectures à trois minutes d'écart, 369 entrées
+      // puis 0, puis 369 de nouveau — sans la moindre erreur levée (SQLite rend
+      // simplement un instantané où la ligne n'est pas visible pendant que VS
+      // Code réécrit). Écraser la table pour autant, c'est perdre la seule
+      // preuve d'identité d'onglet le temps d'un tick, donc faire reparaître
+      // toutes les lignes sans onglet que cette preuve fait disparaître.
+      // On garde la dernière table connue et on ne mémorise pas la clé : le
+      // prochain rafraîchissement relira. Un workspace qui perd RÉELLEMENT
+      // toutes ses sessions garde une table périmée, sans conséquence — une
+      // identité publiée en trop ne fait jamais afficher une conv de plus,
+      // elle ne sert qu'à conclure une fermeture déjà prouvée par l'absence
+      // d'onglet.
+      if (next.size === 0 && titles.size > 0) {
+        if (!warned) { warned = true; log('session titles read returned 0 (kept %d known)', titles.size); }
+        return titles;
+      }
       key = k;
       warned = false;
       titles = next;

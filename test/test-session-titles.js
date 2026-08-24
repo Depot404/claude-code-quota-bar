@@ -151,6 +151,28 @@ if (!sqlite) {
   check('valeur corrompue → dernière table connue conservée',
     titles.get().get('sess-1') === 'Titre renommé entre-temps');
 
+  // Zéro entrée là où l'on en connaissait déjà : PANNE, pas dégradation.
+  // Relevé le 2026-08-24 sur le vscdb RÉEL du workspace ouvert — 369 entrées,
+  // puis 0, puis 369 de nouveau à trois minutes d'écart, sans la moindre erreur
+  // levée (instantané SQLite pris pendant que VS Code réécrit). Écraser la table
+  // pour autant, c'est perdre la seule preuve d'identité d'onglet le temps d'un
+  // tick, donc faire reparaître toutes les lignes sans onglet qu'elle écarte.
+  write(JSON.stringify([]));
+  const future3 = future2 + 5;
+  fs.utimesSync(dbPath, future3, future3);
+  check('lecture à zéro entrée → dernière table connue conservée',
+    titles.get().get('sess-1') === 'Titre renommé entre-temps',
+    String(titles.get().get('sess-1')));
+
+  // …et la clé n'a pas été mémorisée : le rafraîchissement suivant relit pour de
+  // vrai, la table repart dès que la lecture redevient bonne.
+  entries[0].label = 'Titre revenu';
+  write(JSON.stringify(entries));
+  const future4 = future3 + 5;
+  fs.utimesSync(dbPath, future4, future4);
+  check('lecture bonne après un zéro → table remise à jour',
+    titles.get().get('sess-1') === 'Titre revenu', String(titles.get().get('sess-1')));
+
   // Throttle : `get()` est appelé à chaque snapshot, il ne doit pas re-stater
   // le fichier à chaque fois.
   const throttled = createSessionTitles(dbPath, { minStatIntervalMs: 60000 });

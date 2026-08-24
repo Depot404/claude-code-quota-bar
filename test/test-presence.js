@@ -233,9 +233,24 @@ console.log('\n4bis. Snapshot : session vivante et titre d\'onglet réel');
     !snap.conversations.some((c) => c.sessionId === 'a'),
     snap.conversations.map((c) => c.title).join(' | '));
 
-  // La même, avec son process CLI vivant : jamais masquée.
+  // La même, avec son process CLI vivant — MASQUÉE depuis le 2026-08-24.
+  // « Le CLI tourne, donc son onglet est ouvert » est faux : un process survit à
+  // la fermeture de son onglet (relevé vivant 16 h après, fenêtre jamais
+  // rechargée, zéro onglet Claude déclaré par elle) et la ligne restait à
+  // l'écran pour toujours. Le store publie ici l'identité d'onglet de 'a' :
+  // aucun onglet ne la porte ⇒ c'est une PREUVE de fermeture, pas une ignorance.
   snap = snapshot(() => noTabs, { sessionTitles: titles, liveSessions: () => new Set(['a']) });
-  check('session vivante sans onglet matchant → affichée quand même',
+  check('identité publiée + aucun onglet : masquée MÊME avec son CLI vivant (CLI orphelin)',
+    !snap.conversations.some((c) => c.sessionId === 'a'),
+    snap.conversations.map((c) => c.title).join(' | '));
+
+  // …et l'autre moitié, toujours vraie : tant que le store n'a RIEN publié pour
+  // cette session (conv qui vient de naître, la vue officielle écrit sa paire
+  // sessionId→titre avec latence), il n'existe aucune preuve à opposer au
+  // process vivant — elle reste affichée. C'est le cas que protégeait le
+  // garde-fou d'origine (2026-07-22), et il est intact.
+  snap = snapshot(() => noTabs, { sessionTitles: () => new Map(), liveSessions: () => new Set(['a']) });
+  check('identité non publiée + CLI vivant → affichée (conv qui vient de naître)',
     snap.conversations.some((c) => c.sessionId === 'a'),
     snap.conversations.map((c) => c.title).join(' | '));
 
@@ -249,6 +264,56 @@ console.log('\n4bis. Snapshot : session vivante et titre d\'onglet réel');
     snap.conversations.find((c) => c.isActive || false) &&
     snap.conversations.find((c) => c.isActive).sessionId === 'a',
     JSON.stringify(snap.conversations.map((c) => [c.sessionId, c.isActive])));
+}
+
+// ── Les trois échappatoires, fermées dès que l'identité est publiée ─────────
+console.log('\n4bis-suite. Identité d\'onglet publiée : plus de ligne sans onglet');
+{
+  // 'c' (titre de repli) et 'd' (busy, CLI vivant) restaient affichées SANS
+  // onglet, chacune par une exemption différente d'isGone — toutes posées pour
+  // couvrir un « on ne peut pas encore savoir ». Dès que le store publie leur
+  // titre d'onglet, on PEUT savoir : aucun onglet ne les porte ⇒ elles partent.
+  // Demande de l'user du 2026-08-23 : les lignes reflètent les onglets ouverts.
+  const published = () => new Map([['c', 'Titre de repli sans ai-title'], ['d', 'Conv CLI au travail']]);
+  const onlyB = () => tabs('Conv ouverte à garder');
+
+  let snap = snapshot(onlyB, { sessionTitles: published, liveSessions: () => new Set(['d']) });
+  let ids = snap.conversations.map((x) => x.sessionId);
+  check('titre de repli + identité publiée + aucun onglet → masquée', !ids.includes('c'), ids.join(','));
+  check('busy + CLI vivant + identité publiée + aucun onglet → masquée', !ids.includes('d'), ids.join(','));
+  check('… la conv dont l\'onglet est ouvert, elle, reste', ids.includes('b'), ids.join(','));
+
+  // Le fait « onglet prouvé absent » est PUBLIÉ par le snapshot, y compris pour
+  // les conversations qu'il ne rend pas : c'est de là que member-truth.js tire
+  // son `tabClosed` pour les membres de lot, dont l'onglet a pu se fermer hors
+  // de la vue (fenêtre éteinte, process orphelin). Sans ça, un membre restait
+  // « ouverte » et retenait son lot à l'écran (signalé le 2026-08-24).
+  check('tabGoneIds publie les onglets prouvés absents',
+    snap.tabGoneIds.has('c') && snap.tabGoneIds.has('d'), [...snap.tabGoneIds].join(','));
+  check('… et jamais celui dont l\'onglet est ouvert', !snap.tabGoneIds.has('b'),
+    [...snap.tabGoneIds].join(','));
+
+  // Garde-fou de panne : store muet (0 entrée là où le fichier existe) = PANNE,
+  // pas dégradation (incident 2026-08-20) — les exemptions reprennent toutes,
+  // rien ne disparaît de plus.
+  snap = snapshot(onlyB, { sessionTitles: () => new Map(), liveSessions: () => new Set(['d']) });
+  ids = snap.conversations.map((x) => x.sessionId);
+  check('store muet → les deux reviennent (aucun masquage de plus)',
+    ids.includes('c') && ids.includes('d'), ids.join(','));
+  check('… et tabGoneIds reste vide : on ne prouve la fermeture de personne',
+    snap.tabGoneIds.size === 0, [...snap.tabGoneIds].join(','));
+
+  // La marque « à relire » : seule exemption qui subsiste, parce qu'elle est un
+  // ORDRE de l'utilisateur et non une preuve manquante.
+  snap = snapshot(onlyB, {
+    sessionTitles: published, liveSessions: () => new Set(['d']),
+    pinnedSessions: () => new Set(['c']),
+  });
+  ids = snap.conversations.map((x) => x.sessionId);
+  check('… sauf marquée « à relire » : elle reste, sans onglet', ids.includes('c'), ids.join(','));
+  const pinned = snap.conversations.find((x) => x.sessionId === 'c');
+  check('… et elle porte tabGone (barrée, clic = rouvrir)',
+    !!pinned && pinned.tabGone === true, pinned && String(pinned.tabGone));
 }
 
 console.log('\n4ter. Transcript plus vieux que recentMs mais session vivante');

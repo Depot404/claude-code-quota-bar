@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.60.1] - 2026-08-24
+
+### Fixed
+- **A batch could keep every one of its rows after its conversations had left the list.** The row-level fix in 2.60.0 stopped short of the batches: a member's status still asked "is its process alive?" and only knew about tab closures the panel had *watched happen* — never one made while the window was shut, never an orphaned process outliving its tab. A batch therefore stayed on screen, one member labelled "open", with no tab behind any of it. The snapshot now publishes which conversations are *proven* to have no tab — including the ones it does not list — and a member reads that fact directly. A batch whose members are all finished and closed removes itself, as it always meant to.
+
+## [2.60.0] - 2026-08-24
+
+### Fixed
+- **A conversation whose tab is closed no longer keeps its row.** The panel already meant to list what you have open, but three separate escape hatches could keep a row alive with no tab behind it: a running CLI process was taken as proof that its tab was open, a conversation the hooks still believed busy was kept "just in case", and a conversation without an AI-generated title could never be concluded closed at all — its row was, in practice, immortal. All three existed to cover the same honest case: *we cannot know yet*. They now stop at the point where we can. As soon as the editor's own session table publishes a tab title for a conversation, finding no open tab under that name is a proof of closure rather than an absence of information, and the row goes — process alive or not, hooks or no hooks, fallback title or not. Closing a tab does not always kill its background process (measured: one still running sixteen hours later, in a window that had never been reloaded and no longer showed a single conversation tab), which is what made the first hatch quietly wrong.
+- Conversations pinned "to review" are unaffected, by design: a pin is an instruction from you, not a missing proof, and it remains the one reason a row outlives its tab.
+- **The session table no longer forgets what it knew on a single bad read.** That store is read straight from the editor's own database while the editor is writing to it, and a read can come back with zero rows and no error at all — observed on a live workspace: 369 entries, then 0, then 369 again, minutes apart. Adopting that zero wiped the only identity proof the panel has, so every row without a tab reappeared until the next good read. A read that returns nothing where something was known is now treated as the failed read it is: the last known table stands, and the next refresh genuinely re-reads.
+- The failure mode stays safe. If the session table goes silent — the shape of that store is undocumented and has changed under us before — nothing is considered published, all three fallbacks resume their old role, and no row disappears that would not have disappeared before.
+
 ## [2.59.0] - 2026-08-23
 
 ### Added

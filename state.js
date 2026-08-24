@@ -415,7 +415,17 @@ const MATCHABLE_TITLE_SOURCES = new Set(['ai-title', 'tab-store']);
 // hasOpenTab, identique à un appariement sur cette conv seule (aucune
 // ambiguïté possible sans une autre conv pour la disputer) : comportement
 // inchangé pour tous les appels existants.
-function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab) {
+// `identityKnown` (2026-08-24) : la table sessionId → libellé d'onglet du store
+// VS Code (session-titles.js) PUBLIE déjà cette session — donc un appariement a
+// de quoi réussir, et son échec est une information, pas une ignorance. C'est le
+// discriminant qui manquait aux trois échappatoires ci-dessous : chacune existe
+// pour couvrir le cas « on ne peut pas encore savoir », aucune n'a de raison de
+// s'appliquer quand on PEUT savoir. Absent (bancs d'avant ce lot, appels isolés)
+// ⇒ false ⇒ comportement d'avant à l'octet près.
+// Le garde-fou de panne est chez l'appelant : store globalement muet (0 entrée
+// là où le fichier n'est pas vide, incident du 2026-08-20) ⇒ false partout ⇒
+// aucun masquage de plus, jamais un panneau vide.
+function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab, identityKnown = false) {
   if (!tabs.known) return false;
   const open = typeof hasTab === 'boolean' ? hasTab : hasOpenTab(c, tabs);
   // Ouverte ici ou dans une autre fenêtre (union publiée par tabs.js), ET
@@ -437,7 +447,15 @@ function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab) {
   // Process CLI vivant : identité STABLE, indépendante de tout libellé. C'est
   // la parade au bug d'origine (2026-07-22) — onglet renommé par l'extension
   // officielle, plus aucun titre ne matche, conv ouverte et au travail masquée.
-  if (live.has(c.sessionId)) return false;
+  // …mais SEULEMENT tant que le store n'a pas publié l'identité d'onglet de
+  // cette session. « Le CLI tourne, donc son onglet est ouvert » est FAUX, et
+  // c'est mesuré (2026-08-24) : un CLI relevé vivant 16 h après l'ouverture,
+  // dans une fenêtre née la même minute et JAMAIS rechargée, qui ne déclarait
+  // plus un seul onglet Claude — fermer l'onglet ne tue pas toujours le
+  // process. La ligne restait donc à l'écran pour toujours, sans onglet
+  // derrière. Une fois l'identité publiée, l'absence d'onglet à son nom
+  // tranche, et la vivacité du process ne dit plus rien de l'écran.
+  if (live.has(c.sessionId) && !identityKnown) return false;
 
   // …mais vivante AILLEURS n'est pas vivante ICI (2026-08-17). Une session du
   // serveur Remote Control (ouverte depuis le mobile, exécutée sur ce PC dans
@@ -459,11 +477,19 @@ function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab) {
   // ci-dessus. `stale` n'en est pas : c'est « plus rien d'écrit depuis 5 min »,
   // donc on ne peut pas la dire vivante — et c'est justement l'état où atterrit
   // une conv fermée pendant que VS Code était éteint (SessionEnd n'ayant pas tiré).
-  if (c.state === 'busy' || c.state === 'waiting') return false;
+  // …même exception que ci-dessus : « au travail » ne se substitue à une preuve
+  // d'onglet que tant qu'il n'y en a AUCUNE de disponible. Identité publiée et
+  // aucun onglet à ce nom ⇒ l'onglet est fermé, que les hooks la croient encore
+  // occupée ou non (leur fiche survit à la mort du process).
+  if ((c.state === 'busy' || c.state === 'waiting') && !identityKnown) return false;
 
   // Titre de repli : il ne peut PAS matcher un libellé d'onglet de façon fiable,
-  // donc son absence de correspondance ne prouve rien.
-  if (!MATCHABLE_TITLE_SOURCES.has(c.titleSource)) return false;
+  // donc son absence de correspondance ne prouve rien… tant que le store n'a pas
+  // publié, lui, un titre matchable pour cette session. Quand il l'a fait, la
+  // preuve ne passe plus par le transcript et cette exemption n'a plus lieu
+  // d'être — c'est le seul chemin par lequel une ligne pouvait être IMMORTELLE
+  // (lignes barrées du 2026-08-20, batch coincé signalé le 2026-08-23).
+  if (!MATCHABLE_TITLE_SOURCES.has(c.titleSource) && !identityKnown) return false;
 
   return true;
 }
@@ -893,14 +919,35 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     (tabs && tabs.labels) || [],
   );
 
+  // Le store d'onglets publie-t-il l'identité de cette session ? (cf. isGone.)
+  // `titles.size > 0` EST le garde-fou de panne exigé par le dossier : une
+  // source qui rend zéro là où le fichier n'est pas vide n'est pas une
+  // dégradation mais une PANNE (schéma d'URI changé sous nos pieds, 2026-08-20)
+  // — dans ce cas personne n'est « publié », les trois exemptions d'isGone
+  // reprennent toutes leur rôle d'avant, et rien ne disparaît de plus.
+  const storeAlive = titles.size > 0;
+  const identityKnown = (id) => storeAlive && titles.has(id);
+
+  // Sessions dont l'onglet est PROUVÉ absent — identité publiée, appariement
+  // tenté, aucun onglet. Publié hors de la liste rendue parce que le fait vaut
+  // aussi (surtout) pour les conversations que la liste ne contient PAS : un
+  // membre de lot dont l'onglet est fermé se lisait « ouverte » tant que son
+  // process traînait, et retenait son lot à l'écran (member-truth.js, dont le
+  // `tabClosed` ne connaissait que les fermetures OBSERVÉES en direct — donc
+  // rien de ce qui s'est fermé pendant que la fenêtre était éteinte, ni d'un
+  // process orphelin). Signalé par l'user le 2026-08-24, panneau rechargé :
+  // les lignes de conversations avaient bien disparu, le lot non.
+  const tabGoneIds = new Set();
+
   // PASSE 2 — décide qui est visible, dans le même ordre, avec l'appariement
   // déjà connu.
   for (const p of prepared) {
     const { c, t, state, tabTitle, title, titleSource } = p;
     const hasTab = pairing.index.has(c.sessionId);
+    if (tabs.known && !hasTab && identityKnown(c.sessionId)) tabGoneIds.add(c.sessionId);
     const gone = isGone(
       { sessionId: c.sessionId, title, tabTitle, titleSource, state, mtime: c.mtime },
-      tabs, closedAt, live, foreign, hasTab
+      tabs, closedAt, live, foreign, hasTab, identityKnown(c.sessionId)
     );
     // Marquée « à relire » ET plus aucun onglet : la ligne RESTE, c'est tout
     // l'objet du lot 3 — l'user ferme des onglets en croyant le travail fini,
@@ -1141,7 +1188,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // `supersededBy` (husk→successeur) : la redirection d'identité que les
   // consommateurs de sessionId (membres de groupe, master, moteur de vagues)
   // appliquent au rendu — cf. supersede.js. Vide dans le cas nominal.
-  return { conversations, activeSessionId, generatedAt: now, supersededBy };
+  return { conversations, activeSessionId, generatedAt: now, supersededBy, tabGoneIds };
 }
 
 // Ce que le webview AFFICHE, et rien d'autre. Le snapshot porte aussi des champs
@@ -1299,6 +1346,13 @@ function createStateEngine(options = {}) {
     // l'exposer permet à member-truth de ne plus jamais présumer un onglet
     // ouvert (`idle`/`inserted`) pendant la course asynchrone qui suit.
     isTabClosed: (sessionId) => closedAt.has(sessionId),
+    // Onglet prouvé ABSENT par le dernier snapshot (identité publiée par le
+    // store, aucun onglet apparié) — complément indispensable de `isTabClosed`,
+    // qui ne connaît que ce qui s'est fermé SOUS SES YEUX : ni une fermeture
+    // faite fenêtre éteinte, ni un process orphelin resté vivant après elle.
+    // Même sens de l'échec que partout ici : on ne sait pas ⇒ faux ⇒ rien de
+    // masqué en plus.
+    isTabGone: (sessionId) => !!(snapshot && snapshot.tabGoneIds && snapshot.tabGoneIds.has(sessionId)),
     // Onglet(s) fermé(s) : on retire tout de suite, SANS attendre la purge de
     // sessions-state.json que fait l'appelant derrière — celle-ci prend un lock
     // inter-process et peut traîner ; l'affichage, lui, doit tomber sous la
