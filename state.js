@@ -74,6 +74,15 @@ const ACTIVE_SESSION_PATH = path.join(CLAUDE_DIR, 'active-session.json');
 // en silence (longue réflexion, outil long) — cf. busyOrStale.
 // Affichage seulement : on ne tue rien (garde-fou du plan).
 const STALE_MS = 5 * 60 * 1000;
+// Marqueur `compacting` posé par PreCompact (hooks/hook-session-state.js) :
+// aucune garantie doc que PostCompact tire (compaction bloquée par un autre
+// hook, CLI tué en plein milieu) — au-delà de ce plafond sans levée, on cesse
+// de le croire et on retombe sur l'état réel de l'entrée (busy/waiting/done),
+// jamais un spinner éternel. Généreux à dessein : une compaction sur un très
+// gros historique peut prendre plusieurs minutes ; le vrai filet anti-gel est
+// de toute façon la levée au premier UserPromptSubmit/Stop (posée côté hook),
+// ce plafond ne couvre que le cas où AUCUN des deux ne survient jamais.
+const COMPACTING_CAP_MS = 10 * 60 * 1000;
 // Filtre anti-bavardage du journal de surlignage (lot 0) : une extension héberge
 // une seule fenêtre, donc un seul verdict à la fois — une clé fixe suffit,
 // partagée par tous les appels de buildSnapshot de ce process.
@@ -220,6 +229,13 @@ function isResuming(since, activity, now) {
 // absent (session hors registre, appel unitaire) OU signal non daté (`0`) →
 // comparaison sautée, comportement d'AVANT cette date — jamais pire.
 function effectiveState(entry, mtime, now, isLive, activityTs, resumeSignals, startedAt) {
+  // Compaction en cours (cf. COMPACTING_CAP_MS) : force `busy` PAR-DESSUS
+  // l'état réel de l'entrée, quel qu'il soit (`done` compris — précompute en
+  // tâche de fond entre deux tours, cf. hook-session-state.js). Jamais sans
+  // process vivant : un CLI mort ne postera jamais son PostCompact, le
+  // croire ferait un spinner éternel sur une conv qui n'ira nulle part.
+  if (entry && entry.compacting && isLive && entry.compact_since
+    && now - entry.compact_since <= COMPACTING_CAP_MS) return 'busy';
   if (!entry || !entry.state) return 'idle';
   const since = entry.since || entry.updated_at || 0;
   const activity = activityTs || mtime;
@@ -395,6 +411,41 @@ function resolveTabOpen(sessionId, rawOpen, misses, isLive) {
   const n = (misses.get(sessionId) || 0) + 1;
   misses.set(sessionId, n);
   return n < TAB_OPEN_MISS_TOLERANCE;
+}
+
+// Tolérance à une perte AMBIGUË de l'appariement (lot « présence par
+// identifiant », 2026-08-26) — la garde qui rend la règle de dégradation
+// non négociable : une ligne déjà affichée ne doit JAMAIS disparaître du seul
+// fait que l'identité (openIds, cf. pairTabs) est absente ou en retard.
+//
+// POURQUOI CE N'EST PAS resolveTabOpen — celui-ci lisse le CHIP d'affichage
+// (barré ou non) d'une conv qu'isGone a DÉJÀ décidé de garder ; il n'a jamais
+// eu à protéger la PRÉSENCE elle-même. Or le clignotement signalé par l'user
+// (« se barre puis se debarre ») se joue une étape plus tôt : `pairing.index`
+// (labels.js) peut perdre un sessionId d'un recompute à l'autre — non pas
+// parce que son onglet a fermé, mais parce que l'ordre des candidats ou des
+// libellés a changé au sein d'un groupe AMBIGU (deux sœurs au même titre
+// tronqué, cf. PLAN_appariement_onglets_2026-08-15.md), et pairTabs retombe
+// alors sur son ordre de départage. Avec l'identité disponible (openIds côté
+// pairTabs), ce cas ne se présente presque plus JAMAIS — mais « presque »
+// n'est pas une garantie : base verrouillée, memento flushé en retard,
+// ancienne version de VS Code sans le memento. Cette tolérance couvre
+// exactement ce résidu.
+//
+// Distinction avec une perte NON ambiguë (aucun libellé ne matche du tout,
+// `pairing.ambiguous` ne contient pas ce sessionId) : celle-là reste un fait
+// FIABLE, immédiat, sans tolérance — c'est elle qui fait toujours disparaître
+// une conversation réellement fermée dès le premier recompute qui le constate
+// (exigence « < 1 s » du lot 5, cf. isGone). Seule la perte NÉE d'une
+// ambiguïté de libellé mérite le doute.
+const PRESENCE_MISS_TOLERANCE = 3; // 2 pertes ambiguës consécutives tolérées, 3 = perdu
+
+function resolveHasTabForPresence(sessionId, hasTab, isAmbiguous, misses) {
+  if (hasTab) { misses.delete(sessionId); return true; }
+  if (!isAmbiguous) { misses.delete(sessionId); return false; }
+  const n = (misses.get(sessionId) || 0) + 1;
+  misses.set(sessionId, n);
+  return n < PRESENCE_MISS_TOLERANCE;
 }
 
 // Sources de titre qui PEUVENT matcher un libellé d'onglet, donc dont l'absence
@@ -681,6 +732,15 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // Absente des opts (bancs d'avant ce lot) ⇒ ensemble vide ⇒ comportement d'avant.
   const foreign = (typeof opts.foreignSessions === 'function' && opts.foreignSessions()) || NO_LIVE;
   const titles = (typeof opts.sessionTitles === 'function' && opts.sessionTitles()) || new Map();
+  // Sessions dont un onglet Claude est confirmé ouvert DANS CETTE FENÊTRE, par
+  // IDENTITÉ exacte (session-titles.js `createOpenSessionIds`, memento
+  // `workbench.parts.editor` du state.vscdb) — source de vérité de la présence
+  // pour pairTabs ci-dessous (labels.js), le libellé d'onglet ne redevenant que
+  // le repli explicite. Absente des opts (bancs d'avant ce lot, base illisible,
+  // ancienne version de VS Code sans le memento) ⇒ Set vide ⇒ pairTabs retombe
+  // intégralement sur l'appariement par libellé, comportement d'avant à l'octet
+  // près.
+  const openIds = (typeof opts.openSessionIds === 'function' && opts.openSessionIds()) || NO_LIVE;
   // Naissance (ms epoch) de chaque process VIVANT du registre — incident
   // spinner éternel 2026-08-18, cf. le commentaire de `effectiveState` sur
   // `startedAt`. Absente des opts (bancs d'avant ce lot) ⇒ Map vide ⇒ la
@@ -852,6 +912,11 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // Cf. resolveTabOpen : Map fraîche par défaut (bancs déterministes), tenue
   // par l'engine à travers ses recomputes dans le cas réel.
   const tabOpenMisses = opts.tabOpenMisses instanceof Map ? opts.tabOpenMisses : new Map();
+  // Cf. resolveHasTabForPresence : Map fraîche par défaut (bancs déterministes),
+  // tenue par l'engine à travers ses recomputes dans le cas réel — SÉPARÉE de
+  // tabOpenMisses ci-dessus, qui protège un champ d'affichage déjà décidé
+  // présent, pas la présence elle-même.
+  const presenceMisses = opts.presenceMisses instanceof Map ? opts.presenceMisses : new Map();
 
   const conversations = [];
   // Convs dont l'identité (titre, et plus bas premier message) peut nourrir
@@ -917,6 +982,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   const pairing = pairTabs(
     prepared.map((p) => ({ sessionId: p.c.sessionId, title: p.title, tabTitle: p.tabTitle })),
     (tabs && tabs.labels) || [],
+    openIds,
   );
 
   // Le store d'onglets publie-t-il l'identité de cette session ? (cf. isGone.)
@@ -944,10 +1010,18 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   for (const p of prepared) {
     const { c, t, state, tabTitle, title, titleSource } = p;
     const hasTab = pairing.index.has(c.sessionId);
-    if (tabs.known && !hasTab && identityKnown(c.sessionId)) tabGoneIds.add(c.sessionId);
+    // Tolérance à une perte AMBIGUË (cf. resolveHasTabForPresence) : une ligne
+    // déjà affichée ne part JAMAIS sur le seul fait qu'un groupe de sœurs
+    // homonymes a retrouvé son ordre de départage cette fois-ci. Une perte
+    // NON ambiguë (pairing.ambiguous ne contient pas ce sessionId) reste,
+    // elle, immédiate — c'est un fait fiable, pas un tirage au sort.
+    const presenceHasTab = resolveHasTabForPresence(
+      c.sessionId, hasTab, pairing.ambiguous.has(c.sessionId), presenceMisses
+    );
+    if (tabs.known && !presenceHasTab && identityKnown(c.sessionId)) tabGoneIds.add(c.sessionId);
     const gone = isGone(
       { sessionId: c.sessionId, title, tabTitle, titleSource, state, mtime: c.mtime },
-      tabs, closedAt, live, foreign, hasTab, identityKnown(c.sessionId)
+      tabs, closedAt, live, foreign, presenceHasTab, identityKnown(c.sessionId)
     );
     // Marquée « à relire » ET plus aucun onglet : la ligne RESTE, c'est tout
     // l'objet du lot 3 — l'user ferme des onglets en croyant le travail fini,
@@ -1176,6 +1250,10 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   for (const id of [...tabOpenMisses.keys()]) {
     if (!byId.has(id)) tabOpenMisses.delete(id);
   }
+  // Même raison, même risque de fuite : presenceMisses (resolveHasTabForPresence).
+  for (const id of [...presenceMisses.keys()]) {
+    if (!byId.has(id)) presenceMisses.delete(id);
+  }
   // Même raison pour l'accumulateur de coût : ses totaux par fichier n'ont plus
   // de consommateur dès qu'une conversation quitte l'ensemble des candidates.
   if (readCost && typeof readCost.forget === 'function') {
@@ -1232,6 +1310,12 @@ function createStateEngine(options = {}) {
   // focus ») : DOIT survivre d'un recompute à l'autre pour que la tolérance
   // serve à quelque chose — une Map fraîche à chaque appel annulerait le lot.
   const tabOpenMisses = new Map();
+  // Même besoin de survie d'un recompute à l'autre, pour resolveHasTabForPresence
+  // (lot « présence par identifiant ») — Map SÉPARÉE de tabOpenMisses ci-dessus :
+  // les deux comptent des manques sur des questions différentes (le chip
+  // d'affichage vs la présence même de la ligne) et ne doivent pas se remettre
+  // à zéro l'une l'autre.
+  const presenceMisses = new Map();
   // `liveSessions` a un défaut RÉEL : le registre est du Node pur, lisible d'ici
   // (contrairement au state.vscdb, dont seul l'hôte d'extension connaît le
   // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
@@ -1245,7 +1329,7 @@ function createStateEngine(options = {}) {
     // Défaut RÉEL, même registre que liveSessions ci-dessus (live-sessions.js) :
     // cf. `startedAt` sur effectiveState.
     liveSessionStarts: () => new Map(liveSessionEntries().map((e) => [e.sessionId, e.startedAt || null])),
-    ...DEFAULTS, ...options, closedAt, tabOpenMisses, readCost,
+    ...DEFAULTS, ...options, closedAt, tabOpenMisses, presenceMisses, readCost,
   };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
   // Part de la clé de rendu qui N'EST PAS dans les conversations (2026-08-06).
@@ -1391,6 +1475,8 @@ module.exports = {
   isAcked,
   isGone,
   resolveTabOpen,
+  resolveHasTabForPresence,
+  PRESENCE_MISS_TOLERANCE,
   renderKey,
   pickTitle,
   readSessionsState,

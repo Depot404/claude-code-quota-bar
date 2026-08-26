@@ -771,20 +771,44 @@ console.log('\n10. Appariement bijectif : plus d\'emprunt d\'onglet entre sœurs
   const when = (Date.now() - 5000) / 1000;
   fs.utimesSync(closedFile, when, when);   // plus ancienne : perd le départage
   const label = `${PREFIX}…`;
-  const build = (labels) => state.buildSnapshot({
+  const build = (labels, extra) => state.buildSnapshot({
     workspacePath: twins, recentMs: 4 * 3600 * 1000, maxItems: 12,
     tabs: () => ({ known: true, labels }),
     liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    ...extra,
   }, state.createTranscriptReader());
 
+  // Un SEUL appel isolé (Map de tolérance fraîche, comme un premier recompute
+  // après activation) : depuis le lot « présence par identifiant » (2026-08-26),
+  // la surnuméraire d'un groupe AMBIGU n'est plus retirée sur ce seul constat —
+  // cf. resolveHasTabForPresence, testé isolément plus bas (§10ter) et de bout
+  // en bout ici (§12). Elle le reste tant que la perte de l'appariement n'est
+  // PAS confirmée sur plusieurs recomputes consécutifs.
   const snap1 = build([label]);   // UN SEUL onglet réel pour les deux sœurs
   const titlesTwins = snap1.conversations.map((c) => c.title);
-  check('un seul onglet réel pour deux sœurs → une SEULE reste affichée (plus d\'emprunt)',
-    titlesTwins.length === 1, JSON.stringify(titlesTwins));
-  check('… la surnuméraire (la plus ancienne, sans onglet assigné) est MASQUÉE',
-    !titlesTwins.some((t) => t.includes('ferme depuis')), JSON.stringify(titlesTwins));
-  check('… et la conv visible a bien tabOpen:true (elle tient l\'onglet, pas empruntée)',
-    snap1.conversations[0].tabOpen === true);
+  check('un seul onglet réel pour deux sœurs, UN seul recompute → la surnuméraire reste tolérée (pas de clignotement)',
+    titlesTwins.length === 2, JSON.stringify(titlesTwins));
+  check('… la conv qui tient réellement l\'onglet a bien tabOpen:true',
+    snap1.conversations.find((c) => c.title.includes('reellement ouvert')).tabOpen === true);
+
+  // Recomputes RÉPÉTÉS avec les MÊMES Map de tolérance (le cas réel : le moteur
+  // les tient d'un tick à l'autre) : la surnuméraire finit par partir, mais
+  // seulement après resolveHasTabForPresence.PRESENCE_MISS_TOLERANCE pertes
+  // AMBIGUËS consécutives — jamais sur la première.
+  {
+    const tabOpenMisses = new Map();
+    const presenceMisses = new Map();
+    const tick = () => build([label], { tabOpenMisses, presenceMisses });
+    const findLoser = (snap) => snap.conversations.find((c) => c.title.includes('ferme depuis'));
+
+    let t = tick();
+    check('tick 1 : la surnuméraire est encore là (1re perte ambiguë, tolérée)', !!findLoser(t));
+    t = tick();
+    check('tick 2 : encore là (2e perte ambiguë, tolérance = 2 pertes)', !!findLoser(t));
+    t = tick();
+    check('tick 3 : la 3e perte ambiguë consécutive la retire enfin',
+      !findLoser(t), JSON.stringify(t.conversations.map((c) => c.title)));
+  }
 
   const snap2 = build([label, label]);   // DEUX onglets réels distincts (m = k)
   const titles2 = snap2.conversations.map((c) => c.title);
@@ -852,6 +876,136 @@ console.log('\n11. Lot 3 : ambiguïté résiduelle — se taire plutôt que devi
     snapSister.conversations.filter((c) => c.isActive).length === 1);
 
   try { fs.rmSync(ACTIVE_SESSION_PATH2, { force: true }); } catch {}
+}
+
+// ── Lot « présence par identifiant » (2026-08-26) : l'identifiant de session
+// (memento workbench.parts.editor, session-titles.js createOpenSessionIds)
+// devient la source de vérité de la présence — labels.js `pairTabs` en tient
+// compte AVANT tout raisonnement sur les libellés, et l'appariement par titre
+// devient un repli EXPLICITE. Constat user : « certaine conversation se barre
+// sans raison puis se debarre » — deux sœurs au titre tronqué identique dont
+// l'appariement (par ORDRE, faute de mieux) peut changer de gagnante d'un
+// recompute à l'autre. ────────────────────────────────────────────────────
+console.log('\n12. pairTabs (labels.js) : l\'identité tranche, l\'ORDRE ne décide plus');
+{
+  const { pairTabs } = require(path.join(__dirname, '..', 'labels.js'));
+  const sisterA = { sessionId: 'sisterA', title: 'yyy sujet A complet', tabTitle: null };
+  const sisterB = { sessionId: 'sisterB', title: 'yyy sujet B complet', tabTitle: null };
+  const label = 'yyy…';
+
+  // Sans identité (openIds absent) : c'est l'ORDRE de réception qui décide —
+  // exactement le mécanisme derrière le clignotement (l'ordre change d'un
+  // recompute à l'autre, cf. commentaire de `prepared` dans state.js).
+  const noIdA = pairTabs([sisterA, sisterB], [label]);
+  const noIdB = pairTabs([sisterB, sisterA], [label]);
+  check('sans identité : la PREMIÈRE de la liste gagne (A d\'abord)',
+    noIdA.index.get('sisterA') === 0 && !noIdA.index.has('sisterB'));
+  check('sans identité, ordre inversé : la gagnante CHANGE (B d\'abord) — le bug lui-même',
+    noIdB.index.get('sisterB') === 0 && !noIdB.index.has('sisterA'));
+
+  // Avec identité (openIds = {sisterB}) : sisterB gagne TOUJOURS, quel que soit
+  // l'ordre de réception — l'appariement par libellé ne tranche plus rien pour
+  // elle, il n'a plus qu'à ranger sisterA (qui n'a, à raison, plus aucun
+  // libellé à revendiquer).
+  const openIds = new Set(['sisterB']);
+  const idA = pairTabs([sisterA, sisterB], [label], openIds);
+  const idB = pairTabs([sisterB, sisterA], [label], openIds);
+  check('avec identité : sisterB gagne (ordre A, B)',
+    idA.index.get('sisterB') === 0 && !idA.index.has('sisterA'));
+  check('avec identité : sisterB gagne PAREIL (ordre B, A) — plus d\'ordre qui compte',
+    idB.index.get('sisterB') === 0 && !idB.index.has('sisterA'));
+  check('… et ni l\'une ni l\'autre n\'est marquée ambiguë : l\'identité a levé l\'ambiguïté, pas juste tranché dedans',
+    !idA.ambiguous.has('sisterA') && !idA.ambiguous.has('sisterB'));
+
+  // Deux onglets réels, LES DEUX sœurs confirmées par identité : chacune son
+  // libellé, aucune ambiguïté — même si les deux chaînes de libellé restent
+  // strictement identiques.
+  const both = pairTabs([sisterA, sisterB], [label, label], new Set(['sisterA', 'sisterB']));
+  check('deux onglets réels, deux identités confirmées → les deux appariées, aucune ambiguë',
+    both.index.has('sisterA') && both.index.has('sisterB')
+    && !both.ambiguous.has('sisterA') && !both.ambiguous.has('sisterB'));
+
+  // Dégradation : une identité publiée mais SANS libellé qui matche encore
+  // (mémento en avance sur le libellé republié, ou id résiduel) — ignorée
+  // proprement, aucun crash, repli sur la cascade normale pour tout le monde.
+  const stale = pairTabs([sisterA, sisterB], [label], new Set(['sisterA', 'ghost-id-inconnu']));
+  check('identité publiée sans libellé correspondant → repli sans casse (cascade normale)',
+    stale.index.get('sisterA') === 0 && !stale.index.has('sisterB'));
+
+  // Repli explicite total : openIds vide (base illisible/verrouillée, ancienne
+  // version de VS Code sans le memento) → identique à l'ancien comportement.
+  const empty = pairTabs([sisterA, sisterB], [label], new Set());
+  check('openIds vide → comportement identique à l\'ancien appariement (aucun repli oublié)',
+    empty.index.get('sisterA') === 0 && !empty.index.has('sisterB'));
+}
+
+console.log('\n13. buildSnapshot : identité câblée de bout en bout, plus de clignotement');
+{
+  // Même scénario que §10 (une sœur avec un vrai onglet, l\'autre un husk),
+  // mais avec `openSessionIds` câblé comme extension.js le fait réellement
+  // (session-titles.js `createOpenSessionIds`).
+  const twins3 = 'C:\\Users\\Test\\Projets VSCODE\\Twins3';
+  const dir3 = state.projectDirFor(twins3);
+  fs.mkdirSync(dir3, { recursive: true });
+  const PREFIX3 = 'w'.repeat(24);
+  const liveFile3 = path.join(dir3, 'live3.jsonl');
+  const closedFile3 = path.join(dir3, 'closed3.jsonl');
+  fs.writeFileSync(liveFile3, [userMsg('sujet A3'), assistant, { type: 'ai-title', aiTitle: `${PREFIX3} onglet reellement ouvert` }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  fs.writeFileSync(closedFile3, [userMsg('sujet B3, tout autre'), assistant, { type: 'ai-title', aiTitle: `${PREFIX3} onglet ferme depuis` }]
+    .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const label3 = `${PREFIX3}…`;
+  const build3 = (mtimeOrder, extra) => {
+    // `mtimeOrder` fait varier l'ORDRE des candidats (mtime décroissant, cf.
+    // `prepared` dans state.js) sans rien changer à la réalité des onglets —
+    // exactement ce qui flotte d'un recompute à l'autre en usage réel
+    // (activité, republication d'un libellé par une autre fenêtre…).
+    const now = Date.now() / 1000;
+    if (mtimeOrder === 'closedNewer') {
+      fs.utimesSync(liveFile3, now - 10, now - 10);
+      fs.utimesSync(closedFile3, now, now);
+    } else {
+      fs.utimesSync(liveFile3, now, now);
+      fs.utimesSync(closedFile3, now - 10, now - 10);
+    }
+    return state.buildSnapshot({
+      workspacePath: twins3, recentMs: 4 * 3600 * 1000, maxItems: 12,
+      tabs: () => ({ known: true, labels: [label3] }),
+      liveSessions: () => new Set(), sessionTitles: () => new Map(),
+      ...extra,
+    }, state.createTranscriptReader());
+  };
+  const idOpts = { openSessionIds: () => new Set(['live3']) };
+
+  // Identité disponible : la surnuméraire part DÈS LE PREMIER recompute — plus
+  // besoin d'attendre la tolérance de §10, l'ambiguïté n'existe plus du tout.
+  let snap = build3('liveNewer', idOpts);
+  let titles3 = snap.conversations.map((c) => c.title);
+  check('avec identité : la surnuméraire part DÈS le premier recompute (aucune tolérance nécessaire)',
+    titles3.length === 1 && titles3[0].includes('reellement ouvert'), JSON.stringify(titles3));
+
+  // L'ORDRE des candidats s'inverse (mtime), la réalité des onglets non : la
+  // gagnante par identité ne bouge pas — c'est exactement le clignotement
+  // signalé qui disparaît.
+  snap = build3('closedNewer', idOpts);
+  titles3 = snap.conversations.map((c) => c.title);
+  check('ordre des candidats inversé, MÊME identité → la même conv reste, aucun clignotement',
+    titles3.length === 1 && titles3[0].includes('reellement ouvert'), JSON.stringify(titles3));
+
+  // Repli explicite : base illisible/verrouillée ou ancienne version de VS
+  // Code → openSessionIds absent des opts, exactement comme avant ce lot.
+  // Comparé ici à un openSessionIds explicitement VIDE (dégradation vécue en
+  // usage réel, cf. session-titles.js) : les deux doivent produire le MÊME
+  // résultat, celui déjà vérifié au §10 (tolérance, pas de disparition
+  // immédiate) — la source d'identité n'a changé le résultat que quand elle a
+  // quelque chose à dire.
+  const noOptSnap = build3('liveNewer', {});
+  const emptySnap = build3('liveNewer', { openSessionIds: () => new Set() });
+  check('repli explicite (source absente) et openIds vide donnent le même résultat',
+    JSON.stringify(noOptSnap.conversations.map((c) => c.sessionId).sort())
+    === JSON.stringify(emptySnap.conversations.map((c) => c.sessionId).sort()));
+  check('… et ce résultat est bien celui du repli par libellé (les deux sœurs tolérées, comme §10)',
+    emptySnap.conversations.length === 2, JSON.stringify(emptySnap.conversations.map((c) => c.title)));
 }
 
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}

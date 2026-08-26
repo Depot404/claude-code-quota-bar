@@ -1,7 +1,7 @@
 const vscode = require('vscode');
 
 // ============================================================================
-// Panneau « Claude Convs » — WebviewView de la sidebar secondaire (droite).
+// Panneau « QuotaSaver » — WebviewView de la sidebar secondaire (droite).
 //
 // WebviewView (et pas TreeView) parce qu'il faut des couleurs libres, des barres
 // de progression et un spinner animé, qu'aucune TreeItem ne sait rendre.
@@ -401,9 +401,93 @@ function renderHtml(webview) {
        respecte l'invariant « zéro emprise sur le flux » sans lui en inventer
        un. Grid n'est pas affecté par position:relative sur ses items enfants. */
     position: relative;
+    /* Fond RÉEL de la ligne, en une seule variable (2026-08-26) — le disque
+       qui « troue » le rail derrière la bulle d'un membre doit peindre
+       exactement ce que la ligne peint sous lui, sinon il se voit comme une
+       tache (cf. .grp-body .conv .ico::after et RING_BG côté script, qui la
+       lisent tous les deux). Défaut = le fond du panneau : une ligne ordinaire
+       ne peint rien. */
+    --row-bg: var(--vscode-sideBar-background, var(--vscode-editor-background));
   }
   .conv:hover { background: var(--vscode-list-hoverBackground); }
-  .conv.active { background: var(--vscode-list-inactiveSelectionBackground); }
+  /* LIGNE SÉLECTIONNÉE (2026-08-26) — le fond « sélection inactive » d'avant
+     se distinguait à peine du panneau (#37373d sur #181818 en Dark Modern) :
+     l'user ne repérait plus sa conversation courante. On prend la couleur
+     d'ACTION du thème (ses boutons), la seule dont la vivacité soit garantie
+     dans tous les thèmes.
+     Ce fond est saturé (bleu vif en thème clair) : les jetons de couleur sont
+     donc redéfinis ICI, à la racine de la règle, jamais dans chacune des
+     règles qui les lisent. Le ctx, le coût, la barre de contexte et le glyphe
+     d'état suivent tous par construction — un jeton oublié ailleurs serait
+     invisible en revue et illisible à l'écran. Les mixer vers le texte de
+     sélection remonte leur clarté au-dessus du fond SANS perdre l'identité de
+     la couleur (un rouge reste rouge). */
+  .conv.active {
+    /* PAS --vscode-list-activeSelectionBackground (2026-08-26, deuxième
+       passe) : rien n'oblige un thème à la rendre voyante, et Light Modern —
+       le thème du poste en journée — la met à #E8E8E8, un gris sur un fond
+       #F8F8F8. La première version de ce lot l'utilisait : elle a remplacé un
+       gris invisible par un autre gris invisible, livré et rechargé sans que
+       rien ne change à l'écran.
+       On prend donc la couleur d'ACTION du thème (celle de ses boutons), qui
+       est vive par contrat dans le clair comme dans le sombre, avec le texte
+       que le thème lui associe — le couple est fourni ensemble, il ne peut
+       pas donner un fond pâle sous un texte blanc. Elle est opaque : le
+       disque qui masque le rail derrière une bulle la recopie telle quelle.
+       Ce fond est saturé, d'où la redéfinition des jetons de couleur juste
+       en dessous. */
+    --sel-fg: var(--vscode-button-foreground, #ffffff);
+    /* Un cran de noir sur l'accent (2026-08-26, troisième passe) : mesuré par
+       test/audit-contraste.js, l'accent BRUT du thème sombre (#0078D4) plafonne
+       le blanc pur à 4,53:1 — aucune couleur de la ligne ne pouvait alors
+       atteindre le seuil de lisibilité, le fond mangeait tout. Assombrir rend
+       cette marge à TOUT ce que la ligne porte sans rien perdre en visibilité,
+       et vaut pour les deux thèmes (le webview n'a pas à savoir lequel tourne). */
+    --row-bg: color-mix(in srgb, var(--vscode-button-background, var(--vscode-focusBorder, #0078d4)) 78%, #000);
+    background: var(--row-bg);
+    color: var(--sel-fg);
+    /* Dosages RÉGLÉS PAR MESURE, pas à l'œil : chacun est le premier palier qui
+       passe le seuil WCAG dans les DEUX thèmes (4,5:1 pour du texte, 3:1 pour
+       un glyphe ou une barre). Les rejouer après tout changement de --row-bg :
+       node test/audit-contraste.js */
+    --muted: color-mix(in srgb, var(--sel-fg) 90%, transparent);
+    --pace-green: color-mix(in srgb, var(--vscode-charts-green, #89d185) 30%, var(--sel-fg));
+    --pace-yellow: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 30%, var(--sel-fg));
+    --pace-red: color-mix(in srgb, var(--vscode-charts-red, #f14c4c) 30%, var(--sel-fg));
+    --busy: color-mix(in srgb, var(--vscode-charts-blue, #03a9f4) 30%, var(--sel-fg));
+    --waiting: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 30%, var(--sel-fg));
+    --done: color-mix(in srgb, var(--vscode-charts-green, #89d185) 30%, var(--sel-fg));
+    --stale: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 30%, var(--sel-fg));
+    /* La piste du spinner est un disque translucide : sur le fond du panneau
+       30% suffisent, sur un fond saturé elle disparaît. */
+    --busy-alpha: 78%;
+  }
+  /* Ce que les jetons ci-dessus ne couvrent pas — chaque cas est un endroit qui
+     lisait une couleur BRUTE du thème ou s'atténuait par transparence, deux
+     choses qui ne survivent pas à un fond saturé. Mesurés un par un par
+     test/audit-contraste.js, ils étaient tous sous le seuil. */
+  /* Anneau d'un membre : la teinte du lot (--grp-hue) est libre, donc parfois
+     très proche du fond. On la remonte sans la perdre — elle reste l'identité
+     visuelle du lot. Pas de redéfinition de --grp-hue elle-même : une custom
+     property qui se cite dans sa propre valeur est un cycle, la déclaration
+     serait invalide. */
+  .grp-body .conv.active .ico::after, .grp-master-head .conv.active .ico::after,
+  .member.nest-host > .m-head .conv.active .ico::after {
+    border-color: color-mix(in srgb, var(--grp-hue, var(--muted)) 35%, var(--sel-fg));
+  }
+  /* ✓ d'une conversation terminée ET LUE : volontairement effacé (25% d'alpha)
+     sur le fond du panneau, il devenait invisible sur la ligne sélectionnée —
+     c'est le « statut idle » signalé. --done étant déjà remonté, il suffit de
+     lui rendre de l'opacité. */
+  .conv.active .ico-done.read { color: color-mix(in srgb, var(--done) 92%, transparent); }
+  /* Piste des barres (le « vide » à droite du remplissage) : 12% du texte du
+     panneau, invisible sur un fond saturé — or c'est elle qui donne l'échelle. */
+  .conv.active .bar { background: color-mix(in srgb, var(--sel-fg) 58%, transparent); }
+  /* Marque « à relire » : seul endroit d'une ligne qui pose une couleur de
+     graphique EN DUR plutôt qu'un jeton. */
+  .conv.active .mk-pin, .conv.active.mk-pinned .mk-set {
+    color: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 40%, var(--sel-fg));
+  }
   .conv .body { min-width: 0; }
   /* Coût estimé ($) — variante B de la maquette 2026-08-17, choisie par
      l'user : le montant vit sur la ligne du TITRE, à droite, et la ligne méta
@@ -816,6 +900,25 @@ function renderHtml(webview) {
   .seg button:hover { background: var(--vscode-list-hoverBackground); }
   .seg button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .seg.off button { opacity: .4; cursor: default; }
+  /* A1 — sélecteurs model/effort de la carte de tâche : pastilles détachées,
+     couleur pleine + halo à l'actif (variante actée, MOCKUP_selecteurs_modele_effort_2026-08-25.html).
+     Porté verbatim depuis la maquette — ne pas réinterpréter. Le .seg ci-dessus
+     reste utilisé ailleurs (contrôle de vague ◂▸), inchangé. */
+  .segA1 { display: inline-flex; gap: 3px; }
+  .segA1 button {
+    font: inherit; font-size: 10px; font-weight: 500; padding: 3px 8px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35)); background: transparent; color: var(--muted);
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .segA1 button .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c); flex: none; }
+  .segA1 button:hover { background: var(--vscode-list-hoverBackground); border-color: var(--c); }
+  .segA1 button.on {
+    background: var(--c); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 700;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 30%, transparent);
+  }
+  .segA1 button.on .dot { background: var(--vscode-button-foreground); }
+  .segA1.off button { opacity: .35; cursor: default; }
+  .segA1 button:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
   .form-foot { display: flex; gap: 6px; align-items: center; margin-top: var(--sp-block); }
   .form-foot .spacer { flex: 1; }
   /* Badge d'écart intention/réel : le seul endroit du panneau qui parle de ce
@@ -1125,8 +1228,11 @@ function renderHtml(webview) {
        ci-dessus, jamais un littéral figé (l'ancien fallback #1e1e1e ne
        « troue » que sur fond sombre — en clair il peignait un disque sombre
        visible, lu comme « le rail traverse l'anneau »). Les deux endroits
-       partagés = ne peuvent plus diverger. */
-    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+       partagés = ne peuvent plus diverger. Depuis 2026-08-26 la chaîne passe
+       par --row-bg (portée par .conv) : sur une ligne SÉLECTIONNÉE le fond
+       n'est plus celui du panneau, et un disque resté à la couleur du panneau
+       s'y lisait comme une tache sombre autour de la bulle. */
+    background: var(--row-bg, var(--vscode-sideBar-background, var(--vscode-editor-background)));
   }
   /* LA BULLE DE TÊTE (2026-08-17) — ligne maîtresse d'un lot ET ligne de tête
      d'un sous-lot : depuis que ni l'une ni l'autre n'est encadrée, c'est cet
@@ -1722,6 +1828,25 @@ function renderHtml(webview) {
     return costFmt.format(typeof v === 'number' && isFinite(v) ? v : 0);
   }
 
+  // Détail qui JUSTIFIE le montant — source unique, parce qu'il s'affiche
+  // désormais sur plusieurs surfaces (cf. updateRow) : le montant lui-même, la
+  // ligne entière, et les deux boutons hover-only qui recouvrent sa boîte. Le ≈
+  // étiquette l'estimation (tarifs de liste, famille de modèle devinée pour un
+  // modèle inconnu) ; cache = lecture + écriture, les deux faces d'une même
+  // mécanique. Obligatoire dès qu'un tour est clos (B3) : la couleur suit le
+  // DERNIER TOUR alors que le chiffre affiche le CUMUL — sans ce détail, les
+  // deux paraîtraient se contredire.
+  function costTip(cost) {
+    const turns = typeof cost.turns === 'number' ? cost.turns : 0;
+    return turns > 0
+      ? t('≈ {0} in {1} replies — last turn {2} — input {3} · cache {4} · output {5}',
+          fmtCost(cost.total), String(turns), fmtCost(cost.lastTurn),
+          fmtCost(cost.input), fmtCost((cost.cacheRead || 0) + (cost.cacheWrite || 0)), fmtCost(cost.output))
+      : t('≈ {0} — input {1} · cache {2} · output {3}',
+          fmtCost(cost.total), fmtCost(cost.input),
+          fmtCost((cost.cacheRead || 0) + (cost.cacheWrite || 0)), fmtCost(cost.output));
+  }
+
   // Montant d'une FENÊTRE de quota. Au-dessus de 100 $, arrondi à l'unité :
   // deux décimales sur quatre chiffres, dans une sidebar de 300 px, ne se
   // lisent pas et n'apprennent rien. Même formateur, même locale que le montant
@@ -1883,11 +2008,22 @@ function renderHtml(webview) {
     // Marque « à relire » (lot 2) : une seule classe pilote tout le rendu
     // (.mk-pin visible, .mk-set teinté) — cf. règles CSS .conv.mk-pinned.
     setClass(row.root, 'conv' + (c.active ? ' active' : '') + (c.pinned ? ' mk-pinned' : ''));
+    // Détail tarifaire ATTEIGNABLE au survol (2026-08-24, variante C choisie par
+    // l'user sur maquette) : la boîte du montant est précisément celle que
+    // recouvrent les overlays hover-only ⌂ et « marque à relire », et le montant
+    // s'efface au survol — pointer le chiffre affichait donc l'infobulle du
+    // bouton, jamais la sienne. La LIGNE porte désormais le détail, elle et elle
+    // seule : les deux boutons gardent leur libellé nu (ce que le clic fait), et
+    // le détail reste lisible partout ailleurs sur la ligne. Une seule source
+    // (costTip) pour les deux surfaces qui l'affichent.
+    const cost = c.cost && typeof c.cost.total === 'number' ? c.cost : null;
+    const ctip = cost ? costTip(cost) : '';
     const tip = (c.title || '') + ' — ' + stateLabel(c)
       // Ce que la ligne promet au clic, dit en toutes lettres (lot 3) : sur une
       // conv marquée dont l'onglet est fermé, le clic ne « va pas à l'onglet »,
       // il en rouvre un.
-      + (c.tabGone ? ' — ' + t('tab closed · click to reopen') : '');
+      + (c.tabGone ? ' — ' + t('tab closed · click to reopen') : '')
+      + (ctip ? '\\n' + ctip : '');
     if (row.root.title !== tip) row.root.title = tip;
     setClass(row.ico, icoClass(c));
     // Le ✓ est du texte, les autres états sont des formes CSS.
@@ -1897,25 +2033,9 @@ function renderHtml(webview) {
     // n'est qu'une photo. Absent tant que le transcript ne porte aucune donnée
     // d'usage : on MASQUE le nœud au lieu d'y écrire une chaîne vide, sinon la
     // gouttière du .title-row rognerait 8px de titre pour rien.
-    const cost = c.cost && typeof c.cost.total === 'number' ? c.cost : null;
     row.cost.style.display = cost ? '' : 'none';
     if (cost) {
       setText(row.cost, fmtCost(cost.total));
-      // Le ≈ étiquette l'estimation (tarifs de liste, famille de modèle
-      // devinée pour un modèle inconnu) ; le détail la justifie. Cache =
-      // lecture + écriture, les deux faces d'une même mécanique.
-      // L'infobulle est OBLIGATOIRE (B3) dès qu'un tour est clos : une couleur
-      // qui ne correspond plus au chiffre affiché (cumul) serait incompréhensible
-      // sans elle — elle porte désormais aussi le coût du dernier tour, seul
-      // signal derrière la couleur.
-      const turns = typeof cost.turns === 'number' ? cost.turns : 0;
-      const ctip = turns > 0
-        ? t('≈ {0} in {1} replies — last turn {2} — input {3} · cache {4} · output {5}',
-            fmtCost(cost.total), String(turns), fmtCost(cost.lastTurn),
-            fmtCost(cost.input), fmtCost((cost.cacheRead || 0) + (cost.cacheWrite || 0)), fmtCost(cost.output))
-        : t('≈ {0} — input {1} · cache {2} · output {3}',
-            fmtCost(cost.total), fmtCost(cost.input),
-            fmtCost((cost.cacheRead || 0) + (cost.cacheWrite || 0)), fmtCost(cost.output));
       if (row.cost.title !== ctip) row.cost.title = ctip;
       const cp = turnPaceColor(cost.lastTurn);
       setClass(row.cost, 'cost' + (cp ? ' pace-' + cp : ''));
@@ -2510,7 +2630,11 @@ function renderHtml(webview) {
   // le markup — le SVG hérite des variables de la ligne, donc un changement
   // de thème ou de couleur de lot n'oblige à rien redessiner.
   const RING_OVERLAP = 5;   // degrés de part et d'autre de l'axe (chevauchement 10°)
-  const RING_BG = 'var(--vscode-sideBar-background, var(--vscode-editor-background))';
+  // Même chaîne que le trou CSS de l'anneau d'un membre : --row-bg d'abord (le
+  // fond réel de la ligne, différent du panneau quand elle est sélectionnée),
+  // le fond du panneau ensuite. Le SVG hérite des variables de la ligne, donc
+  // il suit la sélection sans être redessiné.
+  const RING_BG = 'var(--row-bg, var(--vscode-sideBar-background, var(--vscode-editor-background)))';
   let ringCanon = null;
   function splitRingCanon() {
     if (!ringCanon) {
@@ -3030,6 +3154,23 @@ function renderHtml(webview) {
   // étend automatiquement l'affichage (décisions user 2026-07-23).
   const MODELS = ['haiku', 'sonnet', 'opus', 'fable'];
   const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  // A1 : couleur du modèle = repère d'identité (var(--vscode-charts-*), déjà le
+  // vocabulaire du panneau) ; couleur de l'effort = dégradé d'intensité vert→rouge
+  // repris de --pace-* (busy/waiting/done, pace de quota) — pas une palette
+  // inventée. Verbatim MOCKUP_selecteurs_modele_effort_2026-08-25.html.
+  const MODEL_COLOR = {
+    haiku: 'var(--vscode-charts-yellow)',
+    sonnet: 'var(--vscode-charts-blue)',
+    opus: 'var(--vscode-charts-purple)',
+    fable: 'var(--vscode-charts-orange)'
+  };
+  const EFFORT_COLOR = [
+    'var(--pace-green)',
+    'color-mix(in srgb, var(--pace-green) 50%, var(--pace-yellow) 50%)',
+    'var(--pace-yellow)',
+    'color-mix(in srgb, var(--pace-yellow) 55%, var(--pace-red) 45%)',
+    'var(--pace-red)'
+  ];
   const batchFormEl = document.getElementById('batchForm');
   const batchNoticeEl = document.getElementById('batchNotice');
   // batchState AVANT form (lot 14) : blankTask() lit désormais batchState.inherit
@@ -3339,16 +3480,21 @@ function renderHtml(webview) {
     form.tasks.sort(function (a, b) { return a.wave - b.wave; });
   }
 
-  // Lot 14 : plus de bouton « inherit » à étiqueter (retiré des libellés) —
-  // « current » peut être null (résolution impossible) : aucun bouton n'est
-  // alors allumé, ce qui est exactement le WYSIWYG voulu.
-  function segment(values, current, disabled, onPick) {
-    const wrap = el('span', 'seg' + (disabled ? ' off' : ''));
+  // Sélecteurs model/effort de la carte de tâche, variante A1 (couleur assumée,
+  // MOCKUP_selecteurs_modele_effort_2026-08-25.html) : pastilles détachées avec
+  // point de couleur, l'actif se remplit de sa couleur + halo. « current » peut
+  // être null (résolution impossible) : aucun bouton n'est alors allumé, ce qui
+  // est exactement le WYSIWYG voulu (lot 14). colorOf(v) fournit la couleur CSS.
+  function segmentA1(values, current, disabled, colorOf, onPick) {
+    const wrap = el('span', 'segA1' + (disabled ? ' off' : ''));
     values.forEach(function (v) {
       const label = v === 'medium' ? 'med' : v;
-      const b = el('button', v === current ? 'on' : '', label);
+      const b = el('button', v === current ? 'on' : '');
       b.type = 'button';
       b.title = v;
+      b.style.setProperty('--c', colorOf(v));
+      b.appendChild(el('span', 'dot'));
+      b.appendChild(document.createTextNode(label));
       if (disabled) b.disabled = true;
       else b.addEventListener('click', function () { onPick(v); });
       wrap.appendChild(b);
@@ -3473,7 +3619,7 @@ function renderHtml(webview) {
     // modèle, cf. batch.js, mais un sélecteur qui reste allumé sur une valeur
     // ignorée mentirait). Le bouton affiché est la valeur EFFECTIVE (explicite
     // si choisie, sinon le défaut résolu recalculé à ce rendu, lot 14).
-    row.appendChild(pair('model', segment(MODELS, curModel, disabled, function (v) {
+    row.appendChild(pair('model', segmentA1(MODELS, curModel, disabled, function (v) { return MODEL_COLOR[v]; }, function (v) {
       task.model = v;
       if (v === 'haiku') task.effort = null;
       // Écrit au clic, pas au Create (plan sélecteurs 2026-07-24) : le défaut
@@ -3481,7 +3627,7 @@ function renderHtml(webview) {
       vscode.postMessage({ type: 'setLastBatchChoice', field: 'model', value: v });
       renderForm();
     })));
-    row.appendChild(pair('effort', segment(EFFORTS, effectiveEffort(task), disabled || curModel === 'haiku', function (v) {
+    row.appendChild(pair('effort', segmentA1(EFFORTS, effectiveEffort(task), disabled || curModel === 'haiku', function (v) { return EFFORT_COLOR[EFFORTS.indexOf(v)]; }, function (v) {
       task.effort = v;
       vscode.postMessage({ type: 'setLastBatchChoice', field: 'effort', value: v });
       renderForm();

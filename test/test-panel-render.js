@@ -1670,8 +1670,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     const noResolution = await cdp.evaluate(`(() => {
       const pairs = Array.from(document.querySelectorAll('#batchForm .task .pair'));
       const modelPair = pairs.find(p => p.querySelector('.lbl').textContent === 'model');
-      const labels = Array.from(modelPair.querySelectorAll('.seg button')).map(b => b.textContent);
-      const on = modelPair.querySelector('.seg button.on');
+      const labels = Array.from(modelPair.querySelectorAll('.segA1 button')).map(b => b.textContent);
+      const on = modelPair.querySelector('.segA1 button.on');
       const createBtn = Array.from(document.querySelectorAll('#batchForm button')).find(b => b.textContent.indexOf('Create') === 0);
       return { labels, onLabel: on ? on.textContent : null, createDisabled: createBtn.disabled, createTitle: createBtn.title };
     })()`);
@@ -1686,8 +1686,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const pairs = Array.from(document.querySelectorAll('#batchForm .task .pair'));
       const modelPair = pairs.find(p => p.querySelector('.lbl').textContent === 'model');
       const effortPair = pairs.find(p => p.querySelector('.lbl').textContent === 'effort');
-      const modelOn = modelPair.querySelector('.seg button.on');
-      const effortOn = effortPair.querySelector('.seg button.on');
+      const modelOn = modelPair.querySelector('.segA1 button.on');
+      const effortOn = effortPair.querySelector('.segA1 button.on');
       const createBtn = Array.from(document.querySelectorAll('#batchForm button')).find(b => b.textContent.indexOf('Create') === 0);
       return { modelText: modelOn ? modelOn.textContent : null, effortText: effortOn ? effortOn.textContent : null, createDisabled: createBtn.disabled };
     })()`);
@@ -1706,7 +1706,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(50);
     const fullIdFable = await cdp.evaluate(`(() => {
       const modelPair = Array.from(document.querySelectorAll('#batchForm .task .pair')).find(p => p.querySelector('.lbl').textContent === 'model');
-      const on = modelPair.querySelector('.seg button.on');
+      const on = modelPair.querySelector('.segA1 button.on');
       return on ? on.textContent : null;
     })()`);
     check('ID complet avec tag (claude-fable-5[1m]) ⇒ bouton « fable » allumé',
@@ -1715,7 +1715,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(50);
     const fullIdOpus = await cdp.evaluate(`(() => {
       const modelPair = Array.from(document.querySelectorAll('#batchForm .task .pair')).find(p => p.querySelector('.lbl').textContent === 'model');
-      const on = modelPair.querySelector('.seg button.on');
+      const on = modelPair.querySelector('.segA1 button.on');
       return on ? on.textContent : null;
     })()`);
     check('ID complet sans tag (claude-opus-4-8) ⇒ bouton « opus » allumé',
@@ -1724,7 +1724,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(50);
     const unknownId = await cdp.evaluate(`(() => {
       const modelPair = Array.from(document.querySelectorAll('#batchForm .task .pair')).find(p => p.querySelector('.lbl').textContent === 'model');
-      const on = modelPair.querySelector('.seg button.on');
+      const on = modelPair.querySelector('.segA1 button.on');
       return on ? on.textContent : null;
     })()`);
     check('ID exotique inconnu ⇒ toujours null, jamais une valeur inventée',
@@ -1739,8 +1739,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(50);
     const lastChoiceOn = await cdp.evaluate(`(() => {
       const pairs = Array.from(document.querySelectorAll('#batchForm .task .pair'));
-      const modelOn = pairs.find(p => p.querySelector('.lbl').textContent === 'model').querySelector('.seg button.on');
-      const effortOn = pairs.find(p => p.querySelector('.lbl').textContent === 'effort').querySelector('.seg button.on');
+      const modelOn = pairs.find(p => p.querySelector('.lbl').textContent === 'model').querySelector('.segA1 button.on');
+      const effortOn = pairs.find(p => p.querySelector('.lbl').textContent === 'effort').querySelector('.segA1 button.on');
       return { model: modelOn ? modelOn.textContent : null, effort: effortOn ? effortOn.textContent : null };
     })()`);
     check('lastModel/lastEffort persistés priment sur le défaut global « inherit »',
@@ -1750,7 +1750,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await cdp.evaluate(`window.__sent = []`);
     const clickSent = await cdp.evaluate(`(() => {
       const modelPair = Array.from(document.querySelectorAll('#batchForm .task .pair')).find(p => p.querySelector('.lbl').textContent === 'model');
-      const haikuBtn = Array.from(modelPair.querySelectorAll('.seg button')).find(b => b.textContent === 'haiku');
+      const haikuBtn = Array.from(modelPair.querySelectorAll('.segA1 button')).find(b => b.textContent === 'haiku');
       haikuBtn.click();
       return window.__sent;
     })()`);
@@ -3588,6 +3588,13 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
           rowH: +r.getBoundingClientRect().height.toFixed(2),
           bar: bb ? { l: +bb.left.toFixed(2), r: +bb.right.toFixed(2), w: +bb.width.toFixed(2) } : null,
           costInTitleRow: !!(c && c.parentElement && c.parentElement.classList.contains('title-row')),
+          // Le détail tarifaire doit rester ATTEIGNABLE : la boîte du montant
+          // est celle que recouvrent les deux overlays hover-only (⌂ et la
+          // marque), et le montant s'efface au survol — sans eux, plus aucune
+          // surface sous le curseur ne porte ce détail.
+          rowTip: r.title,
+          mkSetTip: (r.querySelector('.mk-set') || {}).title,
+          linkTip: (r.querySelector('.link-master') || {}).title,
         };
       };
       return { n: rows.length, r0: at(0), r1: at(1), r2: at(2), r3: at(3) };
@@ -3638,6 +3645,21 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       /^≈ \$7\.31 in 23 replies — last turn \$3\.00 — input /.test(cost.r2.tip || '')
       && /cache /.test(cost.r2.tip || '') && /output /.test(cost.r2.tip || ''),
       cost.r2.tip);
+    // Détail devenu inatteignable à la souris (signalé 2026-08-24) : au survol,
+    // le montant passe à opacity 0 et sa boîte est recouverte par ⌂ et la
+    // marque — pointer le chiffre affichait l'infobulle du bouton. Les trois
+    // surfaces de cette zone portent donc le MÊME détail, d'une seule source.
+    const DETAIL = '≈ $7.31 in 23 replies';
+    check('le détail tarifaire est atteignable partout sur la ligne (infobulle de la ligne)',
+      (cost.r2.rowTip || '').indexOf(DETAIL) >= 0, cost.r2.rowTip);
+    check('… les deux boutons, eux, gardent leur libellé NU (variante C : le tarif ne les alourdit pas)',
+      (cost.r2.mkSetTip || '').indexOf(DETAIL) < 0 && (cost.r2.linkTip || '').indexOf(DETAIL) < 0
+      && (cost.r2.mkSetTip || '').indexOf('Pin ') === 0 && (cost.r2.linkTip || '').indexOf('Link ') === 0,
+      `${cost.r2.mkSetTip} | ${cost.r2.linkTip}`);
+    check('ligne sans donnée d’usage : aucune infobulle tarifaire, nulle part',
+      (cost.r3.rowTip || '').indexOf('≈') < 0 && (cost.r3.mkSetTip || '').indexOf('≈') < 0
+      && (cost.r3.linkTip || '').indexOf('≈') < 0,
+      JSON.stringify({ row: cost.r3.rowTip, mk: cost.r3.mkSetTip, lm: cost.r3.linkTip }));
     check('conversation sans donnée d\'usage → RIEN (nœud masqué, pas un « $0.00 »)',
       cost.r3.shown === false && noCost.r3.shown === false, JSON.stringify(cost.r3));
 

@@ -319,7 +319,7 @@ async function run() {
   check('contrat hookSpecificOutput respecté',
     payload && payload.hookSpecificOutput && payload.hookSpecificOutput.hookEventName === 'UserPromptSubmit');
   check('la notice est dans additionalContext',
-    payload && /Claude Convs: the last turn/.test(payload.hookSpecificOutput.additionalContext));
+    payload && /QuotaSaver: the last turn/.test(payload.hookSpecificOutput.additionalContext));
 
   // Deuxième tour cher, même conversation : silence retrouvé.
   appendLines(tr, [assistantLine('m3', 300000), PROMPT]);
@@ -337,7 +337,7 @@ async function run() {
   check('un seul objet JSON malgré deux messages', p2 !== null, JSON.stringify(both.out).slice(0, 200));
   const ctx = p2 ? p2.hookSpecificOutput.additionalContext : '';
   check('jeton de session présent', ctx.indexOf('claude-convs-session: ' + SESSION) !== -1);
-  check('notice présente', /Claude Convs: the last turn/.test(ctx));
+  check('notice présente', /QuotaSaver: the last turn/.test(ctx));
 
   // Transcript absent : le prompt ne doit JAMAIS échouer.
   const dir3 = sandbox('hook-missing');

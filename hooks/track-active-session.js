@@ -97,6 +97,11 @@ readHookInput((data) => {
     transcript: data.transcript_path || null,
     message: null,
     busy_since: Date.now(),
+    // Filet 3 du marqueur de compaction (cf. hook-session-state.js, cas
+    // PreCompact) : un nouveau prompt est TOUJOURS la fin d'une compaction
+    // encore marquée, PostCompact tiré ou non.
+    compacting: null,
+    compact_since: null,
   });
 
   // Modèle : lu depuis le transcript (réponse précédente). SEULE source fiable,

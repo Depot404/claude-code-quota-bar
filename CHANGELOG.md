@@ -1,5 +1,81 @@
 # Changelog
 
+## [2.70.3] - 2026-08-26
+
+### Fixed
+- **Everything on the selected row is legible again.** Painting that row in the theme's action colour made the darker elements on it fade out: the tick of a conversation you had already read (deliberately faint on the panel's own background) all but vanished, the red context percentage, the pinned-to-review marker, the ring around a batch member and the empty part of the context bar all fell below the readable threshold. The row's background is now a notch darker than the raw accent — measured, the raw dark-theme accent caps even pure white at 4.53:1, leaving no headroom for any colour at all — and every colour the row carries is lifted until it clears the WCAG threshold (4.5:1 for text, 3:1 for glyphs and bars) in **both** themes, without losing its meaning: a red still reads red. A new bench, `test/audit-contraste.js`, renders the real panel in every state the selected row can take and reports anything that falls short, so this can be checked rather than eyeballed.
+
+## [2.70.2] - 2026-08-26
+
+### Changed
+- **The conversation you are looking at is now clearly marked in the panel.** Its row used to take the theme's *inactive* selection background — a dark grey a shade off the panel's own (`#37373d` on `#181818` in Dark Modern), which read as almost nothing on a list of a dozen rows. It now takes the theme’s **action colour** — the one its buttons use — with the text colour the theme pairs with it. That pair is the only one whose vividness every theme guarantees: the list-selection colour is not, and Light Modern sets it to #E8E8E8, another grey on a #F8F8F8 panel. Because that background is saturated, the row's colour tokens are re-derived on the selected row itself rather than in each rule that reads them: the context percentage, the cost, the context bar and the status glyph all keep their meaning (a red is still red) while staying legible on top of it, in both light and dark themes. The small disc that hides the group rail behind a member's bubble now follows the row's real background too — left as the panel's own colour, it showed up as a dark blot around the bubble as soon as the highlight got stronger.
+
+## [2.69.0] - 2026-08-26
+
+### Fixed
+- **A conversation could vanish from the panel and reappear moments later, for no visible reason.** Two conversations whose tab labels get truncated to the same text (VS Code cuts them at a fixed width) could no longer be told apart by their labels alone, so the panel's tab-matching fell back to guessing by list order — an order that shifts between recomputes (activity, another window republishing a label) and could hand the "open" verdict to either sibling from one tick to the next, making the loser blink out and back in. The panel now resolves this by exact session identity first, using the same on-disk proof VS Code itself keeps of which sessions have a tab open in this window (introduced for the 2.68.0 click fix) — label matching only kicks in as an explicit fallback when that identity isn't available (an older VS Code build, a locked or unreadable database, a not-yet-flushed update). And when identity genuinely can't settle it, a row that's already on screen no longer disappears on a single inconclusive recompute — losing an ambiguous match has to hold for several recomputes in a row before the row is retired, so a momentary hiccup in the underlying data never reads as a real close.
+
+## [2.68.0] - 2026-08-25
+
+### Fixed
+- **Clicking an already-open conversation now actually focuses its tab.** The panel used to find a tab by matching its displayed title against the tab's real label — a silent safety net so it would never focus the wrong conversation, but it meant any tab whose label had drifted from that title (renamed by the official extension, cf. 2026-07-22) produced a no-op click with nothing on screen to explain it. The click now targets the official extension's own `claude-vscode.editor.open(sessionId)` command, which reveals the exact panel it already tracks internally — no title comparison at all. This only fires once the panel can prove, from the same on-disk state VS Code itself persists, that the target session already has a tab open in that window; calling the command blind on a session it doesn't recognize would silently reopen it as a brand-new tab (duplicate) instead. Older versions of the official extension that don't expose the command fall back to the previous title-matching behaviour, unchanged.
+
+## [2.67.0] - 2026-08-25
+
+### Changed
+- **The extension is now called QuotaSaver — "Wave Your Prompts for Claude Code".** The old name, *Claude Convs*, described what the panel displayed (a list of conversations) and said nothing about what it buys you: pasting one block to launch a whole batch, each task on the model it actually deserves, is what keeps a week's quota from being burned by a single oversized conversation. The name now carries that promise, and the tagline carries the mechanism. Everything visible follows — the view container title, the command palette entries (`QuotaSaver: …`), every notification, and the Marketplace listing in both English and French. **The extension identifier is unchanged** (`AnthonyDame.claude-code-quota-bar`), so this arrives as an ordinary update: nothing to uninstall, settings, groups and read receipts are all kept.
+
+## [2.66.0] - 2026-08-25
+
+### Added
+- **A conversation no longer shows an empty line while it is being compacted.** Claude Code's `PreCompact`/`PostCompact` hooks are now installed (existing installs pick them up through the usual migration path) and set a dedicated `compacting` marker in `~/.claude/sessions-state.json`. The panel reuses the busy spinner it already had — nothing in the rendering changed. Both triggers are covered: the typed `/compact` and the automatic compaction that happens between turns without any user prompt.
+- The marker never touches the entry's `state`/`since`, so the read-receipt (`ack_ts`) stays exact: once compaction ends the line goes back to precisely what it showed before.
+
+### Fixed
+- **Three nets against the eternal spinner** (same class as the 2026-08-18 incident documented in `hooks/transcript.js`): the marker is timestamped and ignored past a 10-minute cap, it is only honoured while the CLI process is alive, and the next `UserPromptSubmit` or `Stop` clears it explicitly even if `PostCompact` never fires.
+- Real hook payloads verified by instrumenting the deployed hooks rather than guessing from the docs: both events carry `trigger: 'manual' | 'auto'`, a manual `/compact` fires **no** `UserPromptSubmit` and **no** `Stop`. Documented in `hooks/hook-session-state.js` and pinned by `test/test-precompact.js` (22 checks).
+
+## [2.65.0] - 2026-08-25
+
+### Changed
+- **Marketplace/GitHub metadata catches up with the cross-platform portage (2.61.0).** `package.json` `categories` moves from `["Other"]` to `["AI", "Visualization"]`, and `keywords` gains `parallel`, `orchestration`, `multi-agent`, `batch`, `waves`, `handoff`, `status`, `claude-code` (hyphenated) alongside the existing set.
+- **The "Windows-only" claim is gone from the description and the README.** The extension has been cross-platform since 2.61.0; `package.nls.json`'s short description now says "cross-platform", and the README's top note spells out the real, narrower state: window-raising stays Windows-only (no portable equivalent), sounds work on Windows and macOS and stay silent on Linux — everything else (panel, state, quota bars, batching) is plain Node with nothing OS-specific. The Requirements section already had this right; only the top summary line was stale.
+- **The animated demo GIFs (added in the previous lot, never wired into the README) are now shown** — a `<picture>` element under the hero screenshot, dark/light matched to `prefers-color-scheme` like GitHub does for its own README images.
+- **The public repo (`Depot404/claude-code-quota-bar`) got topics** — `claude-code`, `vscode-extension`, `ai-agents`, `developer-tools` — previously unset. Its description was already populated (not empty as assumed going in) and is left as-is.
+
+## [2.64.0] - 2026-08-25
+
+### Changed
+- **The model/effort pickers on each task card got a redesign.** They used to be a soldered segmented control (grey text, a plain blue fill on the active choice — the same look for both rows). They're now detached pills, each carrying a small dot in its own colour: the model dot uses the same identity colour already used elsewhere in the panel (blue for Sonnet, purple for Opus, etc.), and the effort dot follows a green-to-red gradient reused from the quota bars' own low/medium/high colouring — nothing invented, both draw from the same `--vscode-charts-*`/`--pace-*` variables the rest of the panel already uses. The active pill fills solid with its colour and gets a soft halo; picking Haiku still dims and disables the effort row exactly as before. Variant chosen from a three-way mockup (`MOCKUP_selecteurs_modele_effort_2026-08-25.html`, kept out of the package).
+  - The store screenshots and the two demo GIFs (dark and light) are regenerated to match.
+
+## [2.62.0] - 2026-08-25
+
+### Removed
+- **The `claude.ai` cookie path is gone, and with it every trace of a session credential.** Until 2.61.0 the primary quota fetch read a `claude.ai` `sessionKey` cookie out of a dedicated Brave profile (spawned headless, read over CDP `Storage.getCookies`), cached it **in clear text** at `~/.claude/quota-session-key.json`, and replayed it against `claude.ai/api/organizations/{id}/usage`. It was opt-in and off by default, but Anthropic's policy is explicit that "developers may not collect, store, or intermediate Claude.ai credentials or session tokens" ([legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)) — caching that cookie and replaying it is exactly *store* and *intermediate*. Since this extension is published, it also handed that capability to anyone who installed it.
+  - Removed: the cookie read/refresh path, the embedded CDP client, the Brave spawn/shutdown lifecycle, the `claudeCodeQuotaBar.braveUserDataDir` setting, and the `ws` dependency — **the extension now has no runtime dependencies at all**. About 320 lines.
+  - **Exactly one network call remains in the whole extension**: the OAuth `https.get` to `api.anthropic.com/api/oauth/usage`. The token is read fresh from `~/.claude/.credentials.json` at each fetch, never copied, never logged.
+  - **Nothing is lost on screen.** The OAuth endpoint returns every field the panel consumes (`five_hour`, `seven_day`, and the per-model weekly `limits`), verified against it on 2026-08-25. The cookie path existed to dodge rate-limiting on that endpoint ([#31021](https://github.com/anthropics/claude-code/issues/31021), [#31637](https://github.com/anthropics/claude-code/issues/31637)); both are closed without a fix, and the endpoint answers normally today. Should it ever throttle again, the bars fall back to the cache and show its age, as they always have.
+  - **If you had the path configured**, the setting is now unknown to VS Code and can be deleted from your `settings.json`; so can `~/.claude/quota-session-key.json`, `~/.claude/quota-org-id.json` and `~/.claude/quota-brave-pid.json` — nothing reads them any more. Deleting the first one is worth doing regardless: it holds a live account credential in clear text.
+  - Full audit, including what each path read and what left the machine: `NOTES_exposition_auth_2026-08-25.md` in the repository.
+
+### Fixed
+- **The privacy section no longer contradicts itself.** Its first line claimed the extension reads "**only** the OAuth access token", which stopped being true the moment the cookie path was enabled. That statement is now correct by construction rather than by wording.
+
+## [2.61.0] - 2026-08-25
+
+### Changed
+- **The three PowerShell calls in the execution path now degrade cleanly off Windows instead of assuming it.** The conversation list, state engine, quota bars and batching are already plain portable Node — only window-raising, sounds and the optional Brave cookie path ever touched PowerShell:
+  - **Window-raising** (bringing a VS Code window to the front after clicking a conversation) has no portable equivalent — `raise-window.ps1` is Win32-specific (`EnumWindows`/`SetForegroundWindow`). Off Windows it's now a silent no-op logged to the console; the tab itself still gets focused inside the current window either way.
+  - **Sounds** gained a macOS equivalent: `afplay` with the two system `.aiff` files that ship on every Mac, played the same way `ding.wav`/`SystemSounds.Exclamation` are on Windows. On Linux, where no audio player is guaranteed present without an extra dependency, it degrades to silence rather than spawning a binary that may not exist.
+  - **The Brave Octopus spawn/kill** (opt-in, empty `braveUserDataDir` by default) now refuses outright off Windows instead of trying `brave.exe`/`taskkill`/`Get-CimInstance` paths that only make sense there — already caught by the existing fallback to OAuth, so no behaviour change on the path most installs use.
+  - No visible error and no attempted spawn of an absent binary in any of the three cases.
+
+## [2.60.2] - 2026-08-24
+
+### Fixed
+- **The cost breakdown behind a conversation's amount is reachable again.** Since pinning arrived, hovering a row fades its amount out and puts the bookmark and ⌂ buttons exactly where it was — so pointing at the figure landed on a button and showed *its* label, never the breakdown that explains the number. The estimate is the only thing on a row that needs an explanation (the colour follows the last turn while the figure shows the running total), so the row itself now carries that breakdown: hovering anywhere on it shows the amount, the number of replies, the last turn and the input/cache/output split. The two buttons keep their own label, unchanged.
+
 ## [2.60.1] - 2026-08-24
 
 ### Fixed

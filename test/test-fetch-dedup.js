@@ -16,10 +16,9 @@ const path = require('path');
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'qb-fetch-dedup-'));
 os.homedir = () => SANDBOX;                       // AVANT tout require du module
 fs.mkdirSync(path.join(SANDBOX, '.claude'), { recursive: true });
-// Sans sessionKey cookie ni braveUserDataDir configuré, le chemin cookie
-// échoue AVANT tout appel réseau (readSessionKey() null → throw synchrone) et
-// ne passe jamais par notre bouchon http/https — il faut un token OAuth pour
-// que fetchAndUpdate() atteigne réellement `https.get`, ce que ce banc compte.
+// Depuis 2.62.0 le chemin OAuth est le seul : sans token, fetchAndUpdate()
+// n'atteint jamais `https.get` et le banc ne compterait rien. D'où ce jeton
+// bidon — c'est le NOMBRE de tentatives réseau que ce banc mesure.
 fs.writeFileSync(path.join(SANDBOX, '.claude', '.credentials.json'),
   JSON.stringify({ claudeAiOauth: { accessToken: 'fake-token-for-test' } }));
 
@@ -183,7 +182,7 @@ async function run() {
   const ms2 = await waitUntil(() => netGetCalls > before, 1000);
   check(`la commande Refresh force un appel réseau malgré un cache de 10 ms (${ms2} ms)`, ms2 >= 0, `netGetCalls=${netGetCalls}`);
 
-  console.log('\n4. Repli cache-seul intact : les deux chemins réseau échouent, le panneau affiche quand même le dernier cache');
+  console.log('\n4. Repli cache-seul intact : le seul appel réseau échoue, le panneau affiche quand même le dernier cache');
   const lastPosted = posted[posted.length - 1];
   check('quota.windows non vide malgré l\'échec réseau (lu depuis usage-cache.json)',
     lastPosted && lastPosted.state && lastPosted.state.quota && lastPosted.state.quota.windows && lastPosted.state.quota.windows.length > 0,

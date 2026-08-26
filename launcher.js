@@ -139,7 +139,7 @@ function createBatchLauncher(deps = {}) {
     try { await executeCommand(NEW_CONVERSATION_COMMAND); } catch {}
     const more = remaining > 0 ? t(' {0} more task(s) were not started.', remaining) : '';
     showMessage(
-      t('Claude Convs: could not open the conversation with its prompt ({0}). An empty conversation was opened and the prompt is in your clipboard — paste it there.', reason)
+      t('QuotaSaver: could not open the conversation with its prompt ({0}). An empty conversation was opened and the prompt is in your clipboard — paste it there.', reason)
       + more
     );
   }

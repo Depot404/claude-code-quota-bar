@@ -313,7 +313,7 @@ function formatDollars(n) {
 // l'utilisateur, comme toute bascule de conversation.
 function noticeText(dollars) {
   return [
-    'Claude Convs: the last turn of this conversation cost about ' + formatDollars(dollars) +
+    'QuotaSaver: the last turn of this conversation cost about ' + formatDollars(dollars) +
       ' at API list prices, and the next one will cost more - a turn is re-billed for everything the context holds.',
     'Before going further, offer the user (never act on it unasked) to commit what is done and hand the rest to a fresh conversation, with a claude-convs block ready to paste.',
     'Shown once per conversation; if the work is nearly finished, just carry on.',

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Hook multi-événements : Stop / Notification / PermissionRequest /
-// PermissionDenied / Elicitation / ElicitationResult / SessionEnd →
-// sessions-state.json. Un seul script pour tous : il route sur
-// `hook_event_name` du payload. L'état `busy` est posé par
+// PermissionDenied / Elicitation / ElicitationResult / SessionEnd /
+// PreCompact / PostCompact → sessions-state.json. Un seul script pour tous :
+// il route sur `hook_event_name` du payload. L'état `busy` est posé par
 // track-active-session.js (UserPromptSubmit).
 //
 // Source canonique : Tools/ClaudeCodeQuotaBar/hooks/. Déployé vers
@@ -12,6 +12,48 @@
 // l'utilisateur, quelle qu'en soit la forme, la conv passe `waiting` (le
 // panneau affiche « ? » et joue le son). Aucune forme d'attente ne doit
 // dépendre du seul événement `Notification` — cf. ci-dessous.
+//
+// ── PreCompact/PostCompact (constat user 2026-08-25, « aucun symbole pendant
+// une compaction ») ──────────────────────────────────────────────────────
+// La compaction AUTOMATIQUE (matcher `auto`, précompute en tâche de fond
+// entre deux tours — cf. `precomputeCompactionEnabled` du CLI) ne passe PAR
+// AUCUN prompt utilisateur : UserPromptSubmit ne la voit jamais. PreCompact
+// pose donc ici un marqueur DÉDIÉ (`compacting`/`compact_since`), lu par
+// `effectiveState` (state.js) pour forcer l'affichage `busy` — le spinner
+// EXISTANT, sans toucher au rendu (panel.js) ni à `state`/`since` de
+// l'entrée (l'accusé de lecture `ack_ts` reste donc exact si la conv était
+// déjà `done` et lue avant la compaction).
+//
+// PIÈGE (même classe que le spinner éternel n°2, 2026-08-18, cf.
+// hooks/transcript.js:434-509) : la doc officielle ne garantit PAS que
+// PostCompact tire après chaque PreCompact (compaction bloquée par un AUTRE
+// hook, CLI tué en plein milieu…) — un marqueur jamais levé gèlerait le
+// spinner pour toujours. Trois filets, aucun ne suffit seul :
+//  1. `compact_since` est daté ; state.js ignore le marqueur au-delà d'un
+//     plafond (COMPACTING_CAP_MS) et retombe sur l'état réel de l'entrée ;
+//  2. state.js ne l'honore que si le process CLI est VIVANT (isLive) — un
+//     process mort ne postera jamais son PostCompact ;
+//  3. le prochain UserPromptSubmit (track-active-session.js) ET le prochain
+//     Stop (ci-dessous) lèvent le marqueur explicitement, bien avant le
+//     plafond — la levée « naturelle » n'attend donc quasiment jamais le cas 1.
+//
+// PreCompact peut BLOQUER la compaction (exit 2 = deny) : ce hook reste donc
+// strictement silencieux et sort toujours en 0, comme PermissionRequest.
+//
+// PAYLOAD RÉEL, mesuré le 2026-08-25 sur un `/compact` (hooks instrumentés,
+// journal ~/.claude/compact-debug.log) — la doc ne le détaille pas :
+//   PreCompact  { session_id, transcript_path, cwd, prompt_id,
+//                 hook_event_name, trigger: 'manual'|'auto',
+//                 custom_instructions }
+//   PostCompact { …idem, trigger, compact_summary }
+// Séquence observée : PreCompact (T) → PostCompact (T+2 min 34) → prompt
+// suivant. AUCUN UserPromptSubmit pour la commande `/compact` elle-même, et
+// AUCUN Stop après la compaction. C'est ce qui valide le choix de ne pas
+// toucher à `state` : le marqueur seul allume le spinner, et sa levée rend
+// l'entrée à l'état d'AVANT (`done` en manuel ; `busy` en automatique,
+// puisqu'on est alors au milieu d'un tour). Aucun matcher n'est déclaré à
+// l'installation (hooks-install.js) : les deux `trigger` sont donc couverts,
+// l'automatique compris.
 
 const { updateSession, removeSession, readHookInput, readState } = require('./sessions-state.js');
 
@@ -116,7 +158,10 @@ function handle(data) {
   switch (data.hook_event_name) {
     case 'Stop':
       // message: null → le patch efface le texte de la Notification précédente
-      updateSession(sessionId, { ...base, ...stamp(), state: 'done', message: null });
+      // compacting/compact_since: null → filet 3 (cf. en-tête) : un Stop est
+      // TOUJOURS la fin d'un marqueur de compaction encore posé, qu'un
+      // PostCompact ait tiré entre-temps ou non.
+      updateSession(sessionId, { ...base, ...stamp(), state: 'done', message: null, compacting: null, compact_since: null });
       break;
 
     case 'Notification':
@@ -151,6 +196,20 @@ function handle(data) {
     case 'PermissionDenied':
     case 'ElicitationResult':
       resumed();
+      break;
+
+    // Pose le marqueur — jamais `state`/`since` (cf. en-tête) : `entry.state`
+    // reste la vérité de la SESSION (busy/waiting/done), le marqueur ne fait
+    // que forcer l'AFFICHAGE busy par-dessus, le temps de la compaction.
+    case 'PreCompact':
+      updateSession(sessionId, { ...base, compacting: true, compact_since: Date.now() });
+      break;
+
+    // Ne peut PAS bloquer (exit 2 ignoré côté CLI) : lève le marqueur, sans
+    // toucher à `state` — l'entrée retrouve d'elle-même son état réel
+    // (busy/waiting/done) au prochain snapshot.
+    case 'PostCompact':
+      updateSession(sessionId, { compacting: null, compact_since: null });
       break;
 
     case 'SessionEnd':

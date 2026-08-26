@@ -2,7 +2,7 @@
   "name": "claude-code-quota-bar",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "2.60.1",
+  "version": "2.70.3",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -21,11 +21,13 @@
     "vscode": "^1.106.0"
   },
   "categories": [
-    "Other"
+    "AI",
+    "Visualization"
   ],
   "keywords": [
     "claude",
     "claude code",
+    "claude-code",
     "quota",
     "usage",
     "usage tracker",
@@ -37,7 +39,14 @@
     "sound",
     "burn rate",
     "context window",
-    "focus window"
+    "focus window",
+    "parallel",
+    "orchestration",
+    "multi-agent",
+    "batch",
+    "waves",
+    "handoff",
+    "status"
   ],
   "galleryBanner": {
     "color": "#1F1F1F",
@@ -159,11 +168,6 @@
           "default": false,
           "description": "%config.sounds.enabled.description%"
         },
-        "claudeCodeQuotaBar.braveUserDataDir": {
-          "type": "string",
-          "default": "",
-          "description": "%config.braveUserDataDir.description%"
-        },
         "claudeCodeQuotaBar.conversationSortOrder": {
           "type": "string",
           "enum": [
@@ -253,9 +257,6 @@
   "scripts": {
     "package": "vsce package",
     "publish": "vsce publish"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.0.0"

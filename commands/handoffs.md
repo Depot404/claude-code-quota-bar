@@ -1,5 +1,5 @@
 ---
-description: Propose follow-up conversations in a claude-convs block, ready to paste into "Claude Convs".
+description: Propose follow-up conversations in a claude-convs block, ready to paste into "QuotaSaver".
 ---
 
 Propose the follow-up conversations for the work just framed (or rephrase the ones you just

@@ -64,6 +64,15 @@ const SOUND_COMMANDS = {
   waiting: '[System.Media.SystemSounds]::Exclamation.Play(); Start-Sleep -Milliseconds 1500',
 };
 
+// Equivalent macOS : afplay est livre avec le systeme (jamais une dependance
+// a installer), joue de facon synchrone comme PlaySync() ci-dessus, et les
+// deux fichiers .aiff existent sur toute install macOS depuis toujours.
+// Choisis courts/legers, dans le meme esprit que ding.wav.
+const SOUND_FILES_DARWIN = {
+  done: '/System/Library/Sounds/Glass.aiff',
+  waiting: '/System/Library/Sounds/Sosumi.aiff',
+};
+
 function readClaims() {
   try {
     const c = JSON.parse(fs.readFileSync(CLAIMS_PATH, 'utf8'));
@@ -110,6 +119,22 @@ function claimSound(key) {
 // Fire-and-forget : jamais bloquer l'extension host sur le round-trip
 // PowerShell, et jamais laisser un échec de spawn remonter à l'appelant.
 function playSoundImpl(kind) {
+  if (process.platform === 'darwin') {
+    const file = SOUND_FILES_DARWIN[kind];
+    if (!file) return;
+    try {
+      const child = spawn('afplay', [file], { stdio: 'ignore' });
+      child.on('error', () => {});
+      child.unref();
+    } catch {}
+    return;
+  }
+  if (process.platform !== 'win32') {
+    // Linux/autres : pas de lecteur audio garanti present sans dependance
+    // supplementaire (paplay/aplay varient selon la distro) — silence plutot
+    // que de spawner un binaire qui peut ne pas exister.
+    return;
+  }
   const cmd = SOUND_COMMANDS[kind];
   if (!cmd) return;
   try {

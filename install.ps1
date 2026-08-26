@@ -113,7 +113,9 @@ if (-not (Test-HookPresent $settings 'UserPromptSubmit' 'track-active-session.js
 # Notification:permission_prompt n'est emis qu'apres 6 s d'inactivite de l'user
 # (cf. hook-session-state.js). PermissionDenied / ElicitationResult referment
 # l'attente. Notre hook n'ecrit rien sur stdout : il n'accorde ni ne refuse rien.
-foreach ($ev in @('Stop', 'Notification', 'SessionEnd', 'PermissionRequest', 'PermissionDenied', 'Elicitation', 'ElicitationResult')) {
+# PreCompact/PostCompact (lot 2.62.0) : posent/levent le marqueur `compacting`
+# qui couvre la compaction AUTOMATIQUE du spinner busy existant.
+foreach ($ev in @('Stop', 'Notification', 'SessionEnd', 'PermissionRequest', 'PermissionDenied', 'Elicitation', 'ElicitationResult', 'PreCompact', 'PostCompact')) {
     if (-not (Test-HookPresent $settings $ev 'hook-session-state.js')) {
         $needed += @{ Event = $ev; Cmd = $sessionStateCmd }
     }

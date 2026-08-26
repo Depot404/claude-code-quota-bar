@@ -83,7 +83,7 @@ console.log('\n1. Dossier ~/.claude totalement absent');
       && settings.hooks[ev].some((g) => g.hooks.some((h) => h.command.includes('hook-session-state.js')));
     if (!ok) allEvents = false;
   }
-  check('les 7 événements Stop/Notification/.../ElicitationResult sont câblés', allEvents);
+  check('les 9 événements Stop/Notification/.../PostCompact sont câblés', allEvents);
   check('aucun backup créé (rien à sauvegarder, le fichier n\'existait pas)', res.backupPath === null
     && listBackups(path.join(home, '.claude')).length === 0);
 

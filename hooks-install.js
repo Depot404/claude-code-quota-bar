@@ -61,6 +61,10 @@ const ROOT_LIBS = ['cost.js'];
 // Événements routés vers hook-session-state.js (même liste que le `foreach` de
 // install.ps1). PermissionRequest est le seul signal IMMÉDIAT d'un dialogue de
 // permission ; PermissionDenied/ElicitationResult referment l'attente.
+// PreCompact/PostCompact (lot QuotaBar 2.62.0) : posent/lèvent le marqueur
+// `compacting` de sessions-state.json (cf. hook-session-state.js) — le
+// spinner busy existant couvre ainsi la compaction AUTOMATIQUE, invisible
+// jusque-là (elle ne passe pas par UserPromptSubmit).
 const SESSION_STATE_EVENTS = [
   'Stop',
   'Notification',
@@ -69,6 +73,8 @@ const SESSION_STATE_EVENTS = [
   'PermissionDenied',
   'Elicitation',
   'ElicitationResult',
+  'PreCompact',
+  'PostCompact',
 ];
 
 // Distinct d'une erreur de copie de fichier : le SEUL cas où l'appelant doit

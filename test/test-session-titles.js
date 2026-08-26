@@ -19,7 +19,8 @@ function check(name, cond, detail) {
 }
 function skip(name, why) { skipped++; console.log(`  skip ${name} (${why})`); }
 
-const { createSessionTitles, cleanLabel, CACHE_KEY } = require(path.join(__dirname, '..', 'session-titles.js'));
+const { createSessionTitles, cleanLabel, CACHE_KEY, createOpenSessionIds, EDITOR_STATE_KEY } =
+  require(path.join(__dirname, '..', 'session-titles.js'));
 const { liveSessionIds, foreignSessionIds, isForeignEntrypoint, pidAlive } =
   require(path.join(__dirname, '..', 'live-sessions.js'));
 
@@ -182,6 +183,89 @@ if (!sqlite) {
   fs.statSync = (...a) => { stats++; return statSync(...a); };
   try { throttled.get(); throttled.get(); } finally { fs.statSync = statSync; }
   check('appels rapprochés : aucun re-stat du vscdb', stats === 0, String(stats));
+
+  // ── 2bis. Sessions ouvertes ICI : memento/workbench.parts.editor ──────────
+  // Structure mesurée le 2026-08-25 sur un vscdb réel (lot « clic par
+  // identifiant ») : arbre serializedGrid.root de noeuds "branch"/"leaf",
+  // chaque éditeur webview portant un `value` JSON dont `state` est LUI-MÊME
+  // un JSON encodé avec `sessionID`.
+  console.log('\n2bis. createOpenSessionIds : state.vscdb (memento/workbench.parts.editor)');
+  const editorDbPath = path.join(SANDBOX, 'state-editor.vscdb');
+  const claudeEditor = (sessionID) => ({
+    id: 'workbench.editors.webviewInput',
+    value: JSON.stringify({
+      extensionId: 'Anthropic.claude-code',
+      state: JSON.stringify({ isFullEditor: true, sessionID }),
+    }),
+  });
+  const foreignEditor = () => ({
+    id: 'workbench.editors.webviewInput',
+    value: JSON.stringify({ extensionId: 'Some.other-extension', state: '{}' }),
+  });
+  const fileEditor = () => ({ id: 'workbench.editors.files.textFileEditor', value: '{}' });
+  const buildGrid = (sessionIds) => ({
+    'editorpart.state': {
+      serializedGrid: {
+        root: {
+          type: 'branch',
+          data: [
+            { type: 'leaf', data: { id: 0, editors: [claudeEditor(sessionIds[0]), foreignEditor(), fileEditor()] } },
+            {
+              type: 'branch',
+              data: [
+                { type: 'leaf', data: { id: 1, editors: sessionIds[1] ? [claudeEditor(sessionIds[1])] : [] } },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  });
+  const writeEditor = (value) => {
+    const db = new sqlite.DatabaseSync(editorDbPath);
+    db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)');
+    db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(EDITOR_STATE_KEY, value);
+    db.close();
+  };
+
+  check('chemin null → Set vide, aucun accès disque', createOpenSessionIds(null).get().size === 0);
+  check('fichier inexistant → Set vide, aucune exception',
+    createOpenSessionIds(path.join(SANDBOX, 'absent2.vscdb')).get().size === 0);
+
+  writeEditor(JSON.stringify(buildGrid(['sess-open-1', 'sess-open-2'])));
+  const openIds = createOpenSessionIds(editorDbPath, { minStatIntervalMs: 0 });
+  let ids2 = openIds.get();
+  check('sessionId trouvé dans un noeud "leaf" direct', ids2.has('sess-open-1'), [...ids2].join(','));
+  check('sessionId trouvé au fond d\'un noeud "branch" imbriqué', ids2.has('sess-open-2'), [...ids2].join(','));
+  check('éditeur non-Claude ignoré, éditeur de fichier ignoré, exactement 2 sessions',
+    ids2.size === 2, String(ids2.size));
+
+  // Onglet fermé entre-temps (le noeud correspondant disparaît du memento) →
+  // le fichier bouge, la lecture suit.
+  writeEditor(JSON.stringify(buildGrid(['sess-open-1', null])));
+  const futureE = Date.now() / 1000 + 5;
+  fs.utimesSync(editorDbPath, futureE, futureE);
+  ids2 = openIds.get();
+  check('memento réécrit sans sess-open-2 → disparaît de l\'ensemble',
+    ids2.has('sess-open-1') && !ids2.has('sess-open-2'), [...ids2].join(','));
+
+  // Valeur illisible : jamais d'exception, dernier ensemble connu conservé —
+  // un Set VIDE serait aussi sûr ici (cf. commentaire de createOpenSessionIds :
+  // l'absence n'est jamais dangereuse), mais garder le dernier connu évite de
+  // perdre le bénéfice de la voie principale sur un simple hoquet de lecture.
+  writeEditor('{ pas du json');
+  const futureE2 = futureE + 5;
+  fs.utimesSync(editorDbPath, futureE2, futureE2);
+  check('valeur corrompue → dernier ensemble connu conservé',
+    openIds.get().has('sess-open-1'), [...openIds.get()].join(','));
+
+  // Arbre malformé (pas d'exception, ensemble vide) — extension tierce ou
+  // schéma qui a bougé.
+  writeEditor(JSON.stringify({ 'editorpart.state': { serializedGrid: { root: { type: 'leaf' } } } }));
+  const futureE3 = futureE2 + 5;
+  fs.utimesSync(editorDbPath, futureE3, futureE3);
+  check('noeud racine sans data.editors → Set vide, aucune exception',
+    openIds.get().size === 0, String(openIds.get().size));
 }
 
 console.log('\n3. cleanLabel (affichage seulement)');

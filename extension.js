@@ -1,11 +1,8 @@
 const vscode = require('vscode');
 const https = require('https');
-const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
-const WebSocket = require('ws');
 const { ClaudePanelProvider } = require('./panel');
 const { createStateEngine, DEFAULTS: STATE_DEFAULTS, projectDirFor, readSessionsState } = require('./state');
 // Installeur des hooks (portage Node de install.ps1, lot onboarding
@@ -27,7 +24,7 @@ const { installBatchPhilosophy: applyBatchPhilosophy, PHILOSOPHY_FILE: BATCH_PHI
 // globale). Il vit ici, et non dans le moteur d'état, parce que la ligne de
 // quota le consulte hors de tout snapshot.
 const { createCostReader } = require('./cost.js');
-const { focusConversation, createFocusRelay } = require('./focus');
+const { focusConversation, createFocusRelay, setOpenSessionIdsSource } = require('./focus');
 const { createTabTracker, localActiveLabel } = require('./tabs');
 const { createAckTracker } = require('./ack');
 // Journal d'instrumentation du chemin d'ack (étape 18 phase 1, 5e récidive des
@@ -35,7 +32,7 @@ const { createAckTracker } = require('./ack');
 // ack-journal.js pour le pourquoi de la méthode.
 const { logEvent: logAckEvent } = require('./ack-journal');
 const { convMatchesLabel } = require('./labels');
-const { createSessionTitles } = require('./session-titles');
+const { createSessionTitles, createOpenSessionIds } = require('./session-titles');
 const { createSoundPlayer } = require('./sounds');
 // Fenêtre de stabilisation du tout premier rendu (lot micro-allègements
 // 2026-07-24) — cf. warmup.js pour le pourquoi (flash de conv fantôme post-reload).
@@ -90,22 +87,9 @@ const { removeSession, updateSession } = require('./hooks/sessions-state.js');
 
 const CREDENTIALS_PATH = path.join(os.homedir(), '.claude', '.credentials.json');
 const CACHE_PATH = path.join(os.homedir(), '.claude', 'usage-cache.json');
-const ORG_ID_CACHE_PATH = path.join(os.homedir(), '.claude', 'quota-org-id.json');
-const BRAVE_PID_PATH = path.join(os.homedir(), '.claude', 'quota-brave-pid.json');
 const USAGE_URL = 'https://claude.ai/settings/usage';
 const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
-const CDP_HOST = '127.0.0.1';
-// Brave Octopus (port 9223) instead of Brave principal (9222): keeps the user's
-// main Brave free of tabs, and tabs we open survive offscreen invisibly.
-// Lifecycle is bound to this extension (spawn at activate, kill at deactivate).
-const CDP_PORT = 9223;
-const BRAVE_EXE_CANDIDATES = [
-  process.env.BRAVE_EXE,
-  'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-  'C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-  process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
-].filter(Boolean);
 
 let timer;
 let panelProvider;
@@ -229,14 +213,6 @@ let lastHandoffsCtx = null;
 // pour rien (cf. plan lot 9, point 4).
 let lastConvStates = new Map();
 let lastEventFetchAt = 0;
-// Circuit breaker de la voie cookie : quand refreshSessionKeyViaCdp échoue
-// (cas le plus courant : le profil Brave n'est PAS loggué claude.ai, donc aucun
-// sessionKey à en extraire — constaté 2026-07-22), relancer Brave à chaque fetch
-// est du pur gaspillage (le refresh rééchouera à l'identique). On retombe sur
-// OAuth et on ne retente le spawn qu'après ce délai. Un Refresh manuel (force)
-// court-circuite le breaker — l'utilisateur vient peut-être de se logger.
-let cookieRefreshBlockedUntil = 0;
-const COOKIE_REFRESH_BACKOFF_MS = 60 * 60 * 1000;
 // Couture de test (comme CLAUDE_QUOTA_PANEL_DEMO) : un banc ne peut pas
 // attendre 45 s en conditions réelles pour prouver le throttle.
 const EVENT_FETCH_THROTTLE_MS = Number(process.env.CLAUDE_QUOTA_EVENT_FETCH_THROTTLE_MS) || 45 * 1000;
@@ -284,11 +260,6 @@ function getConfig() {
     // Défaut false : un utilisateur marketplace ne doit jamais avoir un son
     // surprise à l'installation (plan 2026-07-16).
     soundsEnabled: cfg.get('sounds.enabled', false),
-    // Défaut vide (plan 2026-07-16, lot 2 §1) : un utilisateur marketplace n'a
-    // pas de profil Brave Octopus, donc pas de chemin en dur — la voie cookie
-    // se désactive proprement (aucun spawn, aucune erreur bruyante) et le
-    // fallback OAuth prend le relais directement.
-    braveUserDataDir: (cfg.get('braveUserDataDir', '') || '').trim(),
     // Décision user 2026-07-22 : défaut = ordre des onglets VS Code (le plus à
     // gauche en tête), pas lastActivity — changement de comportement assumé
     // par rapport aux versions précédentes du panneau.
@@ -352,8 +323,8 @@ function activate(context) {
   // user sur la découvrabilité). Toujours visible, pas seulement quand le
   // panneau est fermé — évite de dépendre d'un signal de visibilité fiable.
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBarItem.text = '$(comment-discussion) Claude Convs';
-  statusBarItem.tooltip = 'Afficher le panneau Claude Convs (conversations & quota)';
+  statusBarItem.text = '$(comment-discussion) QuotaSaver';
+  statusBarItem.tooltip = 'Afficher le panneau QuotaSaver (conversations & quota)';
   statusBarItem.command = 'claude-code-quota-bar.showPanel';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
@@ -463,7 +434,7 @@ function activate(context) {
     // saisie, aucune liste, échec propre sur toute ambiguïté.
     linkConvToActiveMaster: (msg) => linkConvToActiveMaster(msg && msg.id),
     // Bouton du bandeau d'onboarding (lot 2026-08-19) : MÊME chemin que la
-    // commande Palette « Claude Convs: Install Hooks » — même confirmation
+    // commande Palette « QuotaSaver: Install Hooks » — même confirmation
     // modale, même écriture, même proposition de reload. Le bandeau ne
     // court-circuite rien, il ouvre juste le même geste en un clic depuis le
     // panneau plutôt que depuis la Palette.
@@ -513,7 +484,14 @@ function activate(context) {
   // state.vscdb du workspace, d'où ce câblage ici plutôt qu'un défaut dans
   // state.js. Absent (pas de workspace, layout VS Code différent) → table vide,
   // comportement d'avant ce lot.
-  const sessionTitles = createSessionTitles(resolveStateDbPath(context));
+  const stateDbPath = resolveStateDbPath(context);
+  const sessionTitles = createSessionTitles(stateDbPath);
+  // Même state.vscdb, table sœur : sessionId → ouvert dans CETTE fenêtre (lot
+  // « clic par identifiant »). focus.js s'en sert pour n'appeler l'API
+  // officielle de focus que là où le panneau qu'elle cible existe déjà —
+  // jamais à l'aveugle, cf. focus.js `tryOfficialFocus`.
+  const openSessionIds = createOpenSessionIds(stateDbPath);
+  setOpenSessionIdsSource(() => openSessionIds.get());
 
   // Un seul lecteur pour les deux montants (ligne de conversation et ligne de
   // quota) : il porte l'octet où chaque transcript a été lu, et relire deux
@@ -543,6 +521,12 @@ function activate(context) {
     pinnedSessions: () => new Set(pinStore ? pinStore.list() : []),
     tabs: () => tabTracker.getTabs(),
     sessionTitles: () => sessionTitles.get(),
+    // Source de vérité de la présence (lot « présence par identifiant »,
+    // 2026-08-26) : même Set que focus.js `tryOfficialFocus`, réutilisé ici
+    // pour que pairTabs (labels.js) désambiguïse deux sœurs au titre tronqué
+    // identique par IDENTITÉ plutôt que par l'ordre de la cascade — cf.
+    // state.js `buildSnapshot` et son commentaire sur `openIds`.
+    openSessionIds: () => openSessionIds.get(),
     sortOrder: () => getConfig().sortOrder,
     // Ce que les GROUPES affichent, ajouté à la clé de changement du moteur
     // (cf. state.js `extraKey`) : sans elle, une bascule de statut qui ne
@@ -758,8 +742,8 @@ async function fetchAndUpdate(force = false) {
   // poste — si une autre fenêtre vient de le rafraîchir il y a moins de
   // FETCH_DEDUP_MS, refaire l'appel réseau ici (poll 5 min ou fetch
   // événementiel du lot 9) n'apporterait rien de plus frais. On ne casse pas
-  // le repli existant : quand les deux chemins réseau échouent, quotaState()
-  // lit ce même cache indépendamment de ce court-circuit.
+  // le repli existant : quand l'appel réseau échoue, quotaState() lit ce même
+  // cache indépendamment de ce court-circuit.
   if (!force) {
     const fresh = readCache();
     if (fresh && fresh.timestamp && Date.now() - fresh.timestamp < FETCH_DEDUP_MS) {
@@ -770,51 +754,28 @@ async function fetchAndUpdate(force = false) {
 
   let data = null;
   let source = null;
-  let cookieErr = null;
-  let oauthErr = null;
 
-  // Primary path: raw fetch with cached sessionKey (~0 RAM, no browser).
-  // Endpoint claude.ai/api/organizations/{id}/usage uses a different rate-limit
-  // bucket than api.anthropic.com/oauth/usage (issues #31021, #31637).
+  // Chemin UNIQUE depuis 2.62.0 : le jeton OAuth de Claude Code. La voie
+  // cookie claude.ai (lecture d'un `sessionKey` dans un profil Brave, stocké
+  // en clair dans ~/.claude/quota-session-key.json puis présenté à
+  // claude.ai/api) a été RETIRÉE — audit du 2026-08-25, cf.
+  // NOTES_exposition_auth_2026-08-25.md. Motif : la politique d'Anthropic
+  // (« developers may not collect, store, or intermediate Claude.ai
+  // credentials or session tokens », code.claude.com/docs/en/legal-and-compliance)
+  // vise littéralement ce que faisait ce chemin, pour un bénéfice mesuré nul —
+  // /api/oauth/usage répond 200 et couvre 100 % des champs consommés par
+  // quotaState(). Ne pas le réintroduire : si un rate-limit revenait sur cet
+  // endpoint, la bonne réponse est d'espacer le poll et d'assumer un cache
+  // vieillissant (dont l'âge est déjà affiché), pas de reprendre un cookie
+  // de session.
   try {
-    data = await fetchUsageWithSessionKey();
-    source = 'cookie';
-  } catch (e) {
-    cookieErr = e;
-    // Refresh sessionKey via ephemeral Brave Octopus when:
-    //  - cache empty (first run, cleared)
-    //  - session expired (401/403)
-    //  - org_id discovery failed (likely auth issue)
-    // braveUserDataDir vide (défaut marketplace, lot 2 §1) : pas de profil
-    // Brave à lire → on saute la voie cookie sans tenter de spawn ni logguer
-    // quoi que ce soit, direct au fallback OAuth ci-dessous.
-    // `force` (Refresh manuel) court-circuite le circuit breaker ci-dessous.
-    if (getConfig().braveUserDataDir && (force || Date.now() >= cookieRefreshBlockedUntil)
-        && /no cached sessionKey|session_invalid|HTTP 40[13]|no org_id/.test(e.message)) {
-      try {
-        await refreshSessionKeyViaCdp();
-        data = await fetchUsageWithSessionKey();
-        source = 'cookie-refreshed';
-        cookieRefreshBlockedUntil = 0;   // succès → breaker réarmé
-      } catch (e2) {
-        cookieErr = e2;
-        // Échec (profil non loggué, Brave qui ne démarre pas…) : ne pas
-        // respawner Brave à chaque fetch — on retombe sur OAuth et on ferme le
-        // breaker pour COOKIE_REFRESH_BACKOFF_MS.
-        cookieRefreshBlockedUntil = Date.now() + COOKIE_REFRESH_BACKOFF_MS;
-      }
-    }
-  }
-
-  if (!data) {
-    try {
-      const token = readToken();
-      if (!token) throw new Error('no token');
-      data = await fetchUsageViaOAuth(token);
-      source = 'oauth';
-    } catch (e) {
-      oauthErr = e;
-    }
+    const token = readToken();
+    if (!token) throw new Error('no token');
+    data = await fetchUsageViaOAuth(token);
+    source = 'oauth';
+  } catch {
+    // Silencieux par construction : quotaState() lit le cache et affiche son
+    // âge, ce qui dit déjà à l'utilisateur que la donnée vieillit.
   }
 
   if (data) {
@@ -1538,7 +1499,7 @@ function buildPanelState() {
   };
 }
 
-// Commande « Claude Convs: Install Hooks » (plan 2026-07-16, lot 2 §2 ;
+// Commande « QuotaSaver: Install Hooks » (plan 2026-07-16, lot 2 §2 ;
 // portage Node lot onboarding 2026-08-19) : jamais sans consentement
 // explicite — l'installeur écrit hors du dossier de l'extension
 // (~/.claude/scripts/, ~/.claude/settings.json). Sans hooks, le panneau reste
@@ -1568,7 +1529,7 @@ async function installHooks(context) {
 
   let installed = false;
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Claude Convs: installing hooks…') },
+    { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('QuotaSaver: installing hooks…') },
     async () => {
       try {
         installClaudeHooks({ extensionRoot: context.extensionPath });
@@ -1583,7 +1544,7 @@ async function installHooks(context) {
         // SettingsParseError comme toute autre défaillance (fichier source
         // manquant, écriture invalide relue) partagent le même message : dans
         // les deux cas err.message dit déjà quoi faire, cf. hooks-install.js.
-        vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: hook installation failed — {0}', ((err && err.message) || String(err)).trim().slice(0, 500)));
+        vscode.window.showErrorMessage(vscode.l10n.t('QuotaSaver: hook installation failed — {0}', ((err && err.message) || String(err)).trim().slice(0, 500)));
       }
     }
   );
@@ -1597,7 +1558,7 @@ async function installHooks(context) {
   await maybeOfferBatchPhilosophy(context);
 
   const pick = await vscode.window.showInformationMessage(
-    vscode.l10n.t('Claude Convs: hooks installed. Reload the window for the panel to pick up live conversation state.'),
+    vscode.l10n.t('QuotaSaver: hooks installed. Reload the window for the panel to pick up live conversation state.'),
     vscode.l10n.t('Reload Window')
   );
   if (pick === vscode.l10n.t('Reload Window')) vscode.commands.executeCommand('workbench.action.reloadWindow');
@@ -2390,7 +2351,7 @@ function ungroupedConversations() {
 
 async function pickConversation(placeHolder, convs = ungroupedConversations()) {
   if (!convs.length) {
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: no ungrouped conversation to pick from.'));
+    vscode.window.showInformationMessage(vscode.l10n.t('QuotaSaver: no ungrouped conversation to pick from.'));
     return null;
   }
   const pick = await vscode.window.showQuickPick(
@@ -2500,19 +2461,19 @@ async function setGroupMaster(id) {
   if (!g || g.masterSessionId || !stateEngine) return;
   const activeLabel = localActiveLabel();
   if (!activeLabel) {
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: the active tab is not a Claude conversation.'));
+    vscode.window.showInformationMessage(vscode.l10n.t('QuotaSaver: the active tab is not a Claude conversation.'));
     return;
   }
   const matches = stateEngine.getSnapshot().conversations.filter((c) => convMatchesLabel(activeLabel, c));
   if (matches.length !== 1) {
     vscode.window.showInformationMessage(matches.length > 1
-      ? vscode.l10n.t('Claude Convs: the active tab matches more than one conversation — cannot link automatically.')
-      : vscode.l10n.t('Claude Convs: could not identify the conversation in the active tab.'));
+      ? vscode.l10n.t('QuotaSaver: the active tab matches more than one conversation — cannot link automatically.')
+      : vscode.l10n.t('QuotaSaver: could not identify the conversation in the active tab.'));
     return;
   }
   const conv = matches[0];
   if (!groupStore.setMaster(id, conv.sessionId, conv.title || '')) {
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: this conversation is already a member of this group.'));
+    vscode.window.showInformationMessage(vscode.l10n.t('QuotaSaver: this conversation is already a member of this group.'));
     return;
   }
   pushPanelState();
@@ -2530,19 +2491,19 @@ async function linkConvToActiveMaster(id) {
   if (!groupStore || !stateEngine || !id) return;
   const activeLabel = localActiveLabel();
   if (!activeLabel) {
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: the active tab is not a Claude conversation.'));
+    vscode.window.showInformationMessage(vscode.l10n.t('QuotaSaver: the active tab is not a Claude conversation.'));
     return;
   }
   const matches = stateEngine.getSnapshot().conversations.filter((c) => convMatchesLabel(activeLabel, c));
   if (matches.length !== 1) {
     vscode.window.showInformationMessage(matches.length > 1
-      ? vscode.l10n.t('Claude Convs: the active tab matches more than one conversation — cannot link automatically.')
-      : vscode.l10n.t('Claude Convs: could not identify the conversation in the active tab.'));
+      ? vscode.l10n.t('QuotaSaver: the active tab matches more than one conversation — cannot link automatically.')
+      : vscode.l10n.t('QuotaSaver: could not identify the conversation in the active tab.'));
     return;
   }
   const master = matches[0];
   if (master.sessionId === id) {
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: a conversation cannot be its own master.'));
+    vscode.window.showInformationMessage(vscode.l10n.t('QuotaSaver: a conversation cannot be its own master.'));
     return;
   }
   // Un seul refus, et il ne porte QUE sur la cible (plan « la maîtresse
@@ -2561,7 +2522,7 @@ async function linkConvToActiveMaster(id) {
   // maîtresse soit MEMBRE d'un autre lot est, de même, la filiation nominale.
   const attached = groupStore.attachedIds();
   if (attached.has(id)) {
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: one of these conversations is already part of a group.'));
+    vscode.window.showInformationMessage(vscode.l10n.t('QuotaSaver: one of these conversations is already part of a group.'));
     return;
   }
   const g = groupStore.create(master.title || '', [{ prompt: '', sessionId: id, wave: 1 }]);
@@ -2702,7 +2663,7 @@ async function promptBatchPhilosophy(context) {
   let choice;
   try {
     choice = await vscode.window.showWarningMessage(
-      vscode.l10n.t('Claude Convs can add a short "working in batches" note to your personal CLAUDE.md.\n\n') +
+      vscode.l10n.t('QuotaSaver can add a short "working in batches" note to your personal CLAUDE.md.\n\n') +
       vscode.l10n.t('This is optional — the extension works fully without it — and strongly recommended: it teaches Claude to offer splitting work into several conversations, each with the model and effort that part deserves, instead of doing everything in one costly conversation.\n\n') +
       vscode.l10n.t('It adds one line to ~/.claude/CLAUDE.md: {0}\n\n', BATCH_PHILOSOPHY_IMPORT_LINE) +
       vscode.l10n.t('Add it?'),
@@ -2720,9 +2681,9 @@ async function promptBatchPhilosophy(context) {
 
   try {
     applyBatchPhilosophy({ extensionRoot: context.extensionPath });
-    vscode.window.showInformationMessage(vscode.l10n.t('Claude Convs: batching philosophy added to your CLAUDE.md.'));
+    vscode.window.showInformationMessage(vscode.l10n.t('QuotaSaver: batching philosophy added to your CLAUDE.md.'));
   } catch (err) {
-    vscode.window.showErrorMessage(vscode.l10n.t('Claude Convs: could not add the batching philosophy — {0}', ((err && err.message) || String(err)).trim().slice(0, 500)));
+    vscode.window.showErrorMessage(vscode.l10n.t('QuotaSaver: could not add the batching philosophy — {0}', ((err && err.message) || String(err)).trim().slice(0, 500)));
   }
 }
 
@@ -2807,7 +2768,7 @@ async function maybeWarnAccessibilityConflict(context) {
   let choice;
   try {
     choice = await vscode.window.showInformationMessage(
-      vscode.l10n.t('Claude Convs plays its own notification sound. VS Code also has an accessibility sound enabled for chat responses / questions — turn those off to avoid hearing both?'),
+      vscode.l10n.t('QuotaSaver plays its own notification sound. VS Code also has an accessibility sound enabled for chat responses / questions — turn those off to avoid hearing both?'),
       vscode.l10n.t('Turn off VS Code sounds'), vscode.l10n.t('Keep both')
     );
   } catch { choice = undefined; }
@@ -2886,263 +2847,6 @@ function fetchUsageViaOAuth(token) {
   });
 }
 
-// ============================================================================
-// Brave Octopus is spawned EPHEMERALLY only when the cached claude.ai
-// sessionKey is missing or expired. It is killed immediately after cookie
-// extraction. Steady-state RAM cost is ~0 (no persistent browser).
-// See Tools/BrowserAutomation/CLAUDE.md.
-// ============================================================================
-
-function findBraveExe() {
-  for (const p of BRAVE_EXE_CANDIDATES) {
-    try { if (fs.existsSync(p)) return p; } catch {}
-  }
-  return null;
-}
-
-function cleanupSingletonLocks(userDataDir) {
-  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-    try { fs.unlinkSync(path.join(userDataDir, f)); } catch {}
-  }
-}
-
-function pingOctopusCDP(timeoutMs = 1000) {
-  return new Promise((resolve) => {
-    const req = http.get(`http://${CDP_HOST}:${CDP_PORT}/json/version`, { timeout: timeoutMs }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
-    });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-  });
-}
-
-function startOctopusBrave(userDataDir) {
-  const exe = findBraveExe();
-  if (!exe) throw new Error('brave.exe not found (set BRAVE_EXE env var)');
-  cleanupSingletonLocks(userDataDir);
-  const args = [
-    `--remote-debugging-port=${CDP_PORT}`,
-    `--user-data-dir=${userDataDir}`,
-    `--profile-directory=Default`,
-    // Démarre SANS fenêtre : le process et son endpoint CDP vivent, mais aucune
-    // fenêtre « Nouvel onglet – Brave » n'apparaît — donc plus de vol de focus
-    // (mesuré 2026-07-22 : sans ce flag, la fenêtre Brave capte le foreground
-    // ~230 ms à chaque spawn, ce qui coupait l'utilisateur en pleine frappe à
-    // chaque question/fin de tour, cf. maybeFetchOnTransition). Storage.getCookies
-    // est browser-level et fonctionne sans fenêtre (vérifié : 122 cookies lus).
-    '--no-startup-window',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-default-apps',
-    '--disable-features=ChromeWhatsNewUI',
-    // Filet si --no-startup-window venait à ne pas s'appliquer : la fenêtre
-    // éventuelle reste hors écran.
-    '--window-position=-32000,-32000',
-    '--window-size=1280,900',
-  ];
-  const child = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true });
-  if (child.pid) {
-    try { fs.writeFileSync(BRAVE_PID_PATH, JSON.stringify({ pid: child.pid, ts: Date.now() })); } catch {}
-  }
-  child.unref();
-}
-
-// Synchronous, deterministic kill of Brave Octopus tree via the saved root PID.
-// Done by spawning a detached PowerShell so VSCode's extension host doesn't
-// block on the taskkill round-trip, but the kill is fire-and-forget from our
-// side — the OS guarantees the tree is reaped.
-function closeOctopusBrave(userDataDir) {
-  let pid = null;
-  try { pid = JSON.parse(fs.readFileSync(BRAVE_PID_PATH, 'utf8'))?.pid; } catch {}
-  try { fs.unlinkSync(BRAVE_PID_PATH); } catch {}
-
-  // First: targeted kill on the saved PID + descendants. Catches the normal case.
-  if (pid) {
-    try { execSync(`taskkill /PID ${pid} /T /F`, { timeout: 4000, windowsHide: true, stdio: 'ignore' }); } catch {}
-  }
-
-  // Defense in depth: kill any leftover brave.exe whose command line matches
-  // our user-data-dir (covers stale PIDs from a previous crashed run). Matched
-  // on the configured dir's basename, not a hardcoded string — braveUserDataDir
-  // is now a user setting (lot 2 §1).
-  const marker = path.basename(userDataDir || '').replace(/'/g, "''");
-  if (!marker) return;
-  try {
-    const psCmd = `Get-CimInstance Win32_Process -Filter "Name='brave.exe'" | Where-Object { $_.CommandLine -like '*${marker}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
-    execSync(`powershell -NoProfile -Command "${psCmd.replace(/"/g, '\\"')}"`, { timeout: 4000, windowsHide: true, stdio: 'ignore' });
-  } catch {}
-}
-
-// ============================================================================
-// Lightweight path: raw fetch() with cached claude.ai sessionKey cookie.
-// Anthropic accepts sessionKey alone (verified empirically: cf_clearance,
-// __cf_bm, etc. are not required on /api/organizations/{id}/usage — tested
-// 2026-05-25 from a residential IP). No browser, no TLS spoof, ~0 RAM.
-// On 401/403, refreshSessionKeyViaCdp() spawns Brave Octopus ephemerally,
-// extracts the sessionKey via browser-level Storage.getCookies, and kills it.
-// ============================================================================
-
-function httpGetJson(url, timeoutMs = 2000) {
-  return new Promise((resolve, reject) => {
-    const req = http.get(url, { timeout: timeoutMs }, (res) => {
-      let body = '';
-      res.on('data', (c) => body += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('CDP ping timeout')); });
-  });
-}
-
-class CdpClient {
-  constructor(wsUrl) {
-    this.wsUrl = wsUrl;
-    this.ws = null;
-    this.nextId = 0;
-    this.pending = new Map();
-  }
-  connect() {
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.wsUrl, { perMessageDeflate: false });
-      const t = setTimeout(() => reject(new Error('CDP connect timeout')), 5000);
-      this.ws.on('open', () => { clearTimeout(t); resolve(); });
-      this.ws.on('error', (e) => { clearTimeout(t); reject(e); });
-      this.ws.on('message', (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          if (msg.id && this.pending.has(msg.id)) {
-            const { res, rej } = this.pending.get(msg.id);
-            this.pending.delete(msg.id);
-            if (msg.error) rej(new Error(msg.error.message || 'CDP error'));
-            else res(msg.result);
-          }
-        } catch {}
-      });
-    });
-  }
-  send(method, params = {}, sessionId = null) {
-    const id = ++this.nextId;
-    return new Promise((res, rej) => {
-      this.pending.set(id, { res, rej });
-      const payload = { id, method, params };
-      if (sessionId) payload.sessionId = sessionId;
-      this.ws.send(JSON.stringify(payload));
-    });
-  }
-  close() { try { this.ws.close(); } catch {} }
-}
-
-const SESSION_KEY_PATH = path.join(os.homedir(), '.claude', 'quota-session-key.json');
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
-
-function readSessionKey() {
-  try { return JSON.parse(fs.readFileSync(SESSION_KEY_PATH, 'utf8'))?.sessionKey || null; }
-  catch { return null; }
-}
-
-function saveSessionKey(sessionKey) {
-  try { fs.writeFileSync(SESSION_KEY_PATH, JSON.stringify({ sessionKey, ts: Date.now() })); } catch {}
-}
-
-function httpsGetJson(url, headers = {}, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const req = https.get({
-      hostname: u.hostname,
-      path: u.pathname + u.search,
-      headers: { 'user-agent': UA, accept: 'application/json', ...headers },
-      timeout: timeoutMs,
-    }, (res) => {
-      let body = '';
-      res.on('data', (c) => body += c);
-      res.on('end', () => resolve({ status: res.statusCode, body }));
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-  });
-}
-
-async function fetchUsageWithSessionKey() {
-  const sessionKey = readSessionKey();
-  if (!sessionKey) throw new Error('no cached sessionKey');
-
-  let orgId = readOrgIdCache();
-  if (!orgId) {
-    orgId = await discoverOrgIdWithSessionKey(sessionKey);
-    if (orgId) writeOrgIdCache(orgId);
-  }
-  if (!orgId) throw new Error('no org_id');
-
-  let r = await httpsGetJson(
-    `https://claude.ai/api/organizations/${orgId}/usage`,
-    { cookie: `sessionKey=${sessionKey}` }
-  );
-  if (r.status === 404) {
-    // org_id stale — re-discover once
-    const fresh = await discoverOrgIdWithSessionKey(sessionKey);
-    if (fresh && fresh !== orgId) {
-      writeOrgIdCache(fresh);
-      r = await httpsGetJson(
-        `https://claude.ai/api/organizations/${fresh}/usage`,
-        { cookie: `sessionKey=${sessionKey}` }
-      );
-    }
-  }
-  if (r.status === 401 || r.status === 403) throw new Error('session_invalid');
-  if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
-  return JSON.parse(r.body);
-}
-
-async function discoverOrgIdWithSessionKey(sessionKey) {
-  const r = await httpsGetJson('https://claude.ai/api/organizations', { cookie: `sessionKey=${sessionKey}` });
-  if (r.status !== 200) return null;
-  const orgs = JSON.parse(r.body);
-  if (!Array.isArray(orgs) || !orgs.length) return null;
-  const pick = orgs.find(o => !o.archived_at) || orgs[0];
-  return pick?.uuid || null;
-}
-
-async function refreshSessionKeyViaCdp() {
-  const { braveUserDataDir } = getConfig();
-  if (!braveUserDataDir) throw new Error('braveUserDataDir not configured');
-  const wasUp = await pingOctopusCDP();
-  if (!wasUp) {
-    startOctopusBrave(braveUserDataDir);
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline) {
-      if (await pingOctopusCDP()) break;
-      await new Promise(r => setTimeout(r, 250));
-    }
-    if (!await pingOctopusCDP()) throw new Error('Brave Octopus failed to start');
-  }
-
-  const version = await httpGetJson(`http://${CDP_HOST}:${CDP_PORT}/json/version`, 1500);
-  const cdp = new CdpClient(version.webSocketDebuggerUrl);
-  await cdp.connect();
-  try {
-    const { cookies } = await cdp.send('Storage.getCookies');
-    const sk = cookies.find(c => c.name === 'sessionKey' && /(^|\.)claude\.ai$/.test(c.domain));
-    if (!sk) throw new Error('sessionKey absent in Brave Octopus — claude.ai not logged in');
-    saveSessionKey(sk.value);
-  } finally {
-    cdp.close();
-    // Only kill if we spawned it — never kill a Brave Octopus a Playwright
-    // script may currently be using.
-    if (!wasUp) closeOctopusBrave(braveUserDataDir);
-  }
-}
-
-function readOrgIdCache() {
-  try { return JSON.parse(fs.readFileSync(ORG_ID_CACHE_PATH, 'utf8'))?.org_id || null; }
-  catch { return null; }
-}
-
-function writeOrgIdCache(orgId) {
-  try { fs.writeFileSync(ORG_ID_CACHE_PATH, JSON.stringify({ org_id: orgId, ts: Date.now() })); } catch {}
-}
 
 function hhmm(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
 

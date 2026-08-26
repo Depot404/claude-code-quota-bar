@@ -53,13 +53,10 @@ mkt-*.png
 .git/**
 .gitignore
 .github/**
+# Depuis 2.62.0 l'extension n'a AUCUNE dependance runtime : les 6 lignes qui
+# reinclutaient `ws` ici (client WebSocket du chemin cookie claude.ai, retire)
+# n'ont plus d'objet. Rien de node_modules/ n'a sa place dans le paquet.
 node_modules/**
-!node_modules/ws/**
-!node_modules/ws/LICENSE
-!node_modules/ws/package.json
-!node_modules/ws/index.js
-!node_modules/ws/wrapper.mjs
-!node_modules/ws/browser.js
 *.vsix
 **/*.map
 **/.DS_Store

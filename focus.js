@@ -4,17 +4,32 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { norm, convMatchesLabel, isClaudeTab } = require('./labels');
+const { OPEN_COMMAND } = require('./launcher');
 
 // ============================================================================
 // Clic sur une conversation du panneau → focus de son onglet, où qu'il soit.
 //
-// POURQUOI C'EST INDIRECT — VS Code n'expose aucun mapping onglet↔session
-// (microsoft/vscode#158853), aucune API pour activer un onglet (#162446), et
-// aucune API pour remonter une fenêtre au premier plan (#51078, #74945).
-// L'extension Claude ne contribue aucune commande ciblant un session_id.
-// Il ne reste donc que : retrouver l'onglet par son LIBELLÉ, l'activer par son
-// INDEX (workbench.action.openEditorAtIndex, qui n'agit que sur le groupe
-// actif → focus du groupe d'abord), et remonter la fenêtre via Win32.
+// VOIE PRINCIPALE (lot « clic par identifiant », 2026-08-25) — l'extension
+// officielle enregistre `claude-vscode.editor.open(sessionId, prompt,
+// viewColumn)`, dont la toute première branche revealed() le panneau déjà
+// ouvert pour ce sessionId SANS AUCUNE comparaison de titre — focus EXACT.
+// Danger vérifié (NOTES_api_claude_code_extension.md) : si CETTE fenêtre n'a
+// pas déjà ce sessionId ouvert, la commande le traite comme une nouvelle
+// conversation et EN RECRÉE UN PANNEAU (reprise de session, doublon). On ne
+// l'appelle donc que dans la fenêtre dont le memento du state.vscdb
+// (`session-titles.js` createOpenSessionIds, seule preuve d'identité
+// d'onglet — la Tab API ne l'expose pas) confirme que ce sessionId y est
+// déjà ouvert (`tryOfficialFocus`). Version de l'extension trop ancienne pour
+// exposer la commande → repli intégral sur la voie historique ci-dessous.
+//
+// REPLI PAR LIBELLÉ (voie d'avant ce lot) — VS Code n'expose aucun mapping
+// onglet↔session (microsoft/vscode#158853), aucune API pour activer un onglet
+// (#162446), et aucune API pour remonter une fenêtre au premier plan (#51078,
+// #74945). Il ne reste donc que : retrouver l'onglet par son LIBELLÉ,
+// l'activer par son INDEX (workbench.action.openEditorAtIndex, qui n'agit que
+// sur le groupe actif → focus du groupe d'abord), et remonter la fenêtre via
+// Win32. Ce chemin reste le seul dès que le libellé affiché diverge du
+// libellé réel de l'onglet ET que la voie principale n'a pas pu conclure.
 //
 // POURQUOI UN RELAIS FICHIER — le panneau liste les conversations du WORKSPACE,
 // pas celles de la fenêtre : une conv du même workspace peut très bien avoir son
@@ -47,6 +62,44 @@ const GROUP_FOCUS_COMMANDS = [
 ];
 
 function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
+
+// Injecté par extension.js (`createOpenSessionIds` de session-titles.js, lu
+// sur LE MÊME state.vscdb que sessionTitles) : sessionId → ouvert dans CETTE
+// fenêtre. Défaut = Set vide tant que rien n'est câblé (bancs, extension pas
+// encore activée) → tryOfficialFocus ne peut jamais conclure « ouvert ici »
+// par erreur, il retombe alors sur le repli par libellé.
+let getOpenSessionIds = () => new Set();
+function setOpenSessionIdsSource(fn) {
+  getOpenSessionIds = typeof fn === 'function' ? fn : () => new Set();
+}
+
+// Voie principale du clic (cf. en-tête du fichier) : focus EXACT par
+// sessionId, jamais par comparaison de titre. Ne réussit QUE si (1) le
+// memento confirme que ce sessionId est ouvert ICI et (2) la commande
+// officielle existe sur cette version de l'extension — sans ces deux gardes,
+// l'appel recréerait un panneau (doublon) au lieu d'en révéler un existant.
+// Toute défaillance (commande absente, exception à l'exécution) rend `false`
+// sans rien avoir tenté d'autre : c'est à l'appelant de retomber sur le
+// repli par libellé, jamais à cette fonction de le faire elle-même.
+async function tryOfficialFocus(sessionId) {
+  if (!sessionId) return false;
+  if (!getOpenSessionIds().has(sessionId)) return false;
+  let available = false;
+  try {
+    const all = await vscode.commands.getCommands(true);
+    available = Array.isArray(all) && all.includes(OPEN_COMMAND);
+  } catch (e) {
+    log('getCommands failed: %s', e && e.message);
+  }
+  if (!available) return false;
+  try {
+    await vscode.commands.executeCommand(OPEN_COMMAND, sessionId);
+    return true;
+  } catch (e) {
+    log('%s(%s) failed: %s — repli sur le libellé', OPEN_COMMAND, sessionId, e && e.message);
+    return false;
+  }
+}
 
 // Cherche l'onglet dans TOUS les groupes de CETTE fenêtre (le lot 1 ne regardait
 // que le groupe actif). Garde-fou conservé : sans correspondance on ne devine
@@ -104,6 +157,15 @@ function writeRequest(payload) {
 // Le script se rabat sur un flash de la barre des tâches si Windows refuse la
 // prise de focus.
 function raiseWindow(tabLabel) {
+  // raise-window.ps1 talks Win32 (EnumWindows, SetForegroundWindow) — no
+  // portable equivalent, and no other platform to test against. The tab
+  // itself is already focused by focusTab() above; this only brings the OS
+  // window forward, so skipping it here is a silent no-op, never a spawn of
+  // a binary (powershell.exe) that doesn't exist on macOS/Linux.
+  if (process.platform !== 'win32') {
+    log('raise: skipped (platform %s has no window-raise support)', process.platform);
+    return;
+  }
   try {
     const child = spawn('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', RAISE_SCRIPT,
@@ -160,6 +222,17 @@ function createFocusRelay(handlers = {}) {
     if (req.ts <= lastTs) return;                      // fs.watch émet plusieurs events par écriture
     if (Date.now() - req.ts > REQUEST_TTL_MS) return;  // résidu
     lastTs = req.ts;
+
+    // Voie principale, avant toute comparaison de libellé : une fermeture
+    // (`action === 'close'`) n'a pas de sessionId à offrir à editor.open, elle
+    // reste sur closeTab ci-dessous, qui a besoin du `match` de toute façon.
+    if (req.action !== 'close' && await tryOfficialFocus(req.session_id)) {
+      const label = req.tab_title || req.title || null;
+      raiseWindow(label || '');
+      try { onActivated(label); } catch {}
+      return;
+    }
+
     const match = findTab(req.title, req.tab_title);
     if (!match) return;                                // pas chez nous : une autre fenêtre répondra
     try {
@@ -199,7 +272,15 @@ function createFocusRelay(handlers = {}) {
 async function focusConversation(msg) {
   const title = msg && msg.title;
   const tabTitle = (msg && msg.tabTitle) || null;
+  const sessionId = (msg && msg.id) || null;
   if (!norm(title) && !norm(tabTitle)) return null;
+
+  // Voie principale : sessionId ouvert ICI → focus exact, aucun libellé à
+  // comparer. C'est elle qui répare le no-op silencieux du 2026-08-25 (clic
+  // sur une conv OUVERTE sans effet) : le libellé pouvait diverger, l'identité
+  // de session, elle, ne divergera jamais.
+  if (await tryOfficialFocus(sessionId)) return tabTitle || title || null;
+
   const match = findTab(title, tabTitle);
   if (match) {
     await focusTab(match);
@@ -233,5 +314,6 @@ async function focusConversation(msg) {
 
 module.exports = {
   focusConversation, createFocusRelay, findTab,
+  setOpenSessionIdsSource,
   REQUEST_PATH, REQUEST_TTL_MS,
 };
