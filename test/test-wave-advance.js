@@ -1,12 +1,12 @@
-// Bout-en-bout du lot 3 (plan bug-chip 2026-07-24) sur le VRAI activate()
-// d'extension.js : l'auto-avance d'un groupe doit lancer la vague suivante
-//   1. AU BOOT, quand la vague courante s'est terminée pendant que l'extension
-//      était éteinte (reload) — aucun `onChange` n'a porté la transition, il
-//      faut une réévaluation au premier snapshot post-boot ;
-//   2. mais JAMAIS trop tôt : une vague courante encore `busy` au boot ne doit
-//      rien déclencher — c'est seulement quand SA transition busy→done arrive
-//      (via `onChange`) que la suivante part.
-//
+// Bout-en-bout sur le VRAI activate() d'extension.js. CONTRAT INVERSE le
+// 2026-08-26 (decision user) : l'extension n'ouvre PLUS aucune vague toute
+// seule. Ce banc, qui prouvait l'auto-avance, prouve desormais son absence -
+// au boot avec une vague deja terminee comme a la transition busy->done.
+// Pourquoi c'est un filet et pas une formalite : un membre dont la ligne a
+// disparu n'a plus d'etat, member-truth compte un etat absent comme termine,
+// et la vague passait pour finie. Mesure chez l'user : 7 onglets pour 5
+// conversations, des doublons par tache, des fermetures annulees en boucle.
+// Le bouton play reste la seule porte (canForceLaunch, test-waves.js).
 // C'est le seul test qui prouve le CÂBLAGE de bout en bout (workspaceState →
 // member-truth → waves → launchWaveForGroup) plutôt que ses morceaux séparés :
 // waves.js est déjà couvert par test-waves.js, mais lui ne voit pas qu'AUCUN
@@ -232,9 +232,9 @@ async function run() {
   // feedback, ouvrait la vague suivante), puis lancement à l'échéance.
   check('groupe A : PAS de lancement instantané au boot (verrou de stabilisation armé)',
     !launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
-  await waitFor(() => launched('gA', 'm2'));
-  check('groupe A : vague 2 lancée à l\'échéance du verrou (timer, aucun onChange n\'a tiré)',
-    launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
+  await sleep(400);   // bien au-dela du verrou de stabilisation (150 ms ici)
+  check('groupe A : vague 2 TOUJOURS pas lancee apres l echeance du verrou (plus aucune avance auto)',
+    !launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
 
   console.log('\n2. Pas d\'avance prématurée : vague 1 encore `busy` au boot → vague 2 en attente');
   check('groupe B : vague 2 TOUJOURS en file au boot (vague 1 busy)',
@@ -243,9 +243,8 @@ async function run() {
   // Le repli presse-papier du lancement de gA/m2 est asynchrone : on attend
   // qu'il ait écrit (condition, pas durée), puis on vérifie qu'un lancement a
   // bien été TENTÉ (et pas seulement le flag posé).
-  await waitFor(() => clips.includes('PROMPT-A-WAVE2'));
-  check('groupe A : le lancement de la vague 2 a bien été tenté (prompt au presse-papier)',
-    clips.includes('PROMPT-A-WAVE2'), JSON.stringify(clips));
+  check('groupe A : aucun lancement tente (rien au presse-papier)',
+    !clips.includes('PROMPT-A-WAVE2'), JSON.stringify(clips));
   check('groupe B : aucun lancement tenté tant que la vague 1 tourne',
     !clips.includes('PROMPT-B-WAVE2'), JSON.stringify(clips));
 
@@ -266,11 +265,11 @@ async function run() {
     if (launched('gB', 'm2')) { gbLaunched = true; break; }
     await sleep(10);
   }
-  check('groupe B : vague 2 lancée au `done` de la vague 1 (chemin onChange)',
-    gbLaunched, JSON.stringify(memberOf('gB', 'm2')));
+  check('groupe B : la transition busy->done NE lance PAS la vague 2 (le play seul le fait)',
+    !gbLaunched, JSON.stringify(memberOf('gB', 'm2')));
   await sleep(60);
-  check('groupe B : lancement de la vague 2 bien tenté (prompt au presse-papier)',
-    clips.includes('PROMPT-B-WAVE2'), JSON.stringify(clips));
+  check('groupe B : toujours rien au presse-papier',
+    !clips.includes('PROMPT-B-WAVE2'), JSON.stringify(clips));
 
   console.log('\n4. Aucun résidu');
   for (const s of context.subscriptions) { try { s.dispose(); } catch {} }

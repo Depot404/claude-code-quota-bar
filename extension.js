@@ -387,10 +387,6 @@ function activate(context) {
     // Marque « à relire » (lot 1, plan marque-a-relire) : pose/retrait 100 %
     // manuels (décision 7 du plan) — seul écrivain de PINS_KEY.
     togglePinConv: (msg) => togglePinConv(msg && msg.id),
-    // Clic sur une ligne marquée dont l'onglet est fermé (lot 3) : le webview
-    // n'envoie ce message QUE sur une ligne `tabGone` — c'est lui qui sait ce
-    // qu'il a rendu, et le rendu dit déjà « onglet fermé ».
-    reopenConv: (msg) => reopenConv(msg && msg.id),
     removeMember: (msg) => removeMember(msg && msg.id, msg && msg.key),
     linkMember: (msg) => linkMember(msg && msg.id, msg && msg.key),
     // Remède du lien mort-né (plan lien-mort-né 2026-08-04) : rouvrir une
@@ -1057,11 +1053,6 @@ function conversationsState() {
       groupId: groupIdFor(c.sessionId),
       // Onglet encore ouvert : conditionne le badge « terminé → fermable ».
       tabOpen: !!c.tabOpen,
-      // Onglet PROUVÉ fermé, ligne retenue par la seule marque (lot 3) : le
-      // titre est barré et le clic ROUVRE au lieu de chercher un onglet. À ne
-      // pas confondre avec `tabOpen: false`, qui peut n'être qu'un manque de
-      // matching passager (state.js resolveTabOpen).
-      tabGone: !!c.tabGone,
       // Groupe où l'appariement conv↔onglet est arbitraire (mêmes titres
       // tronqués, lot 2/3 du plan d'appariement) : signe discret + infobulle
       // côté webview, jamais de surlignage sur cette ligne (state.js).
@@ -2185,7 +2176,14 @@ function maybeAdvanceWaves() {
     // Membres redirigés (husk→successeur) : une vague ne se déclare pas
     // « terminée » sur un husk mort alors que la conv a repris et travaille.
     const members = g.members.map((m) => ({ wave: m.wave, status: memberTruth(redirectMember(m, superseded), sources).waveStatus }));
-    const gate = advanceGate(waveGates.get(g.id), waveToAutoLaunch(members), now);
+    // AUCUNE OUVERTURE AUTOMATIQUE (decision user 2026-08-26). L'enchainement
+    // automatique des vagues ouvrait des onglets que l'user venait de fermer :
+    // un membre dont la ligne a disparu n'a plus d'etat, member-truth le compte
+    // `done` (state == null), la vague passe pour terminee et la suivante part.
+    // Resultat mesure chez l'user : 7 onglets pour 5 conversations, des doublons
+    // par tache, et des fermetures annulees en boucle. Le bouton play reste la
+    // seule porte : il ouvre une vague quand l'user le decide, jamais avant.
+    const gate = advanceGate(waveGates.get(g.id), null, now);
     if (gate.pending) {
       waveGates.set(g.id, gate.pending);
       const due = gate.pending.since + WAVE_STABLE_MS - now;
@@ -2258,26 +2256,6 @@ function togglePinConv(id) {
   // jusqu'au prochain événement sans rapport.
   if (stateEngine) stateEngine.refresh();
   pushPanelState();
-}
-
-// Rouvrir une conversation dont l'onglet est fermé — le clic sur une ligne
-// retenue par sa seule marque (`tabGone`, lot 3). `focusConv` ne peut rien pour
-// elle : il cherche un onglet par libellé, ici il n'y en a plus AUCUN, et le
-// clic était un no-op silencieux. `claude-vscode.editor.open(sessionId)` est la
-// seule commande de l'extension officielle qui accepte un identifiant de
-// session (NOTES_api_claude_code_extension.md) ; elle rouvre la conversation
-// telle quelle, sans prompt inséré.
-//
-// PAS de `markProgrammaticOpen` ici, à la différence du lanceur de lots : cette
-// ouverture EST un clic de l'utilisateur (ack.js ne doit la confondre avec rien
-// d'autre — cf. le commentaire du hook `executeCommand` de batchLauncher, « les
-// commandes qui ouvrent un onglet PROGRAMMATIQUEMENT, jamais un clic »).
-function reopenConv(id) {
-  if (!id) return;
-  Promise.resolve(vscode.commands.executeCommand(LAUNCH_OPEN_COMMAND, id))
-    .then(() => { if (stateEngine) stateEngine.refresh(); })
-    .catch((e) => console.log('[QuotaBar] reopen %s failed: %s', id, e && e.message));
-  ackConversationById(id);
 }
 
 function removeMember(id, key) {

@@ -4,23 +4,19 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { norm, convMatchesLabel, isClaudeTab } = require('./labels');
-const { OPEN_COMMAND } = require('./launcher');
 
 // ============================================================================
 // Clic sur une conversation du panneau → focus de son onglet, où qu'il soit.
 //
-// VOIE PRINCIPALE (lot « clic par identifiant », 2026-08-25) — l'extension
-// officielle enregistre `claude-vscode.editor.open(sessionId, prompt,
-// viewColumn)`, dont la toute première branche revealed() le panneau déjà
-// ouvert pour ce sessionId SANS AUCUNE comparaison de titre — focus EXACT.
-// Danger vérifié (NOTES_api_claude_code_extension.md) : si CETTE fenêtre n'a
-// pas déjà ce sessionId ouvert, la commande le traite comme une nouvelle
-// conversation et EN RECRÉE UN PANNEAU (reprise de session, doublon). On ne
-// l'appelle donc que dans la fenêtre dont le memento du state.vscdb
-// (`session-titles.js` createOpenSessionIds, seule preuve d'identité
-// d'onglet — la Tab API ne l'expose pas) confirme que ce sessionId y est
-// déjà ouvert (`tryOfficialFocus`). Version de l'extension trop ancienne pour
-// exposer la commande → repli intégral sur la voie historique ci-dessous.
+// LE PANNEAU N'OUVRE JAMAIS D'ONGLET (decision user 2026-08-26). La voie
+// « clic par identifiant » du 2026-08-25 passait par
+// `claude-vscode.editor.open(sessionId)`, dont la premiere branche revele un
+// panneau deja ouvert — mais qui, si CETTE fenetre ne l'a pas, traite l'appel
+// comme une reprise de session et EN CREE UN (NOTES_api_claude_code_extension).
+// Sa garde (memento du state.vscdb) s'est revelee faillible en usage reel :
+// onglets rouverts apres fermeture, et jusqu'a DEUX onglets pour une seule
+// ligne. Elle est retiree, fonction comprise. Il ne reste que la revelation
+// d'un onglet EXISTANT ; sans correspondance, le clic ne fait rien.
 //
 // REPLI PAR LIBELLÉ (voie d'avant ce lot) — VS Code n'expose aucun mapping
 // onglet↔session (microsoft/vscode#158853), aucune API pour activer un onglet
@@ -63,11 +59,10 @@ const GROUP_FOCUS_COMMANDS = [
 
 function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
 
-// Injecté par extension.js (`createOpenSessionIds` de session-titles.js, lu
-// sur LE MÊME state.vscdb que sessionTitles) : sessionId → ouvert dans CETTE
-// fenêtre. Défaut = Set vide tant que rien n'est câblé (bancs, extension pas
-// encore activée) → tryOfficialFocus ne peut jamais conclure « ouvert ici »
-// par erreur, il retombe alors sur le repli par libellé.
+// Injecte par extension.js (`createOpenSessionIds` de session-titles.js, lu
+// sur LE MEME state.vscdb que sessionTitles) : sessionId → ouvert dans CETTE
+// fenetre. Ne sert plus a decider d'un focus (voir l'en-tete) ; conserve comme
+// source de verite d'identite d'onglet pour les appelants qui l'interrogent.
 let getOpenSessionIds = () => new Set();
 function setOpenSessionIdsSource(fn) {
   getOpenSessionIds = typeof fn === 'function' ? fn : () => new Set();
@@ -81,25 +76,6 @@ function setOpenSessionIdsSource(fn) {
 // Toute défaillance (commande absente, exception à l'exécution) rend `false`
 // sans rien avoir tenté d'autre : c'est à l'appelant de retomber sur le
 // repli par libellé, jamais à cette fonction de le faire elle-même.
-async function tryOfficialFocus(sessionId) {
-  if (!sessionId) return false;
-  if (!getOpenSessionIds().has(sessionId)) return false;
-  let available = false;
-  try {
-    const all = await vscode.commands.getCommands(true);
-    available = Array.isArray(all) && all.includes(OPEN_COMMAND);
-  } catch (e) {
-    log('getCommands failed: %s', e && e.message);
-  }
-  if (!available) return false;
-  try {
-    await vscode.commands.executeCommand(OPEN_COMMAND, sessionId);
-    return true;
-  } catch (e) {
-    log('%s(%s) failed: %s — repli sur le libellé', OPEN_COMMAND, sessionId, e && e.message);
-    return false;
-  }
-}
 
 // Cherche l'onglet dans TOUS les groupes de CETTE fenêtre (le lot 1 ne regardait
 // que le groupe actif). Garde-fou conservé : sans correspondance on ne devine
@@ -223,16 +199,6 @@ function createFocusRelay(handlers = {}) {
     if (Date.now() - req.ts > REQUEST_TTL_MS) return;  // résidu
     lastTs = req.ts;
 
-    // Voie principale, avant toute comparaison de libellé : une fermeture
-    // (`action === 'close'`) n'a pas de sessionId à offrir à editor.open, elle
-    // reste sur closeTab ci-dessous, qui a besoin du `match` de toute façon.
-    if (req.action !== 'close' && await tryOfficialFocus(req.session_id)) {
-      const label = req.tab_title || req.title || null;
-      raiseWindow(label || '');
-      try { onActivated(label); } catch {}
-      return;
-    }
-
     const match = findTab(req.title, req.tab_title);
     if (!match) return;                                // pas chez nous : une autre fenêtre répondra
     try {
@@ -275,12 +241,13 @@ async function focusConversation(msg) {
   const sessionId = (msg && msg.id) || null;
   if (!norm(title) && !norm(tabTitle)) return null;
 
-  // Voie principale : sessionId ouvert ICI → focus exact, aucun libellé à
-  // comparer. C'est elle qui répare le no-op silencieux du 2026-08-25 (clic
-  // sur une conv OUVERTE sans effet) : le libellé pouvait diverger, l'identité
-  // de session, elle, ne divergera jamais.
-  if (await tryOfficialFocus(sessionId)) return tabTitle || title || null;
-
+  // AUCUN APPEL A claude-vscode.editor.open ICI (decision user 2026-08-26).
+  // Cette commande OUVRE une conversation : utilisee comme voie de focus, elle
+  // fabriquait un second onglet des que sa garde se trompait (memento perime,
+  // onglet vivant dans une autre fenetre) - doublons constates par l'user, et
+  // reouverture d'onglets qu'il venait de fermer. Le panneau ne sait plus que
+  // REVELER un onglet existant : findTab ci-dessous, ou le relais aux autres
+  // fenetres. Aucune correspondance = aucun geste, jamais une creation.
   const match = findTab(title, tabTitle);
   if (match) {
     await focusTab(match);

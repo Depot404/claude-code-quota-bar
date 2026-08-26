@@ -1023,17 +1023,14 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       { sessionId: c.sessionId, title, tabTitle, titleSource, state, mtime: c.mtime },
       tabs, closedAt, live, foreign, presenceHasTab, identityKnown(c.sessionId)
     );
-    // Marquée « à relire » ET plus aucun onglet : la ligne RESTE, c'est tout
-    // l'objet du lot 3 — l'user ferme des onglets en croyant le travail fini,
-    // la marque est là pour que la conversation ne parte pas avec. `gone` est
-    // ici une preuve POSITIVE (isGone n'y arrive qu'après avoir écarté onglet
-    // apparié, process vivant et titre non matchable) : on la publie telle
-    // quelle sous `tabGone`, au lieu de la laisser se deviner d'un `tabOpen`
-    // faux — qui, lui, peut n'être qu'un manque de matching passager
-    // (resolveTabOpen). C'est ce fait-là que le rendu barre et que le clic
-    // transforme en réouverture.
-    const keptByPin = gone && pinnedIds.has(c.sessionId);
-    if (gone && !keptByPin) {
+    // Onglet prouvé fermé ⇒ ligne retirée, SANS exception (décision user
+    // 2026-08-26, qui révoque la rétention du lot 3). La marque « à relire »
+    // garde ses deux autres effets — exemption du filtre d'ancienneté, priorité
+    // dans les candidats — mais elle ne survit plus à la fermeture de l'onglet.
+    // C'est ce `if` qui rend la réouverture IMPOSSIBLE par construction : plus
+    // aucune ligne ne peut être rendue sans onglet derrière, donc plus aucun
+    // clic ne peut demander d'en ouvrir un.
+    if (gone) {
       // Jamais rendue — mais son identité reste candidate à la supplantation
       // (cf. commentaire au-dessus de `supersedeCandidates`). `gone` implique
       // déjà `!hasTab` (isGone retourne plus tôt sinon) : tabOpen est donc
@@ -1059,20 +1056,9 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // bijectif (`hasTab`, plus haut) passe par resolveTabOpen (lot « bascule
       // au focus ») pour absorber un manque isolé plutôt que de le croire
       // tout de suite.
-      // `keptByPin` : la question est déjà tranchée, et dans l'autre sens —
-      // repasser par resolveTabOpen rendrait `true` sur le premier manque
-      // (tolérance), c'est-à-dire annoncer un onglet dont isGone vient de
-      // prouver l'absence. Le doute ne profite à l'affichage que là où il y a
-      // un doute.
-      tabOpen: keptByPin ? false : (tabs.known
+      tabOpen: tabs.known
         ? resolveTabOpen(c.sessionId, hasTab, tabOpenMisses, live.has(c.sessionId))
-        : false),
-      // Onglet PROUVÉ absent, ligne retenue par la seule marque (lot 3) : le
-      // rendu la barre et son clic ROUVRE la conversation
-      // (claude-vscode.editor.open) au lieu de chercher un onglet qui n'existe
-      // plus. Faux partout ailleurs, y compris sur une conv simplement
-      // `tabOpen: false` — les deux ne disent pas la même chose.
-      tabGone: keptByPin,
+        : false,
       // Cette conv appartient-elle à un groupe où l'appariement est arbitraire
       // (mêmes titres tronqués) ? Lot 3 du plan d'appariement : consommé par
       // le surlignage plus bas (se taire plutôt que deviner) et par le webview
@@ -1292,13 +1278,6 @@ function renderKey(convs) {
     // panneau tant qu'aucun AUTRE champ n'a changé — le chip resterait faux
     // jusqu'à un événement sans rapport.
     c.tabOpen,
-    // `tabGone` (lot 3, marque « à relire ») : une conv marquée dont l'onglet
-    // vient d'être prouvé fermé garde `tabOpen: false` — il l'était peut-être
-    // déjà d'un manque de matching passager. Sans ce champ dans la clé, le
-    // passage « listée » → « listée · onglet fermé » ne pousserait rien et la
-    // ligne resterait cliquable-vers-nulle-part jusqu'au prochain changement
-    // sans rapport.
-    c.tabGone,
   ]));
 }
 

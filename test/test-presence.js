@@ -310,10 +310,10 @@ console.log('\n4bis-suite. Identité d\'onglet publiée : plus de ligne sans ong
     pinnedSessions: () => new Set(['c']),
   });
   ids = snap.conversations.map((x) => x.sessionId);
-  check('… sauf marquée « à relire » : elle reste, sans onglet', ids.includes('c'), ids.join(','));
-  const pinned = snap.conversations.find((x) => x.sessionId === 'c');
-  check('… et elle porte tabGone (barrée, clic = rouvrir)',
-    !!pinned && pinned.tabGone === true, pinned && String(pinned.tabGone));
+  check('... meme marquee : onglet prouve ferme -> la ligne part aussi (decision user 2026-08-26)',
+    !ids.includes('c'), ids.join(','));
+  check('... et plus aucune conversation ne publie tabGone (champ retire du modele)',
+    snap.conversations.every((x) => !('tabGone' in x)), ids.join(','));
 }
 
 console.log('\n4ter. Transcript plus vieux que recentMs mais session vivante');
@@ -451,13 +451,8 @@ console.log('\n4sexies. Conv MARQUÉE « à relire » : survit à la fermeture d
   }, extra), state.createTranscriptReader());
 
   const withPin = build({ pinnedSessions: () => new Set(['pin']) }).conversations;
-  check('marquée, transcript vieux de 8 h, aucun onglet → RESTE listée',
-    withPin.length === 1 && withPin[0].sessionId === 'pin',
-    JSON.stringify(withPin.map((c) => c.sessionId)));
-  check('…publiée tabGone: true (onglet PROUVÉ absent, pas un simple manque de matching)',
-    withPin.length === 1 && withPin[0].tabGone === true);
-  check('…et tabOpen: false (jamais un onglet annoncé par tolérance)',
-    withPin.length === 1 && withPin[0].tabOpen === false);
+  check('marquee, transcript vieux de 8 h, onglet prouve ferme -> RETIREE comme les autres',
+    withPin.length === 0, JSON.stringify(withPin.map((c) => c.sessionId)));
   check('sa jumelle NON marquée reste écartée (le filtre d\'ancienneté n\'est pas désarmé pour tout le monde)',
     !withPin.some((c) => c.sessionId === 'old'));
 
@@ -466,7 +461,7 @@ console.log('\n4sexies. Conv MARQUÉE « à relire » : survit à la fermeture d
   check('source absente (appelant d\'avant ce lot) → comportement d\'avant à l\'octet près',
     build({}).conversations.length === 0);
   check('tableau au lieu d\'un Set (l\'appelant sérialise un store) → accepté',
-    build({ pinnedSessions: () => ['pin'] }).conversations.length === 1);
+    build({ pinnedSessions: () => ['pin'] }).conversations.length === 0);
 
   // Onglet ouvert : cas nominal, rien ne change — et surtout tabGone reste
   // FAUX, sinon le clic « rouvrirait » une conversation déjà sous les yeux.
@@ -475,17 +470,17 @@ console.log('\n4sexies. Conv MARQUÉE « à relire » : survit à la fermeture d
     tabs: () => tabs('Conv marquee a relire'),
     sessionTitles: () => new Map([['pin', 'Conv marquee a relire']]),
   }).conversations.find((c) => c.sessionId === 'pin');
-  check('marquée AVEC son onglet ouvert → tabOpen true, tabGone false (rien de changé)',
-    !!openTab && openTab.tabOpen === true && openTab.tabGone === false,
-    JSON.stringify(openTab && [openTab.tabOpen, openTab.tabGone]));
+  check('marquee AVEC son onglet ouvert -> tabOpen true (le cas nominal ne bouge pas)',
+    !!openTab && openTab.tabOpen === true,
+    JSON.stringify(openTab && openTab.tabOpen));
 
   // Tracker d'onglets mort : on ne sait RIEN des onglets, donc aucune
   // fermeture n'est prouvée — la ligne reste (isGone ne masque rien dans ce
   // cas), mais elle ne doit jamais annoncer un onglet fermé.
   const blind = build({ pinnedSessions: () => new Set(['pin']), tabs: () => unknown }).conversations
     .find((c) => c.sessionId === 'pin');
-  check('tracker d\'onglets mort (known:false) → listée, mais tabGone FAUX (on ne prouve rien)',
-    !!blind && blind.tabGone === false, JSON.stringify(blind && blind.tabGone));
+  check('tracker d onglets mort (known:false) -> listee (aucune fermeture prouvee)',
+    !!blind, JSON.stringify(blind && blind.sessionId));
 }
 
 console.log('\n4septies. Places de maxItems : une marquée passe devant les fraîches, jamais devant un onglet ouvert');
@@ -514,8 +509,8 @@ console.log('\n4septies. Places de maxItems : une marquée passe devant les fra�
   check('une seule place : l\'onglet OUVERT la prend (invariant « onglet ouvert ⇒ listée », dont member-truth dépend)',
     one.length === 1 && one[0] === 'tab', JSON.stringify(one));
   const two = build(2).conversations.map((c) => c.sessionId);
-  check('deux places : la MARQUÉE prend la seconde, avant la conv fraîche sans onglet',
-    two.length === 2 && two.includes('tab') && two.includes('pin'), JSON.stringify(two));
+  check('deux places : la marquee SANS onglet ne rachete plus sa place, l onglet ouvert reste seul',
+    two.length === 1 && two[0] === 'tab', JSON.stringify(two));
 }
 
 // ── Les convs masquées ne doivent pas manger les places de la liste ────────

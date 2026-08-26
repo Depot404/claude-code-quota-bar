@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.72.0] - 2026-08-26
+
+### Fixed
+- **Waves no longer open conversations on their own.** Closing a tab could make the panel open one or several others: a member whose line is gone has no state left, `member-truth` counts a missing state as finished, the wave is therefore considered complete, and the next one launches. Measured on a real workspace: seven tabs for five conversations, several of them duplicates of the same task, and closed tabs coming straight back. Automatic wave advancement is removed — the play button on a wave is now the only thing that opens a batch, and it is a deliberate click. Nothing in the panel can open an editor tab without you asking for it.
+
+## [2.71.0] - 2026-08-26
+
+### Fixed
+- **Closing a conversation's tab now always removes its line, and no click in the panel can ever open a tab again.** Two behaviours were reported together: a line that survived the tab being closed and reopened it when clicked, and — worse — the same conversation ending up with *two* VS Code tabs. Both came from `claude-vscode.editor.open`, the only official command that takes a session id: it reveals an existing panel, but when the window does not already hold that session it treats the call as a session resume and **creates one**. It was used as the primary click path, guarded by a memento of open sessions; in real use that guard was wrong often enough to reopen tabs that had just been closed and to duplicate others. The command is gone from the click path entirely, together with the "reopen" click on marked lines. The panel can now only ever *reveal* a tab that already exists — no match, no action.
+- **The "to re-read" mark no longer keeps a line alive after its tab is closed.** It was introduced to stop a finished conversation from vanishing when the tab was closed too early; it is now the only thing that could put a line on screen with no tab behind it, which is exactly what made a reopen possible. The mark keeps its other effects (a marked conversation is exempt from the age filter and ranks first among candidates), but a proven-closed tab removes the line, marked or not.
+
 ## [2.70.3] - 2026-08-26
 
 ### Fixed

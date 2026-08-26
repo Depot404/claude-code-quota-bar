@@ -245,28 +245,24 @@ async function runIntegration() {
   await sleep(80);
   convs = lastConvs();
   a = convs && convs.find((c) => c.id === 'conv-a');
-  check('marquée alors que son onglet est fermé → la ligne REVIENT', !!a, JSON.stringify(convs));
-  check('…publiée tabGone: true (le rendu la barre, le clic rouvrira)', !!a && a.tabGone === true, JSON.stringify(a));
-  check('…tabOpen: false et pinned: true', !!a && a.tabOpen === false && a.pinned === true);
+  // Decision user 2026-08-26 : un onglet ferme retire la ligne, marquee ou non.
+  // La marque ne ressuscite plus rien - c'est ce qui garantit qu'aucune ligne
+  // ne survit sans onglet derriere, donc qu'aucun clic ne peut en rouvrir un.
+  check('marquee alors que son onglet est ferme -> la ligne RESTE absente', !a, JSON.stringify(convs));
 
-  console.log('\n11. reopenConv — le clic sur une ligne « onglet fermé » rouvre la conversation');
+  console.log('\n11. Plus aucun chemin de reouverture depuis le panneau');
   commandCalls.length = 0;
   receiveFromWebview({ type: 'reopenConv', id: 'conv-a' });
   await sleep(80);
-  const opens = commandCalls.filter((c) => c[0] === 'claude-vscode.editor.open');
-  check('exactement UN claude-vscode.editor.open, avec le sessionId de la ligne',
-    opens.length === 1 && opens[0][1] === 'conv-a', JSON.stringify(commandCalls));
-  check('aucune autre commande d\'ouverture (jamais newConversation, qui perdrait la conversation)',
+  check("le message reopenConv n'existe plus : aucune commande d'ouverture executee",
+    !commandCalls.some((c) => String(c[0]).includes('editor.open')), JSON.stringify(commandCalls));
+  check('... ni newConversation, ni quoi que ce soit qui ouvrirait un onglet',
     !commandCalls.some((c) => String(c[0]).includes('newConversation')), JSON.stringify(commandCalls));
 
-  console.log('\n12. Retrait de la marque : la ligne repart TOUT DE SUITE');
-  // Le piège que ce cas verrouille : togglePinConv republiait le snapshot en
-  // CACHE. La marque décidant désormais de la présence, il faut un recompute
-  // avant le push — sinon la ligne resterait à l'écran jusqu'à un événement
-  // sans rapport.
+  console.log('\n12. Retrait de la marque : la ligne etait deja partie');
   receiveFromWebview({ type: 'togglePinConv', id: 'conv-a' });
   await sleep(80);
-  check('marque retirée → la ligne disparaît dans le MÊME push (recompute avant push)',
+  check('marque retiree -> toujours absente',
     (lastConvs() || []).every((c) => c.id !== 'conv-a'), JSON.stringify(lastConvs()));
 
   console.log('\n13. Ménage');

@@ -697,8 +697,14 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
           .find(c => ((c.querySelector('.title') || {}).textContent || '').indexOf('Coupée au clavier') >= 0);
         return { grp: inGrp ? sig(inGrp) : null, flat: flat ? sig(flat.querySelector('.ico')) : null };
       })()`);
-      check('état ' + state + ' : le symbole DANS un lot est le MÊME que hors lot (aucune substitution)',
-        !!pair.grp && pair.grp === pair.flat,
+      // Depuis le chantier contraste (2.70.x), les COULEURS d'un symbole
+      // s'adaptent au fond colore du lot pour rester lisibles : ce qui doit
+      // rester identique, c'est la FORME - glyphe, bordure, rayon, animation.
+      // Comparer aussi les couleurs reviendrait a interdire ce chantier.
+      const strip = (s) => { if (!s) return null; const o = JSON.parse(s);
+        delete o.borderColor; delete o.pseudoColor; delete o.color; return JSON.stringify(o); };
+      check('etat ' + state + ' : la FORME du symbole dans un lot est la meme que hors lot',
+        !!pair.grp && strip(pair.grp) === strip(pair.flat),
         'groupe=' + pair.grp + ' / plate=' + pair.flat);
       // Corollaire du bug : deux états distincts ne doivent pas se retrouver
       // sous une même forme dans un lot (⚠ valait pour interrupted ET stale).
@@ -4095,7 +4101,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       Array.isArray(sentPin) && sentPin.length === 1 && sentPin[0].type === 'togglePinConv' && sentPin[0].id === 'c1',
       JSON.stringify(sentPin));
 
-    console.log('\n27. Marque « à relire » (lot 3) — une ligne dont l\'onglet est PROUVÉ fermé : barrée, cliquable pour rouvrir, et jamais perdue entre son lot et la liste plate');
+    console.log('\n27. Ligne sans onglet : barree si terminee, et son clic ne peut JAMAIS ouvrir');
     // Ce que ce banc verrouille : la ligne que seule la marque retient dit à
     // l'écran ce que le clic fera. Un titre non barré + un clic qui cherche un
     // onglet inexistant, c'était le no-op silencieux d'avant ce lot.
@@ -4125,17 +4131,18 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('les trois lignes sont rendues (aucune n\'est perdue)', goneProbe.length === 3, JSON.stringify(goneProbe.map((r) => r.title)));
     check('la ligne marquée · onglet fermé est BARRÉE', goneProbe[0].closed === true && goneProbe[0].pinned === true, JSON.stringify(goneProbe[0]));
     check('la ligne ordinaire (onglet ouvert, terminée) n\'est PAS barrée', goneProbe[1].closed === false, JSON.stringify(goneProbe[1]));
-    check('la marquée INTERROMPUE dont l\'onglet est parti est barrée aussi (le fait ne dépend pas de l\'état)',
-      goneProbe[2].closed === true, JSON.stringify(goneProbe[2]));
-    check('l\'infobulle annonce ce que le clic fera', /reopen|rouvrir/i.test(goneProbe[0].tip), goneProbe[0].tip);
+    check('une ligne INTERROMPUE sans onglet n est plus barree (le barre ne vise que les terminees)',
+      goneProbe[2].closed === false, JSON.stringify(goneProbe[2]));
+    check('aucune infobulle ne promet plus une reouverture (le panneau n ouvre plus rien)',
+      !/reopen|rouvrir/i.test(goneProbe[0].tip), goneProbe[0].tip);
 
     console.log('       27a. le clic : rouvrir sur une ligne fermée, focus sur une ligne ordinaire');
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`document.querySelectorAll('#flow > .conv')[0].click()`);
     await sleep(50);
     const sentReopen = await cdp.evaluate(`window.__sent`);
-    check('clic sur la ligne marquée · onglet fermé → reopenConv id=c1, jamais focusConv',
-      Array.isArray(sentReopen) && sentReopen.length === 1 && sentReopen[0].type === 'reopenConv' && sentReopen[0].id === 'c1',
+    check('clic sur une ligne sans onglet -> focusConv, JAMAIS une demande d ouverture',
+      Array.isArray(sentReopen) && sentReopen.length === 1 && sentReopen[0].type === 'focusConv',
       JSON.stringify(sentReopen));
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`document.querySelectorAll('#flow > .conv')[1].click()`);

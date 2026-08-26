@@ -1980,12 +1980,6 @@ function renderHtml(webview) {
     const row = { root, ico, title, amb, cost, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, mkSet, mkPin, data: null };
     root.addEventListener('click', function () {
       if (!row.data) return;
-      // Ligne retenue par sa seule marque, onglet PROUVÉ fermé (lot 3) :
-      // chercher un onglet serait chercher ce qui n'existe plus — le clic
-      // ROUVRE la conversation. C'est le webview qui décide, parce que c'est
-      // lui qui a rendu la ligne « onglet fermé » : le geste et ce qu'on lit
-      // à l'écran ne peuvent pas diverger.
-      if (row.data.tabGone) { vscode.postMessage({ type: 'reopenConv', id: row.data.id }); return; }
       // tabTitle : titre RÉEL de l'onglet quand il diverge de celui du
       // transcript — sans lui, focus.js ne retrouve pas un onglet renommé.
       vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, tabTitle: row.data.tabTitle || null });
@@ -2019,10 +2013,6 @@ function renderHtml(webview) {
     const cost = c.cost && typeof c.cost.total === 'number' ? c.cost : null;
     const ctip = cost ? costTip(cost) : '';
     const tip = (c.title || '') + ' — ' + stateLabel(c)
-      // Ce que la ligne promet au clic, dit en toutes lettres (lot 3) : sur une
-      // conv marquée dont l'onglet est fermé, le clic ne « va pas à l'onglet »,
-      // il en rouvre un.
-      + (c.tabGone ? ' — ' + t('tab closed · click to reopen') : '')
       + (ctip ? '\\n' + ctip : '');
     if (row.root.title !== tip) row.root.title = tip;
     setClass(row.ico, icoClass(c));
@@ -2043,11 +2033,7 @@ function renderHtml(webview) {
     // Terminée · onglet fermé (lot 4 §5) : barré en plus du reste — découle de
     // tabOpen (member-truth), jamais d'une mémoire locale. Rouvrir l'onglet
     // repasse tabOpen à true et efface le barré tout seul au prochain rendu.
-    // tabGone (lot 3) : même barré, même sens — « son onglet n'est plus là » —
-    // pour une conversation que seule la marque retient dans la liste, quel que
-    // soit son état. Réutiliser le vocabulaire existant plutôt qu'inventer un
-    // second signe : le panneau n'a qu'un jeu de symboles (CLAUDE.md du dossier).
-    row.title.classList.toggle('closed', c.tabGone || (c.state === 'done' && !c.tabOpen));
+    row.title.classList.toggle('closed', c.state === 'done' && !c.tabOpen);
     // Ambiguïté d'appariement onglet (lot 3) : signe discret, jamais de
     // surlignage sur cette ligne (state.js s'en charge déjà, il ne rend rien
     // ici) — juste rendre visible ce qui expliquerait « je clique et ça ne
