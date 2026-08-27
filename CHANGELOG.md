@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.85.1] - 2026-08-27
+
+### Fixed
+- **Packaging only — nothing about the extension itself changes.** Two kinds of file were being shipped inside the installed package without belonging there: an internal working note left in the project folder, and the README's demonstration GIFs. Neither is used by the extension at runtime — the Marketplace resolves the README's images through the GitHub repository, which is why the screenshots were already excluded. The exclusion rules that were supposed to catch such files listed them **by name**, so any working note created after the rule was written sailed straight through; they now match by pattern, on both publication channels (the package and the public repo), which is where the same list had already diverged once. The package drops from 58 to 53 files.
+
+### Changed
+- README brought back in line with what the panel actually does: moving a queued task between waves is the **wave n ▾** destination menu introduced in 2.77.1, not the ◂ ▸ arrows it replaced (those remain in the creation form); plus the paste-time preview of a `claude-convs` block (2.83.0), the quota bars' segment tick marks (2.85.0), and the highlight resynchronization banner (2.82.0), none of which were documented.
+
 ## [2.85.0] - 2026-08-27
 
 ### Added
