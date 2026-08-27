@@ -1,7 +1,7 @@
 {
   "_comment": "Written by test/make-store-shots.js. Do not edit by hand — see test/shots-fingerprint.js.",
   "sources": {
-    "panel.js": "52adb63a105cfb16",
-    "test/make-store-shots.js": "2794de3c61460b12"
+    "panel.js": "7d1d440cdcbe8d37",
+    "test/make-store-shots.js": "bb9278b0c4d11347"
   }
 }

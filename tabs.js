@@ -2,7 +2,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { isClaudeTab, claudeTabLabels } = require('./labels');
+const { isClaudeTab, claudeTabLabels, convMatchesLabel } = require('./labels');
 // « ce pid est-il vivant » : une seule vérité pour tout le projet (elle décide
 // aussi bien de l'union des onglets ici que de la présence d'une session dans
 // state.js) — cf. live-sessions.js.
@@ -71,6 +71,28 @@ const CLOSE_CONFIRM_MS = 150;
 // attendre 2 s pour de vrai à chaque run serait un coût de banc, pas une
 // preuve de plus.
 const FREEZE_DETECT_MS = Number(process.env.QUOTABAR_FREEZE_DETECT_MS) || 2000;
+
+// ── Quarantaine de bascule (lot C anti-vol d'onglet, 2026-08-27) ────────────
+// Fenêtre pendant laquelle une activation qui désigne l'onglet d'une conv
+// VENANT DE CHANGER D'ÉTAT (done/waiting) n'est plus une preuve, cf. la
+// doctrine « une bascule ne s'adopte que prouvée » en tête de tracker et la
+// démonstration du fantôme plus bas.
+//
+// D'OÙ VIENT LE CHIFFRE — journal `~/.claude/quotabar-ack-journal.jsonl`, deux
+// épisodes mesurés : `done` 11:38:28,77 → adoption 11:38:29,18 (410 ms), puis
+// sous instrumentation 2.79.0, `conv-transition` 12:09:24,545 → `tabs-proof`
+// 12:09:24,662 (117 ms). 1500 ms couvre les deux avec plus du triple de marge.
+//
+// POURQUOI PAS PLUS LONG — la fenêtre est aussi le seul endroit où l'on peut
+// retenir à tort un VRAI clic (l'utilisateur qui clique, dans la barre
+// d'onglets, la conv qu'il vient de voir finir). L'allonger achète une marge
+// sur un fantôme déjà couvert et paie en retard d'adoption sur un geste réel :
+// on la garde au plus court que la mesure autorise.
+//
+// SYMÉTRIQUE — la même constante borne les deux sens (activation vue avant la
+// transition, ou après) : le tracker reçoit l'événement d'onglet de VS Code,
+// la transition vient du moteur d'état, et rien ne garantit leur ordre.
+const FLIP_QUARANTINE_MS = Number(process.env.QUOTABAR_FLIP_QUARANTINE_MS) || 1500;
 
 function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
 
@@ -194,6 +216,18 @@ function createTabTracker(handlers = {}) {
   // Compagnon de lastActiveLabel, même cycle de vie : la position REMEMBERED
   // pour le repli (bascule sur un fichier — cf. lastActiveLabel plus haut).
   let lastActiveIndex = localActiveIndex();
+  // Instant du dernier CHANGEMENT DE VALEUR de lastActiveLabel (refactor
+  // surlignage 2026-08-27, doctrine « le renderer est le juge ») : c'est la
+  // référence que l'arbitre de state.js compare au flush du memento renderer —
+  // la vérité disque ne corrige le surlignage que si elle est POSTÉRIEURE au
+  // dernier avis de ce tracker, sinon un memento en retard rétrograderait un
+  // clic tout frais. Date.now() à la création, pas 0 : la lecture initiale
+  // vient d'un canal NEUF (fiable), un memento flushé avant le reload ne doit
+  // pas la contredire — le premier flush d'après reload, lui, la jugera.
+  let labelChangedAt = Date.now();
+  function noteLabelWillChange(next) {
+    if (next !== lastActiveLabel) labelChangedAt = Date.now();
+  }
 
   // ── Acte vs API : la preuve la plus fraîche gagne (2026-08-17) ────────────
   // Quand NOUS activons un onglet (clic panneau → focusTab()), on SAIT qui
@@ -224,36 +258,138 @@ function createTabTracker(handlers = {}) {
   try { windowFocused = vscode.window.state.focused; } catch {}
   let lastFocusGainedAt = Date.now();
 
-  // ── Activation FANTÔME : une bascule hors focus n'est jamais un choix ─────
-  // (2026-08-23, prouvé au journal : la conversation « Nahimic Companion »
-  // finit de répondre à 00:05:20.655, fenêtre SANS focus, aucun geste — et
-  // 0,4 s après, l'onglet actif de la copie miroir EST devenu son onglet,
-  // alors que l'écran, lui, affichait toujours l'onglet que l'utilisateur
-  // avait quitté. La capture de l'utilisateur montre les deux à la fois :
-  // onglet visible « Survie… », surlignage « Nahimic ». L'API ment donc par
-  // rapport au VISIBLE quand une conversation se termine en arrière-plan.)
+  // ── Activation FANTÔME : une bascule ne s'adopte que PROUVÉE ──────────────
+  // (2026-08-23, « Nahimic » : une conversation finit de répondre fenêtre SANS
+  // focus, et 0,4 s après l'onglet actif de la copie miroir EST devenu le sien,
+  // écran inchangé — capture user : onglet visible « Survie… », surlignage
+  // « Nahimic ». Parade d'alors : hors focus, on ne réécrit pas le choix.)
   //
-  // La règle qui neutralise la classe entière : un humain ne peut pas changer
-  // d'onglet dans une fenêtre qui n'a pas le focus. Même le clic direct sur
-  // l'onglet d'une fenêtre en arrière-plan donne D'ABORD le focus à la
-  // fenêtre, et l'activation arrive ~110 ms APRÈS le regain (mesuré, deux
-  // occurrences au journal du 2026-08-23) — donc toute activation légitime
-  // est observée fenêtre focusée. D'où :
-  //  - à la PERTE de focus, on fige le dernier choix de l'utilisateur (une
-  //    dernière lecture fraîche : une bascule légitime sans événement juste
-  //    avant la perte — le chemin de 2026-08-15 — est encore capturée) ;
-  //  - hors focus, ni les événements ni la lecture fraîche ne réécrivent ce
-  //    choix (seul le RENOMMAGE de l'onglet déjà actif — même position,
-  //    libellé neuf, prompt → ai-title — reste suivi, et l'acte du relais,
-  //    qui est un geste de l'utilisateur dans une autre fenêtre) ;
-  //  - au regain, la lecture fraîche ne reprend la main que CONFIRMÉE : un
-  //    événement d'onglet reçu sous focus (tout clic en produit), ou la
-  //    simple concordance fresh === souvenir (rien à confirmer). Tant que la
-  //    copie miroir diverge sans confirmation, on sert le souvenir,
-  //    `source: 'held'` au journal.
-  // L'auto-réparation de 2026-08-15 reste entière sous focus : fenêtre au
-  // premier plan, fresh est adopté à chaque lecture, événement ou pas.
-  let apiTrusted = true;
+  // (2026-08-26, « Architecture rapatriement » : MÊME fantôme fenêtre FOCUSÉE.
+  // À 22:47:27, l'instant exact où cette conversation d'arrière-plan repasse
+  // done, la copie miroir bascule sur son onglet et y RESTE 159 s, pendant que
+  // l'écran affiche toujours l'onglet réellement sélectionné — capture user :
+  // éditeur sur une conv en /compact, surlignage ailleurs ; journal :
+  // highlight-verdict source:fresh windowFocused:true. La prémisse « sous
+  // focus, l'API dit le geste » était donc fausse — et sa béquille aussi :
+  // la confiance (apiTrusted d'alors) se réarmait sur N'IMPORTE QUEL événement
+  // d'onglet reçu sous focus, or une conv d'arrière-plan qui finit en produit
+  // un (titre/état), et le regain de focus produit des événements de GROUPE
+  // mécaniques — le fantôme était blanchi en quelques ms (journal 22:19:29,
+  // adoption 2 ms après le regain).)
+  //
+  // La règle qui neutralise la classe entière, INDÉPENDANTE du focus : une
+  // BASCULE (libellé différent du souvenir) n'est adoptée que sur PREUVE —
+  //  - un événement d'onglet dont la charge MONTRE une activation : un onglet
+  //    Claude listé dans changed/opened avec isActive:true (TabChangeEvent :
+  //    « Tabs that have changed, e.g have changed their isActive state ») ;
+  //  - une vraie bascule de GROUPE : l'IDENTITÉ du groupe actif a changé —
+  //    pas un événement de groupe mécanique à groupe actif constant ;
+  //  - un acte (reportActivation : clic panneau, ici ou relayé) ;
+  //  - un souvenir INVALIDE : l'onglet mémorisé n'existe plus localement
+  //    (fermé, ou renommé — la bascule prompt → ai-title passe par là), la
+  //    lecture fraîche est alors la seule information disponible.
+  // Une lecture fraîche qui diverge SANS preuve est servie `source: 'held'`
+  // et journalisée UNE fois par bascule tenue (tabs-flip-held) : si un fantôme
+  // trouve une nouvelle porte, le journal dira laquelle au lieu de la laisser
+  // deviner. La concordance (fresh === souvenir) reste adoptée à chaque
+  // lecture — l'auto-réparation de 2026-08-15 ne portait que sur elle.
+  // ── La preuve « isActive dans la charge » est CIRCULAIRE (2026-08-27) ─────
+  // Le lot A avait instrumenté chaque événement porteur d'activation
+  // (`tabs-proof`) pour trancher une question précise : l'événement menteur
+  // d'une fin de session d'arrière-plan porte-t-il la PAIRE (ancien actif
+  // isActive:false + nouveau isActive:true), auquel cas exiger la paire aurait
+  // suffi à le reconnaître ? RÉPONSE MESURÉE : NON. Sur les 28 charges
+  // relevées — fantômes ET vrais clics panneau confondus — la forme est
+  // toujours la même, exactement UN onglet, isActive:true, zéro inactif.
+  // Exiger la paire n'aurait pas fermé la porte : ça aurait refusé TOUTES les
+  // bascules, y compris les vraies. Piste écartée sur données, pas sur avis.
+  //
+  // Ce qui reste, c'est que le champ `isActive:true` de la charge est une
+  // RECOPIE de la copie miroir menteuse, pas un témoignage indépendant : il
+  // affirme ce qu'on lui demande de prouver. Une fois le fantôme entré par
+  // cette porte, la doctrine `held` le DÉFEND contre la vérité — plus aucun
+  // événement ne vient le contredire (mensonge mesuré ≥ 8 min, fenêtre
+  // focusée, l'utilisateur tapant ailleurs). Toute parade « relire plus tard »
+  // est donc morte-née : c'est la MÊME source qu'on relirait.
+  //
+  // LA PORTE SE FERME PAR CORRÉLATION, pas par introspection de la charge. Le
+  // fantôme n'est pas n'importe quelle activation : c'est celle qui désigne
+  // l'onglet d'une conversation à l'instant où elle change d'état. Cet instant,
+  // le moteur d'état le connaît par une source qui n'a rien à voir avec la
+  // copie miroir (transcripts, fiches de hooks) — c'est lui qui arme ici une
+  // QUARANTAINE sur cet onglet-là, pour FLIP_QUARANTINE_MS. Pendant la
+  // quarantaine, `isActive:true` ne prouve plus rien et la bascule est tenue.
+  //
+  // CE QUI SORT DE QUARANTAINE — jamais la copie miroir, seulement un signal
+  // humain qu'elle ne fabrique pas :
+  //  - un clic sur la ligne du panneau (`reportActivation`) ;
+  //  - un prompt envoyé dans cette conversation, vu par le basculement
+  //    d'`active-session.json` (`noteActiveSession`) ;
+  //  - le simple passage du temps : au-delà de la fenêtre, une NOUVELLE
+  //    activation redevient une preuve ordinaire — c'est le cas de
+  //    l'utilisateur qui clique l'onglet quelques secondes après la fin.
+  // Le prix assumé est un RETARD d'adoption, jamais un refus définitif : dans
+  // le pire cas (clic dans la barre d'onglets pendant la fenêtre, puis lecture
+  // silencieuse), le surlignage reste sur l'onglet précédent jusqu'au geste
+  // suivant de l'utilisateur, qui le répare quel qu'il soit.
+  //
+  // La quarantaine ne s'applique QU'À la preuve mesurée coupable — l'activation
+  // dans la charge. Une vraie bascule de GROUPE (l'identité du groupe actif
+  // change) reste une preuve pleine : elle exige un geste physique qu'aucune
+  // fin de session ne produit, et aucun fantôme n'a jamais été relevé par là.
+  let lastActiveGroupColumn = null;
+  try { lastActiveGroupColumn = vscode.window.tabGroups.activeTabGroup.viewColumn; } catch {}
+  let lastHeldLogged = null;
+
+  // Onglets sous quarantaine : sessionId → { at, title, tabTitle } de la conv
+  // qui vient de changer d'état. On garde les deux titres parce qu'un libellé
+  // d'onglet peut matcher l'un ou l'autre (cf. convMatchesLabel, labels.js).
+  const quarantine = new Map();
+  // Dernière bascule ADOPTÉE et ce qu'elle a remplacé — la seule chose qui
+  // permette de révoquer quand la transition est vue APRÈS coup.
+  let lastAdoption = null;          // { label, index, prevLabel, prevIndex, at } | null
+  // Dernier `activeSessionId` (session du DERNIER PROMPT utilisateur, cf.
+  // state.js readActiveSessionId) déjà vu : c'est son CHANGEMENT qui vaut
+  // geste humain, pas sa valeur.
+  let lastActiveSessionSeen = null;
+
+  function purgeQuarantine(now) {
+    for (const [sid, q] of quarantine) {
+      if (now - q.at > FLIP_QUARANTINE_MS) quarantine.delete(sid);
+    }
+  }
+
+  // La conv sous quarantaine dont l'onglet porte ce libellé, ou null.
+  function quarantinedFor(label) {
+    if (!label) return null;
+    const now = Date.now();
+    purgeQuarantine(now);
+    for (const [sid, q] of quarantine) {
+      if (convMatchesLabel(label, q)) return { sessionId: sid, ageMs: now - q.at };
+    }
+    return null;
+  }
+
+  // Un geste humain vient de désigner cet onglet : sa quarantaine n'a plus
+  // lieu d'être, et la révocation en attente non plus.
+  function liftQuarantineFor(label, by) {
+    const q = quarantinedFor(label);
+    if (!q) return false;
+    quarantine.delete(q.sessionId);
+    logEvent('tabs-quarantine-lifted', { label, sessionId: q.sessionId, by, ageMs: q.ageMs });
+    return true;
+  }
+
+  // Toute adoption de bascule passe par ici : c'est ce qui rend la révocation
+  // possible (on sait ce qu'on a remplacé, et quand).
+  function adoptFlip(label, index) {
+    lastAdoption = {
+      label, index, prevLabel: lastActiveLabel, prevIndex: lastActiveIndex, at: Date.now(),
+    };
+    noteLabelWillChange(label);
+    lastActiveLabel = label;
+    lastActiveIndex = index;
+  }
 
   // Un événement d'onglet RÉEL (onDidChangeTabs ou onDidChangeTabGroups) est
   // la seule preuve que le canal RPC est vivant — l'un ou l'autre suffit, les
@@ -262,11 +398,6 @@ function createTabTracker(handlers = {}) {
   // de prouver qu'il répond, même si aucun autre champ n'a changé.
   function noteTabsEventReceived() {
     lastTabsEventAt = ++seq;
-    // Un événement d'onglet reçu FENÊTRE FOCUSÉE ne peut venir que d'un geste
-    // (tout clic d'onglet en produit un) : il rend sa confiance à la copie
-    // miroir. Hors focus, il peut porter l'activation fantôme — il compte
-    // pour l'ordre acte/API, jamais comme confirmation.
-    if (windowFocused) apiTrusted = true;
     if (freezeTimer) { clearTimeout(freezeTimer); freezeTimer = null; }
     if (frozen) {
       frozen = false;
@@ -275,19 +406,97 @@ function createTabTracker(handlers = {}) {
     }
   }
 
-  function refreshActiveLabel() {
+  // `proof` : l'appelant tient une preuve de bascule (activation dans la charge
+  // de l'événement, ou vraie bascule de groupe — cf. la doctrine ci-dessus).
+  // Sans preuve, une bascule n'est adoptée que si le souvenir ne désigne plus
+  // aucun onglet local (fermé, ou renommé — le rename in-place de l'onglet
+  // actif passe par là) : sinon c'est le fantôme, on tient le choix de
+  // l'utilisateur, focus ou pas.
+  // `quarantinable` : la preuve invoquée est-elle l'activation DANS LA CHARGE,
+  // celle que la mesure a montrée recopiée du miroir (donc circulaire) ? Une
+  // bascule de groupe, elle, passe avec `false` — cf. la note ci-dessus.
+  function refreshActiveLabel(proof, quarantinable) {
     const l = localActiveLabel();
     if (!l || l === lastActiveLabel) return false;
-    const idx = localActiveIndex();
-    // Hors focus, une BASCULE (position différente) est le fantôme possible :
-    // on ne réécrit pas le choix de l'utilisateur. Le renommage de l'onglet
-    // déjà actif (même position, libellé neuf), lui, reste suivi — sans lui,
-    // le souvenir garderait un libellé qui n'existe plus et ne matcherait
-    // plus rien après la bascule prompt → ai-title.
-    if (!windowFocused && idx !== lastActiveIndex) return false;
-    lastActiveLabel = l;
-    lastActiveIndex = idx;
+    if (proof && quarantinable) {
+      const q = quarantinedFor(l);
+      if (q) {
+        // Une ligne par bascule retenue, jamais une par recompute : le journal
+        // doit rester lisible pendant que le mensonge dure.
+        if (lastHeldLogged !== l) {
+          lastHeldLogged = l;
+          logEvent('tabs-flip-quarantined', {
+            fresh: l, kept: lastActiveLabel || null, sessionId: q.sessionId, ageMs: q.ageMs,
+          });
+        }
+        proof = false;
+      }
+    }
+    if (!proof && lastActiveLabel && localLabels().includes(lastActiveLabel)) return false;
+    adoptFlip(l, localActiveIndex());
     return true;
+  }
+
+  // ── Entrées du moteur d'état (extension.js) ───────────────────────────────
+  // `conv` : la conversation qui VIENT de passer done/waiting — { sessionId,
+  // title, tabTitle }. Deux effets, un par sens possible de l'ordre :
+  //  1. en avant : son onglet passe en quarantaine, une activation qui le
+  //     désignerait dans la foulée ne sera plus une preuve ;
+  //  2. en arrière : si la bascule a DÉJÀ été adoptée il y a moins de
+  //     FLIP_QUARANTINE_MS et qu'elle désignait précisément cet onglet, elle
+  //     est RÉVOQUÉE — on remet le choix qu'elle avait écrasé. Sans ce
+  //     deuxième sens, il suffirait que l'événement d'onglet arrive avant le
+  //     recompute du moteur pour que le fantôme repasse.
+  // Révocation refusée si quoi que ce soit a été adopté depuis (lastAdoption
+  // n'est plus le dernier fait) : on ne restaure jamais un état périmé.
+  function noteConvTransition(conv) {
+    if (disposed || !conv || !conv.sessionId) return;
+    const now = Date.now();
+    purgeQuarantine(now);
+    quarantine.set(conv.sessionId, { at: now, title: conv.title, tabTitle: conv.tabTitle });
+    if (!lastAdoption || now - lastAdoption.at > FLIP_QUARANTINE_MS) return;
+    if (lastActiveLabel !== lastAdoption.label) return;
+    if (!convMatchesLabel(lastAdoption.label, conv)) return;
+    logEvent('tabs-flip-revoked', {
+      fresh: lastAdoption.label, restored: lastAdoption.prevLabel || null,
+      sessionId: conv.sessionId, ageMs: now - lastAdoption.at,
+    });
+    noteLabelWillChange(lastAdoption.prevLabel);
+    lastActiveLabel = lastAdoption.prevLabel;
+    lastActiveIndex = lastAdoption.prevIndex;
+    lastAdoption = null;
+    lastHeldLogged = null;
+    onChange();
+  }
+
+  // `activeSessionId` du snapshot : la session du DERNIER PROMPT utilisateur
+  // (state.js readActiveSessionId, `~/.claude/active-session.json`). Son
+  // basculement est un geste humain qu'aucune copie miroir ne fabrique — donc
+  // une porte de sortie de quarantaine légitime, et la seule qui couvre
+  // « l'utilisateur écrit dans la conv qui vient de finir ».
+  // On n'adopte que si la copie miroir désigne bien l'onglet de CETTE
+  // conversation : le geste prouve l'intention sur elle, pas sur une autre.
+  function noteActiveSession(sessionId) {
+    if (disposed || !sessionId) return;
+    if (sessionId === lastActiveSessionSeen) return;
+    const first = lastActiveSessionSeen === null;
+    lastActiveSessionSeen = sessionId;
+    // Première observation : on ne sait pas si ça vient de changer, donc ce
+    // n'est pas un geste (même prudence que `before === undefined` dans
+    // maybeFetchOnTransition, extension.js).
+    if (first) return;
+    const q = quarantine.get(sessionId);
+    if (!q) return;
+    const fresh = localActiveLabel();
+    quarantine.delete(sessionId);
+    logEvent('tabs-quarantine-lifted', {
+      label: fresh || null, sessionId, by: 'active-session', ageMs: Date.now() - q.at,
+    });
+    if (fresh && fresh !== lastActiveLabel && convMatchesLabel(fresh, q)) {
+      adoptFlip(fresh, localActiveIndex());
+      lastHeldLogged = null;
+      onChange();
+    }
   }
 
   // Point d'entrée de la moitié « acte » : appelé par extension.js juste après
@@ -325,25 +534,61 @@ function createTabTracker(handlers = {}) {
   // auto-réparable. On ne le pose donc plus. L'acte redevient ce pour quoi il a
   // été créé le 2026-08-17 : la seule vérité disponible quand la copie miroir
   // est GELÉE — cas où, par construction, il diverge.
-  function reportActivation(label) {
+  // `opts.origin` ('panel-click' | 'relay', 2026-08-27, lot A surlignage) :
+  // d'où vient l'acte — posé ici par extension.js `focusConv`, ou relayé
+  // depuis une autre fenêtre via createFocusRelay `onActivated`. `opts.isTrusted`
+  // remonte jusqu'à `ev.isTrusted` du clic webview (panel.js) : c'est lui qui
+  // arbitre, au lot B ci-dessous, si un acte non confirmé par un événement
+  // d'onglet mérite encore le gel indéfini de 2026-08-17, ou doit expirer.
+  function reportActivation(label, opts) {
     if (disposed || !label) return;
+    const origin = (opts && opts.origin) || null;
+    const isTrusted = !!(opts && opts.isTrusted);
+    const fresh = localActiveLabel();
+    // Journalisé à CHAQUE appel, divergent ou non : c'est la seule vue qui dit
+    // si l'acte confirmait déjà ce que l'API voit (fresh === label, rien à
+    // armer) ou divergeait dès le départ (canal gelé, ou fenêtre sans focus).
+    logEvent('act-posted', { label, origin, isTrusted, fresh });
+    // Porte de sortie n°1 de la quarantaine (lot C, 2026-08-27) : le clic sur
+    // la ligne du panneau est le geste humain par excellence — il lève la
+    // quarantaine de cet onglet AVANT toute écriture du souvenir, sinon
+    // l'adoption ci-dessous serait aussitôt révoquée par une transition qui
+    // arrive dans la foulée (cliquer une conv qui vient de finir est le cas
+    // FRÉQUENT, pas le cas rare).
+    liftQuarantineFor(label, origin || 'act');
+    lastAdoption = null;
+    noteLabelWillChange(label);
     // Un acte est un GESTE de l'utilisateur (clic panneau, ici ou relayé par
     // une autre fenêtre) : il confirme le souvenir, focus ou pas — c'est le
     // seul chemin légitime par lequel l'onglet actif change dans une fenêtre
     // sans focus, et sans cette écriture la parade anti-fantôme le tiendrait
     // en quarantaine comme un fantôme.
-    if (label === localActiveLabel()) {
+    if (label === fresh) {
       lastActiveLabel = label;
       lastActiveIndex = localActiveIndex();
       return;
     }
     lastActiveLabel = label;
     lastActiveIndex = null;
-    actReport = { label, at: ++seq };
+    actReport = { label, at: ++seq, origin, isTrusted };
     clearTimeout(freezeTimer);
     freezeTimer = setTimeout(() => {
       freezeTimer = null;
       if (disposed || frozen) return;
+      // ── Lot B (2026-08-27) : un acte non confirmé N'EST PLUS gelé à
+      // l'aveugle. Seul un geste dont le message webview portait
+      // isTrusted:true (vrai clic humain, cf. panel.js) garde le comportement
+      // du 2026-08-17 (frozen indéfini — c'est lui qui protège l'incident
+      // SalaireADC, 3 h de gel). Un acte sans certification (message
+      // synthétique, relais dont l'origine n'a pas pu être prouvée) est
+      // ABANDONNÉ ici : retour à la doctrine souvenir+held, comme si aucun
+      // acte n'avait jamais été posé.
+      if (!isTrusted) {
+        actReport = null;
+        logEvent('act-expired', { label, origin });
+        onChange();
+        return;
+      }
       frozen = true;
       logEvent('tabs-freeze-detected', { label });
       onChange();
@@ -385,7 +630,26 @@ function createTabTracker(handlers = {}) {
     // republication, l'union resterait sur l'ancien libellé et la conv
     // paraîtrait sans onglet.
     publish(localLabels());
-    refreshActiveLabel();
+    // Preuve d'activation DANS la charge : seul un onglet Claude listé changé/
+    // ouvert avec isActive:true témoigne d'une vraie bascule — le changement
+    // de titre/état d'une conv d'arrière-plan qui finit n'en porte pas.
+    let sawActivation = false;
+    let changedOrOpened = null;
+    try {
+      changedOrOpened = [...((e && e.changed) || []), ...((e && e.opened) || [])]
+        .map((t) => ({ label: (t && t.label) || null, isActive: !!(t && t.isActive), claude: isClaudeTab(t) }));
+      sawActivation = changedOrOpened.some((t) => t.isActive && t.claude);
+    } catch { sawActivation = false; changedOrOpened = null; }
+    // Charge complète, UNE ligne par événement porteur d'activation (2026-08-27,
+    // lot A surlignage) — trancher si l'événement menteur d'une fin de session
+    // d'arrière-plan porte la PAIRE (ancien actif isActive:false + nouveau
+    // isActive:true) ou seulement la moitié active, cf. la doctrine en tête de
+    // fichier. `localActiveLabel()` lu APRÈS republish, donc au même instant
+    // que refreshActiveLabel ci-dessous le lira.
+    if (sawActivation) logEvent('tabs-proof', { tabs: changedOrOpened, activeLabel: localActiveLabel() });
+    // `true` en second : c'est CETTE preuve-là que la mesure a montrée
+    // circulaire (recopie du miroir), donc la seule soumise à quarantaine.
+    refreshActiveLabel(sawActivation, true);
 
     for (const t of (e && e.closed) || []) {
       if (isClaudeTab(t) && t.label) pendingClosed.add(t.label);
@@ -409,7 +673,18 @@ function createTabTracker(handlers = {}) {
       // meurent ensemble dans l'incident constaté, l'un ou l'autre suffit à
       // prouver que celui-ci répond encore.
       noteTabsEventReceived();
-      if (refreshActiveLabel()) onChange();
+      // Preuve = l'IDENTITÉ du groupe actif a changé (l'utilisateur est passé
+      // dans l'autre groupe — seul cas où l'onglet actif de la fenêtre bascule
+      // sans onDidChangeTabs). Les événements de groupe mécaniques — regain de
+      // focus notamment — gardent le même groupe actif et ne prouvent rien.
+      let col = null;
+      try { col = vscode.window.tabGroups.activeTabGroup.viewColumn; } catch {}
+      const groupSwitched = col != null && lastActiveGroupColumn != null && col !== lastActiveGroupColumn;
+      if (col != null) lastActiveGroupColumn = col;
+      // Pas de quarantaine ici : changer de groupe actif est un geste physique
+      // qu'aucune fin de session ne produit, et le journal n'a jamais relevé
+      // de fantôme par ce canal.
+      if (refreshActiveLabel(groupSwitched, false)) onChange();
     }) || groupSub;
   } catch {}
 
@@ -438,16 +713,11 @@ function createTabTracker(handlers = {}) {
       const focused = e ? e.focused : true;
       windowFocused = focused;
       if (focused) lastFocusGainedAt = Date.now();
-      if (focused === false) {
-        // FIGER le choix de l'utilisateur au moment où il part : une dernière
-        // lecture fraîche (tout ce qui a précédé la perte s'est fait sous
-        // focus, donc est de lui — y compris une bascule sans événement, le
-        // chemin de 2026-08-15). Le fantôme, lui, arrive APRÈS cet instant.
-        const l = localActiveLabel();
-        if (l) { lastActiveLabel = l; lastActiveIndex = localActiveIndex(); }
-        apiTrusted = false;
-        return;
-      }
+      // À la perte de focus il n'y a rien à figer : le souvenir ne contient
+      // QUE des choix prouvés (la doctrine vaut focus ou pas depuis le
+      // 2026-08-26) — une dernière lecture fraîche pourrait au contraire y
+      // glisser un fantôme déjà présent dans la copie miroir.
+      if (focused === false) return;
       onChange();
     }) || focusSub;
   } catch {}
@@ -466,17 +736,15 @@ function createTabTracker(handlers = {}) {
     // quelque chose des onglets. À false, AUCUNE conv n'est masquée.
     //
     // `activeLabel` : onglet Claude sélectionné ICI (le surlignage est par
-    // fenêtre — chaque instance surligne ce que SA fenêtre regarde). LU À CHAQUE
-    // APPEL, jamais servi depuis le seul souvenir. Le moteur d'état appelle
-    // getTabs() à chaque recompute (extension.js, `tabs:`) : lire la vérité ici
-    // rend le surlignage AUTO-RÉPARABLE. Un souvenir mis à jour uniquement par
-    // événements suppose que ces événements couvrent TOUS les chemins par
-    // lesquels un onglet devient actif — hypothèse déjà démentie une fois (la
-    // bascule de groupe, rattrapée plus haut par onDidChangeTabGroups), et
-    // impossible à prouver exhaustive sur une API qu'on ne maîtrise pas. La
-    // lecture fraîche rend la question sans objet : même si AUCUN événement ne
-    // tire, le prochain recompute (tick de 30 s, ou n'importe quel hook) remet
-    // le surlignage d'aplomb tout seul.
+    // fenêtre — chaque instance surligne ce que SA fenêtre regarde). LU À
+    // CHAQUE APPEL — mais depuis le 2026-08-26 la lecture fraîche n'a plus le
+    // dernier mot sur une BASCULE : elle répare la concordance et les
+    // souvenirs invalides (auto-réparation de 2026-08-15, conservée), jamais
+    // elle n'adopte seule un onglet différent — la copie miroir a prouvé
+    // qu'elle sait mentir sur activeTab pendant des minutes, fenêtre focusée
+    // (cf. la doctrine « une bascule ne s'adopte que prouvée » en tête de
+    // tracker). Le geste de réparation universel reste le clic sur une ligne
+    // du panneau : reportActivation adopte inconditionnellement.
     //
     // Le souvenir garde son unique rôle, inchangé : REPLI quand l'onglet actif
     // n'est pas une conversation Claude — basculer sur un fichier ne doit pas
@@ -502,9 +770,9 @@ function createTabTracker(handlers = {}) {
     // `fresh` (lecture instantanée de l'API), `remembered` (repli sur le
     // souvenir, l'onglet actif n'est pas une conv Claude), `act-report` (l'acte
     // mémorisé l'emporte sur l'API, cf. la note « Acte vs API » ci-dessus),
-    // `held` (2026-08-23 : la lecture fraîche diverge du dernier choix de
-    // l'utilisateur sans avoir été confirmée sous focus — activation fantôme
-    // possible, cf. la note en tête de tracker ; on sert le souvenir).
+    // `held` (2026-08-23, durci 2026-08-26 : la lecture fraîche diverge du
+    // dernier choix PROUVÉ sans preuve de bascule — activation fantôme, cf.
+    // la note en tête de tracker ; on sert le souvenir).
     // C'est le champ qui départage la piste du lot 1 (fraîcheur au retour de
     // focus) sans avoir à deviner depuis les symptômes.
     getTabs() {
@@ -512,6 +780,7 @@ function createTabTracker(handlers = {}) {
         return {
           known: false, labels: allLabels(), activeLabel: null, activeIndex: null, frozen: false,
           source: null, windowFocused, sinceFocusMs: Date.now() - lastFocusGainedAt,
+          labelChangedAt,
         };
       }
       const fresh = localActiveLabel();
@@ -522,21 +791,26 @@ function createTabTracker(handlers = {}) {
       // identique, LEQUEL est physiquement actif — chose que le libellé seul
       // ne peut plus dire dès qu'il y a collision.
       const freshIndex = fresh ? localActiveIndex() : null;
-      // Parade anti-fantôme (2026-08-23, cf. la note en tête de tracker) :
-      // fresh n'est adopté que CONFIRMÉ — confiance intacte (`apiTrusted`,
-      // rendue par tout événement d'onglet reçu sous focus), ou concordance
-      // avec le souvenir (rien à confirmer). Une divergence non confirmée —
-      // l'activation fantôme d'une conversation qui finit en arrière-plan —
-      // est tenue en quarantaine : on sert le dernier choix de l'utilisateur,
-      // `source: 'held'`, jusqu'à ce qu'un geste sous focus tranche.
-      const freshConfirmed = fresh && (apiTrusted || fresh === lastActiveLabel);
+      // Parade anti-fantôme (2026-08-23, durcie 2026-08-26 — cf. la note en
+      // tête de tracker) : ICI, seule la CONCORDANCE adopte (fresh ===
+      // souvenir, rien à confirmer), plus le cas de base — souvenir vide ou
+      // qui ne désigne plus aucun onglet local (fermé, renommé) : la lecture
+      // fraîche est alors la seule information disponible. Toute BASCULE
+      // réelle a déjà été adoptée par sa preuve (événement porteur
+      // d'activation, bascule de groupe, acte) avant d'arriver ici ; une
+      // divergence restante est le fantôme — servie `source: 'held'`, et
+      // journalisée une fois par bascule tenue, pour que la prochaine porte
+      // d'entrée d'un fantôme se lise au journal au lieu de se deviner.
+      const memoryValid = !!lastActiveLabel && localLabels().includes(lastActiveLabel);
+      const freshConfirmed = !!fresh && (fresh === lastActiveLabel || !memoryValid);
       if (freshConfirmed) {
-        // La concordance n'efface le doute que fenêtre au premier plan : hors
-        // focus, elle autorise l'adoption (identique de toute façon) mais un
-        // fantôme ULTÉRIEUR dans la même absence doit encore être retenu.
-        if (windowFocused) apiTrusted = true;
+        noteLabelWillChange(fresh);
         lastActiveLabel = fresh;
         lastActiveIndex = freshIndex;
+        lastHeldLogged = null;
+      } else if (fresh && fresh !== lastHeldLogged) {
+        lastHeldLogged = fresh;
+        logEvent('tabs-flip-held', { fresh, kept: lastActiveLabel || null, windowFocused });
       }
       let activeLabel = freshConfirmed ? fresh : lastActiveLabel;
       let activeIndex = freshConfirmed ? freshIndex : lastActiveIndex;
@@ -572,6 +846,7 @@ function createTabTracker(handlers = {}) {
       const actUsable = frozen || freezeTimer !== null;
       if (actReport && actReport.at > lastTabsEventAt && actUsable) {
         activeLabel = actReport.label;
+        noteLabelWillChange(actReport.label);
         lastActiveLabel = actReport.label;
         source = 'act-report';
         // Pas d'index pour l'acte : `reportActivation` ne connaît que le
@@ -587,6 +862,10 @@ function createTabTracker(handlers = {}) {
       return {
         known: true, labels: allLabels(), activeLabel, activeIndex, frozen,
         source, windowFocused, sinceFocusMs: Date.now() - lastFocusGainedAt,
+        // Instant du dernier changement de valeur du souvenir — la référence
+        // que l'arbitre « le renderer est le juge » (state.js) compare au
+        // flush du memento renderer. Cf. sa déclaration en tête de tracker.
+        labelChangedAt,
       };
     },
     // Câblage : extension.js appelle ceci juste après avoir fait activer un
@@ -594,6 +873,11 @@ function createTabTracker(handlers = {}) {
     // qui répond au relais (`createFocusRelay` `onActivated`), sur SA propre
     // instance du tracker.
     reportActivation,
+    // Lot C (2026-08-27) — les deux signaux que le moteur d'état possède et
+    // que la copie miroir ne peut pas fabriquer : quand une conv change
+    // d'état, et quand l'utilisateur envoie un prompt.
+    noteConvTransition,
+    noteActiveSession,
     dispose() {
       disposed = true;
       clearTimeout(confirmTimer);

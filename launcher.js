@@ -178,4 +178,4 @@ function createBatchLauncher(deps = {}) {
   };
 }
 
-module.exports = { createBatchLauncher, OPEN_COMMAND, NEW_CONVERSATION_COMMAND, SESSION_WAIT_MS };
+module.exports = { createBatchLauncher, samePath, OPEN_COMMAND, NEW_CONVERSATION_COMMAND, SESSION_WAIT_MS };

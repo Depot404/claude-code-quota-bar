@@ -365,6 +365,92 @@ function run() {
   nowAt = 12345;
   check('`at` absent → horloge du store', s14.rearm('gr', 'm1') === true && s14.get('gr').members[0].launchedAt === 12345);
 
+  console.log('\n14. waveMode : l\'interrupteur manuel/auto vit PAR LOT (2026-08-26)');
+  const st15 = fakeStorage();
+  const s15 = createGroupStore({ load: st15.load, save: st15.save, now: () => 1000, newId: () => 'gm' });
+  const gm = s15.create('Modes', [{ prompt: 'a', wave: 1 }, { prompt: 'b', wave: 2 }]);
+  check('lot neuf → AUTO (décision user : le comportement historique reste le défaut)',
+    gm.waveMode === 'auto', String(gm.waveMode));
+  check('bascule en manuel acceptée', s15.setWaveMode('gm', 'manual') === true);
+  check('… lue sur le groupe', s15.get('gm').waveMode === 'manual');
+  check('… PERSISTÉE avec le groupe (elle doit survivre au reload)',
+    st15.raw()[0].waveMode === 'manual', JSON.stringify(st15.raw()[0].waveMode));
+  check('re-poser le même mode ne change rien (pas de push d\'etat pour rien)',
+    s15.setWaveMode('gm', 'manual') === false);
+  check('retour en auto', s15.setWaveMode('gm', 'auto') === true && s15.get('gm').waveMode === 'auto');
+  check('groupe inconnu : sans effet', s15.setWaveMode('nope', 'manual') === false);
+  // Un mode illisible ne doit JAMAIS figer un lot en attente d'un clic : tout
+  // ce qui n'est pas exactement 'manual' retombe sur 'auto'.
+  check('valeur inconnue → auto', s15.setWaveMode('gm', 'sometimes') === false && s15.get('gm').waveMode === 'auto');
+  const s15b = createGroupStore({ load: () => [{ id: 'old', name: 'Legacy', members: [{ key: 'm1', prompt: 'x' }] }], save: () => {} });
+  check('stockage écrit AVANT ce lot (aucun waveMode) → auto, zéro migration',
+    s15b.get('old').waveMode === 'auto', String(s15b.get('old').waveMode));
+  check('sanitizeGroup : waveMode illisible → auto',
+    sanitizeGroup({ id: 'z', waveMode: 42, members: [] }).waveMode === 'auto');
+  check('sanitizeGroup : « manual » traverse tel quel',
+    sanitizeGroup({ id: 'z', waveMode: 'manual', members: [] }).waveMode === 'manual');
+
+  console.log('\n15. setMemberWave : une DESTINATION, pas un cran (menu « vague n ▾ », 2026-08-26)');
+  // §10 couvre les CRANS (◂/▸) : un membre seul fusionne, un membre accompagné
+  // se détache. Cette sémantique-là ne sait pas exprimer « va en vague 4 » — le
+  // même clic ne fait pas la même chose selon qui partage la vague de départ.
+  // C'est une opération DIFFÉRENTE, donc une porte différente, et ce qu'elle
+  // doit garantir est ce que le menu promet à l'œil : la tâche se retrouve avec
+  // les membres de la vague DÉSIGNÉE, et la numérotation reste contiguë.
+  const st16 = fakeStorage();
+  let s16Seq = 0;
+  const s16 = createGroupStore({ load: st16.load, save: st16.save, now: () => 1000, newId: () => 'gd' + (s16Seq++) });
+  s16.create('D', [
+    { prompt: 'a', wave: 1 }, { prompt: 'b', wave: 1 },
+    { prompt: 'c', wave: 2 }, { prompt: 'd', wave: 3 }, { prompt: 'e', wave: 4 },
+  ]);
+  check('départ : vague 1 lancée, trois vagues en file d\'un membre chacune',
+    shape(s16, 'gd0') === '1:m1,m2 | 2:m3 | 3:m4 | 4:m5', shape(s16, 'gd0'));
+
+  // Le geste que les flèches ne savent pas faire : deux vagues franchies d'un
+  // coup. Au passage la vague de départ se vide, disparaît, et tout se
+  // resserre — le numéro demandé (4) désigne le GROUPE DE MEMBRES, pas le
+  // libellé qu'il portera après compactage (3).
+  check('destination absolue : m3 saute en vague 4, sa vague vidée disparaît sans trou',
+    s16.setMemberWave('gd0', 'm3', 4) && shape(s16, 'gd0') === '1:m1,m2 | 2:m4 | 3:m3,m5', shape(s16, 'gd0'));
+  check('… et m3 est bien avec m5, la tâche qui occupait la vague visée',
+    s16.get('gd0').members.find((m) => m.key === 'm3').wave === s16.get('gd0').members.find((m) => m.key === 'm5').wave);
+
+  // « Nouvelle vague à la fin » : m4 est seul en vague 2, mais ce n'est pas la
+  // dernière — il part au bout, comme le ferait « + nouvelle » du formulaire.
+  check('wave null : nouvelle vague à la fin',
+    s16.setMemberWave('gd0', 'm4', null) && shape(s16, 'gd0') === '1:m1,m2 | 2:m3,m5 | 3:m4', shape(s16, 'gd0'));
+  // … et là, il est seul en dernière position : le refaire ne déplacerait
+  // rien, seulement renuméroter. Même refus que le ▸ de moveQueuedMember.
+  check('wave null sur un membre déjà seul en dernière vague : REFUSÉ (rien ne changerait)',
+    s16.setMemberWave('gd0', 'm4', null) === false);
+  check('la vague COURANTE d\'un membre : REFUSÉE (le menu la marque « ici », non cliquable)',
+    s16.setMemberWave('gd0', 'm4', 3) === false);
+
+  // Les trois seuils, les mêmes qu'addTask et moveQueuedMember — le menu ne
+  // doit jamais offrir une porte que le store refuserait en silence.
+  check('vague déjà lancée : REFUSÉE (y arriver reviendrait à être lancé aussitôt)',
+    s16.setMemberWave('gd0', 'm4', 1) === false);
+  check('vague inexistante (> max) : REFUSÉE (jamais de trou depuis un état périmé)',
+    s16.setMemberWave('gd0', 'm4', 9) === false);
+  check('numéro non entier ou négatif : REFUSÉ',
+    s16.setMemberWave('gd0', 'm4', 2.5) === false && s16.setMemberWave('gd0', 'm4', -1) === false);
+  check('membre déjà lancé : REFUSÉ (m1 est parti avec la vague 1)',
+    s16.setMemberWave('gd0', 'm1', 2) === false);
+  check('groupe ou clé inconnus : sans effet',
+    s16.setMemberWave('nope', 'm4', 2) === false && s16.setMemberWave('gd0', 'zz', 2) === false);
+  check('aucun refus n\'a bougé la répartition',
+    shape(s16, 'gd0') === '1:m1,m2 | 2:m3,m5 | 3:m4', shape(s16, 'gd0'));
+  check('un déplacement accepté est PERSISTÉ (il doit survivre au reload)',
+    st16.raw()[0].members.find((m) => m.key === 'm4').wave === 3,
+    JSON.stringify(st16.raw()[0].members.map((m) => m.key + ':' + m.wave)));
+
+  // L'invariant que tout le reste du panneau lit : jamais de trou, jamais un
+  // libellé « ▶ vague 4 » sur une file qui n'en compte que trois.
+  const nums16 = [...new Set(s16.get('gd0').members.map((m) => m.wave))].sort((a, b) => a - b);
+  check('numérotation contiguë depuis 1 après tous ces déplacements',
+    nums16.join() === '1,2,3', nums16.join());
+
   console.log(`\n${pass} ok, ${fail} fail`);
   process.exit(fail ? 1 : 0);
 }

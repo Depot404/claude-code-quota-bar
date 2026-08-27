@@ -19,7 +19,7 @@ const vm = require('vm');
 const EXT = path.join(__dirname, '..');
 const {
   normalizeTasks, envForTask, applyEnv, conflictingEnvVars,
-  createIntentStore, mismatchOf, ENV_MODEL, ENV_EFFORT,
+  createIntentStore, mismatchOf, intentConfirmed, ENV_MODEL, ENV_EFFORT,
   resolveDefaultModel, resolveDefaultEffort, appendTasksAfterWave,
 } = require(path.join(EXT, 'batch.js'));
 const { createBatchLauncher } = require(path.join(EXT, 'launcher.js'));
@@ -136,6 +136,30 @@ async function run() {
   intents2.record('s2', { model: 'not-a-model', effort: 'not-an-effort' });
   check('valeur invalide enregistrée ⇒ ramenée à null (jamais un écart inventé)',
     intents2.get('s2').model === null && intents2.get('s2').effort === null, JSON.stringify(intents2.get('s2')));
+
+  console.log('\n4bis. Intention confirmée puis oubliée (plan surlignage-effort §2)');
+  check('pas d\'intention ⇒ jamais confirmée',
+    intentConfirmed(null, { modelId: 'claude-sonnet-5', effort: 'low' }) === false);
+  check('réel encore inconnu ⇒ pas encore confirmée',
+    intentConfirmed(intents.get('s1'), { modelId: null, effort: null }) === false);
+  check('un seul champ demandé confirmé sur son propre champ',
+    intentConfirmed({ model: null, effort: 'low' }, { modelId: 'claude-sonnet-5', effort: 'low' }) === true);
+  check('modèle et effort demandés, réel conforme aux deux ⇒ confirmée',
+    intentConfirmed(intents.get('s1'), { modelId: 'claude-opus-4-8[1m]', effort: 'high' }) === true);
+  check('modèle conforme mais effort encore divergent ⇒ pas confirmée',
+    intentConfirmed(intents.get('s1'), { modelId: 'claude-opus-4-8[1m]', effort: 'medium' }) === false);
+  // Scénario réel : lancée en low, honorée pendant N tours (confirmée ⇒
+  // oubliée), puis l'user change le sélecteur DANS la conversation — le
+  // nouveau réel ne doit plus jamais être lu comme un écart avec le lancement.
+  const intents3 = createIntentStore();
+  intents3.record('s3', { model: 'sonnet', effort: 'low' });
+  const real1 = { modelId: 'claude-sonnet-5', effort: 'low' };
+  check('lancement honoré ⇒ pas d\'écart', mismatchOf(intents3.get('s3'), real1) === null);
+  check('… et l\'intention est bien confirmée à cet instant', intentConfirmed(intents3.get('s3'), real1) === true);
+  intents3.forget('s3'); // ce que fait extension.js dès que intentConfirmed rend true
+  const real2 = { modelId: 'claude-sonnet-5', effort: 'xhigh' };
+  check('après changement délibéré du réglage dans la conv, plus aucun écart accusé',
+    mismatchOf(intents3.get('s3'), real2) === null, JSON.stringify(mismatchOf(intents3.get('s3'), real2)));
 
   console.log('\n5. Lancement : env posé PENDANT l\'appel, restauré APRÈS');
   const reg = fakeRegistry([{ sessionId: 'old', cwd: 'C:\\ws' }]);

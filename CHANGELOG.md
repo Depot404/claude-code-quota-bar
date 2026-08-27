@@ -1,5 +1,124 @@
 # Changelog
 
+## [2.85.0] - 2026-08-27
+
+### Added
+- **Quota bars now show light tick marks that split them into equal segments** — 5 for the 5h window, 7 for any 7-day window (weekly, or a model-scoped weekly bar). The marks sit in their own thin rail right under the fill, never inside it (so the fill's rounded corners stay intact) and never inside the burn-rate arrow's own rail below, so the two never collide at any fill level. The segment count is derived from the window's actual duration, not from its label, so it stays correct if a differently-sized window ever appears.
+
+## [2.84.0] - 2026-08-27
+
+### Fixed
+- **The highlight no longer jumps to the wrong conversation for a few seconds after clicking a row.** The renderer's record of the active editor is the panel's judge of last resort — it is the process that paints the screen, so it settles any disagreement about which conversation is really in front. Its freshness, though, was read from the *file*'s modification time, and that file is rewritten every half-minute for unrelated keys: measured on a live session, 5 flushes out of 10 carried no change at all to the editor key, and the key itself took up to 27 seconds to reflect a tab switch. Judging with a 3-second margin therefore meant arbitrating with a record that could be half a minute stale, and every real correction the journal recorded had done exactly that — overruled a genuine, 4-to-7-second-old click on a panel row. The margin now covers the measured latency, so a lagging record can no longer overrule a fresh choice, while a lasting desynchronization is still caught. Filling a *blank* highlight keeps the short margin: there is no choice to overrule. Each deferred arbitration is journalled (`highlight-truth-deferred`), so what the guard holds back stays measurable instead of guessed.
+
+## [2.83.0] - 2026-08-27
+
+### Added
+- **Pasting a `claude-convs` block now shows which conversation the batch will hang from — before you launch it.** The parent conversation used to be looked for only after clicking "Create", so the filiation was discovered once the batch was already running, or not at all when the search had failed. It is now resolved at paste time: the conversation the block came from breathes in the list, and a staple links it to the "New conversation" form — a hooked line with dashes travelling upwards, so the direction of the link reads even on a still image, ending in an arrow that stops just short of the row's status dot. Everything switches off on "Create" and on "Cancel", and a later paste supersedes an earlier one even if the earlier answer comes back last.
+- **The future conversations are previewed in place, greyed out under the parent row.** Same rendering the panel already gives a task that has not launched yet — dotted square, prompt, intended model and effort — with the batch's own wave separators (`wave 2 — queued`). When the parent is already the head of a live batch, the preview sits at the bottom of that batch's body, where the tasks will actually be appended. The preview is produced by the flow's own render, so it survives every state push instead of being wiped by the next one.
+- **A failed search now says so, in the form.** "No master conversation found — standalone batch" and "N conversations contain this block — none kept" replace what used to be silence, with the consequence spelled out and a tooltip pointing at "Set master…" for linking it by hand. Both cases are common (a hand-written block, a parent conversation that has been closed, a stale token) and a silent panel reads as a breakdown.
+
+### Changed
+- Contrast of everything the highlighted row carries was re-measured on the tinted background and re-dosed accordingly (`test/audit-contraste.js` grew the case, plus an untinted control so a pre-existing gap can no longer be mistaken for a new one). One documented gap remains: in dark themes the red context percentage of a highlighted row reaches 4.21:1 against a 4.5 threshold — the tint is 60% the theme's own red, so an alert colour cannot detach from it and stay red.
+
+## [2.82.2] - 2026-08-27
+
+### Fixed
+- **The resynchronization banner no longer fires on ordinary tab-title transitions.** Right after 2.82.0 shipped, the banner showed up during normal use: while a tab is being renamed (the few seconds it spends as "Claude Code" before its title arrives), the label-based highlight goes briefly blank, and the renderer's record filling that blank was reported as a "correction". Two rules now gate the alert, while the highlight correction itself stays immediate: filling an *empty* highlight is never reported (nothing wrong was shown), and a real correction is only announced if the disagreement persists for ~5 seconds — a transient the tracker resolves on its own stays silent, the journal keeps its trace, and the 14-minute-class bug the banner exists for still cannot pass unseen.
+
+## [2.82.0] - 2026-08-27
+
+### Fixed
+- **The highlight can no longer stay wrong: VS Code's own on-disk record of the active tab now overrules the panel.** Every previous highlight fix defended against the extension-host tab mirror lying in the moment; this release closes the remaining case, where the mirror adopts a wrong active tab and then never emits anything to correct it — measured at 14 minutes of wrong highlight, ended only by a click. The panel now also reads the editor layout VS Code's renderer persists to workspace storage (the process that actually paints your screen, recorded by exact session identity, not by tab label), and whenever that record is more recent than the tab tracker's last change of mind and disagrees with it, the record wins. Any desynchronization now repairs itself at the next state flush instead of lasting forever.
+
+### Added
+- **A correction is never silent: a warning banner reports every highlight resynchronization.** When the renderer's record overrules the panel, a dismissible banner appears above the list — time of the correction, which conversation the highlight moved to, what the panel was wrongly showing — and the `highlight-reconciled` journal line carries the full detail. If the banner never shows up again, the bug is truly dead; if it does, it says exactly what to look at.
+
+## [2.81.0] - 2026-08-27
+
+### Fixed
+- **Two unrelated conversations that happen to share a title are no longer merged into one.** When a conversation is resumed under a new id (a window reload, or a background respawn), the old transcript stays behind as a shell and the panel folds it into its replacement — without that, the same conversation would be listed twice. The fold was decided on the title alone, and a title is considered reliable when it comes from VS Code's own session cache — which keeps its entries forever, long after the tab is closed. Two different tasks that had been given the same short name were therefore taken for one: the older conversation disappeared from the list, and any batch task pointing at it started reading the other conversation's state instead. A fold now also requires that both conversations opened with the same first message — exactly what a resume replays. When only one of the two can be read, nothing changes.
+- **A batch is never left as a bare header with nothing under it.** There is only one row per conversation, so when two batches ended up pointing at the same one, whichever was drawn last took the row and the other kept an empty, invisible slot: a batch header alone on screen, with no way to dismiss it. The claim is now settled before anything is drawn — the batch actually linked to that conversation keeps the row, and the other shows its task's pending line, prompt included. A batch head whose conversation is already displayed as another batch's task falls back to its saved title in the same way, instead of an empty capsule.
+
+## [2.80.0] - 2026-08-27
+
+### Fixed
+- **A conversation finishing in the background no longer steals the highlight from the tab you're reading.** When a background conversation ended its turn, VS Code's tab mirror flipped its "active tab" onto that conversation about a fifth of a second later — the window focused, the screen unchanged — and stayed there for minutes. The event carrying that flip looks exactly like the one a real click produces, so it was taken as proof and the highlight moved. Now, a conversation that has just changed state puts its own tab under a short quarantine: during that window, an activation naming it is no longer proof, and a flip already adopted is undone if the state change turns out to have caused it. Clicking a conversation that just finished still highlights it immediately, and so does typing in it; past the window, an ordinary click works as before. The worst case is a brief delay before the highlight follows, never a refusal.
+
+## [2.79.0] - 2026-08-27
+
+### Fixed
+- **The tab highlight no longer locks onto a background window's activation that never actually happened.** An activation reported for a window other than the one you're looking at (relayed to it, or carried by a stale/synthetic message) could be mistaken for a frozen tab mirror and hold the highlight there indefinitely. Only an activation confirmed as a genuine click now gets that indefinite hold; an unconfirmed one now expires after the same short delay and falls back to the last proven tab instead.
+
+### Added
+- More of the highlight's decision path is now journaled (which activation was posted, by which window, whether it was confirmed) — pure observability, nothing renders differently; it exists so the next highlight report can be read from a file instead of reproduced live.
+
+## [2.78.5] - 2026-08-27
+
+### Fixed
+- **A nested batch's capsule now closes flush, not offset.** 2.78.3 tinted the row that hosts a nested batch to match its grip, but the grip itself still shifted its whole box 28px right to show the nesting — so on a narrow panel the two backgrounds visibly started at different x positions instead of meeting cleanly. The grip's box is full-width again, like the row underneath; only its chevron and label are pushed in by padding. Both backgrounds now start at the same edge.
+
+## [2.78.4] - 2026-08-27
+
+### Changed
+- The red intent-mismatch badge ("asked sonnet - medium") no longer takes a line of its own: it sits on the meta line, right of the model actually used, and shrinks with an ellipsis on narrow panels - the ctx% stays right-aligned.
+
+## [2.78.3] - 2026-08-27
+
+### Fixed
+- **A nested batch's capsule now closes at the bottom, like a root batch's does.** A root batch with a master conversation reads as one continuous tinted capsule — its grip and its master row share the same background. A nested batch only had its grip tinted: the row underneath (the parent's own conversation that serves as the child's head) stayed on bare background, an "open bottom" left over from a border that was removed in 2026-08-17 without the tint pass that later gave the grip its own background. That row now gets the same treatment — the child's tint colour, rounded bottom corners — closing the seam.
+
+## [2.78.2] - 2026-08-27
+
+### Fixed
+- **The launch-mismatch badge no longer nags about a setting you changed yourself.** It compares what a batch asked for at launch to the model/effort of the last turn actually played, but that intent was never let go once it had done its job: change the conversation's own model/effort picker later on (nothing QuotaSaver controls) and every following turn kept getting flagged "⚠ asked …" against the original launch choice, even though the launch had honoured it for as long as it ran and the later change was entirely deliberate. The intent is now retired the moment it is confirmed — the first time the real turn matches what was asked — so a manual change afterwards is read as the new intention it is, not a broken promise.
+
+### Added
+- **The model · effort line now says, on hover, what it actually is.** It reads the last turn *really played* from the transcript, while the conversation's own selector already shows what the *next* turn will use — the same snapshot-vs-running-total split the panel already draws between `ctx` and the dollar cost, just never spelled out for this one. A tooltip now says so directly, so a selector that has moved on no longer reads as this panel being wrong.
+
+## [2.78.1] - 2026-08-27
+
+### Fixed
+- **The busy spinner on the selected row is easy to see again.** The 2026-08-26 contrast pass made the spinner's track opaque enough to stay visible on the saturated selection background, but the moving arc used that same pale colour — so the two blended together and the spin barely read as motion. The arc now uses the row's own guaranteed-contrast text colour (lightly tinted blue), independent from the track.
+
+## [2.78.0] - 2026-08-27
+
+### Changed
+- **In auto mode, wave separators are no longer clickable — at all.** The next wave's divider used to stay clickable even in auto, dimmed, as a way to jump the queue with a confirmation dialog; a wave stuck on an interrupted task even kept a full-colour escape hatch, clickable without confirmation. Both are gone. In auto a divider now only ever reads "wave n" or "wave n — queued", never anything else, whichever wave it is and however blocked it is — the only door left to open a wave by hand is flipping the batch's switch to manual, where the **▶ wave n** button keeps working exactly as it did in 2.73.0. The blocked-wave banners follow: in auto they now state only the remedy — reconnect the tab or Relaunch, or that an interrupted task will not finish on its own — and no longer mention ▶ or a suspended auto-advance, since neither exists to point at any more.
+
+## [2.77.2] - 2026-08-27
+
+### Fixed
+- **No user-facing change** — three render-bench assertions had gone stale against the 2026-08-26 contrast pass and were failing on a real combination (a busy conversation that is also the active tab, inside a batch): the spinner arc is deliberately softened with `color-mix` for readability on the saturated selection background, and its ring's background deliberately tracks the row's own paint instead of the panel's, both already measured and passed by `audit-contraste.js`. The three checks were rewritten to prove that same behaviour by pixels instead of asserting the pre-2026-08-26 colours; nothing in `panel.js` changed.
+
+## [2.77.1] - 2026-08-27
+
+### Added
+- **A queued task's wave number is now a menu of destinations.** On a task that has not started yet, its wave reads **wave n ▾** and opens a list: every wave still in the queue, the current one marked "(here)" and not clickable, plus "new wave at the end". One click sends the task there. It replaces the ◂ / ▸ arrows that used to sit in the same spot: those moved by one *step* — a task alone in its wave merged into the neighbouring one, a task sharing its wave detached into a brand-new one — which is a sound gesture but an indirect one. It took as many clicks as there were waves to cross, and the same click did different things depending on who shared the starting wave, so no number of clicks could ever mean "go to wave 4". A destination is now named rather than walked to. Wave numbering stays contiguous throughout: a wave emptied by a move disappears and the following ones close up, so a batch never shows a gap.
+
+### Changed
+- **The "+ this wave" and "+ new wave" lines light up as soon as there is a prompt to drop.** They already existed, one per queued wave, right under that wave's tasks — but they only revealed themselves on hover, so they were found by accident, and "+ new wave" ended up being used as the only door: the task landed in the last wave and then had to be walked back up, one click per wave. They now take the theme's action colour the moment a task is typed into the form, dashed rule turning solid, so the places a prompt can land are visible at a glance instead of being hunted for. Nothing else about them changed — same clicks, same rules, still never on a wave that has already started. They go back to being quiet when the field is empty: a full-colour target with nothing to drop on it would be a button that lies. **Typing no longer shifts the form under your cursor**: those lines sit above the form, so lighting them up used to push everything below them down, and the whole panel appeared to scroll away at the first keystroke. The panel now gives back to the scroll exactly what the layout takes, so the prompt field stays put on screen and it is the content above that slides.
+
+
+## [2.75.0] - 2026-08-26
+
+### Fixed
+- **Stillborn wave links now heal themselves - and mostly stop happening.** Launching a wave right after a window reload could bind the task to a CLI that the restore storm kills and replaces seconds later, under the same tab: the pasted prompt looked fine on screen, yet the panel said "link lost before sending" and the batch stalled until a human pressed Enter (measured: launch at activation+15 s, linked CLI dead and replaced ~3 s later). Two changes: (1) auto wave launches wait out a 60 s activation grace after a reload, so the storm passes before anything irreversible starts - the manual button stays immediate; (2) a new stage 1bis re-links the orphan automatically: the only live, unlinked, transcript-less workspace session born within the launch window is the dead CLI's heir under the same tab (any ambiguity means no action, as everywhere in attach.js). The row then truthfully reads "not sent yet - press Enter in its tab" instead of a lost link whose "Relaunch" would open a duplicate tab.
+
+## [2.74.0] - 2026-08-26
+
+### Fixed
+- **The highlighted row now always matches the tab you actually see selected.** VS Code's tab mirror (`window.tabGroups`) can silently move its `activeTab` onto a background conversation at the exact moment that conversation finishes a turn - window focused, screen unchanged (journal-proven: the mirror flipped and STAYED wrong for 159 s while the user's real tab never moved). The 2026-08-23 quarantine only guarded unfocused windows, and any mechanical tab/group event re-armed its trust within milliseconds. New rule, focus-independent: a highlight switch is only adopted with proof - a tab event whose payload carries a conversation tab turning `isActive`, a real active-group change, a panel row click, or a remembered tab that no longer exists (closed/renamed). Unproven divergences are served from memory (`source: held`) and journaled as `tabs-flip-held`, so if a phantom ever finds a new door, the journal names it.
+
+## [2.73.0] - 2026-08-26
+
+### Added
+- **Each batch now carries a manual / auto switch on its header.** Wave chaining used to be one global behaviour for every batch — always on until 2.72.0, then removed outright. Neither is right: some batches are meant to unroll on their own, others are watched step by step, and both can be open at the same time. The switch sits in the middle of the batch header, `MANUAL` on the left and `AUTO` on the right, the active word in full colour; it belongs to the batch, is stored with it, and survives a window reload. A brand-new batch starts in **auto**, which is the behaviour every previous version had.
+- **In manual, nothing opens by itself, ever.** The **▶ wave n** button appears only once the current wave has finished — before that the next wave keeps its plain "queued" divider, so there is nothing to click and nothing to decide. When it does appear it is in the theme's action colour with a halo, and clicking it launches the wave immediately: no confirmation, because in manual mode the click *is* the deliberate act. (The one exception, so a batch can never be stuck: a wave holding a task that will never finish on its own gets the button too.)
+
+### Fixed
+- **Auto chaining is back — with the guard whose absence caused it to be removed.** The panel could open several conversations at once while tabs were being closed: measured on a real workspace, seven tabs for five conversations, several of them duplicates of the same task. The cause was subtle — a member whose row has gone (tab closed, state entry expired) has no state left, and the panel *displays* it as finished. That is deliberate and stays: a doubt about a long-dead conversation must not leave a cross on screen or freeze a counter forever. But a presumption is now no longer enough to **open** anything: automatic advancement requires every task of the wave to be **provably** finished — a `done` written by a source, never inferred from silence. When the proof is missing the wave simply stays where it is, and ▶ remains available.
+- **The "force it now?" confirmation only shows up in auto mode**, where clicking ▶ really does jump ahead of something that would have happened anyway. In manual there is nothing to jump ahead of, so the dialog is gone. The blocked-wave banners no longer talk about "auto advance being suspended" on a batch that was never on auto either.
+
 ## [2.72.0] - 2026-08-26
 
 ### Fixed

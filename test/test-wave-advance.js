@@ -1,12 +1,17 @@
-// Bout-en-bout sur le VRAI activate() d'extension.js. CONTRAT INVERSE le
-// 2026-08-26 (decision user) : l'extension n'ouvre PLUS aucune vague toute
-// seule. Ce banc, qui prouvait l'auto-avance, prouve desormais son absence -
-// au boot avec une vague deja terminee comme a la transition busy->done.
-// Pourquoi c'est un filet et pas une formalite : un membre dont la ligne a
-// disparu n'a plus d'etat, member-truth compte un etat absent comme termine,
-// et la vague passait pour finie. Mesure chez l'user : 7 onglets pour 5
-// conversations, des doublons par tache, des fermetures annulees en boucle.
-// Le bouton play reste la seule porte (canForceLaunch, test-waves.js).
+// Bout-en-bout sur le VRAI activate() d'extension.js. DEUX CAS, UN PAR MODE
+// (2026-08-26) : l'interrupteur manuel/auto de l'en-tête d'un lot décide si
+// la vague suivante s'ouvre d'elle-même ou attend le bouton ▶.
+//   · AUTO   — l'enchaînement d'avant, RENDU (il avait été retiré en entier
+//              en 2.72.0), mais sous la garde qui manquait : n'avancer que si
+//              tous les membres de la vague sont EXPLICITEMENT terminés ;
+//   · MANUEL — rien ne s'ouvre jamais tout seul, quoi qu'il arrive.
+// La garde est le cœur du banc, pas un détail : un membre dont la ligne a
+// disparu n'a plus d'état, member-truth conclut « terminée » sur ce SILENCE
+// (délibéré pour l'AFFICHAGE), et la vague passait pour finie. Mesure chez
+// l'user le 2026-08-26 : 7 onglets pour 5 conversations, des doublons par
+// tâche, des fermetures annulées en boucle. `doneProven` (member-truth.js)
+// sépare « affiché terminé » de « prouvé terminé » ; ce banc vérifie que c'est
+// bien le second qui commande une OUVERTURE.
 // C'est le seul test qui prouve le CÂBLAGE de bout en bout (workspaceState →
 // member-truth → waves → launchWaveForGroup) plutôt que ses morceaux séparés :
 // waves.js est déjà couvert par test-waves.js, mais lui ne voit pas qu'AUCUN
@@ -24,6 +29,17 @@ const path = require('path');
 // raccourcit à 150 ms (surcharge réservée aux bancs, cf. waves.js) pour tester
 // le VRAI chemin (armement → timer d'échéance → lancement) sans attendre 15 s.
 process.env.CLAUDE_QUOTA_WAVE_STABLE_MS = '150';
+// Grâce d'activation (2026-08-26, e3ed3c6e/2.75.0, ARRIVÉE APRÈS le dernier
+// lot qui a touché ce banc) : en prod, `maybeAdvanceWaves` refuse TOUTE vague
+// auto pendant WAVE_ACTIVATION_GRACE_MS (60 s) après activate(), le temps que
+// la tempête de respawn post-reload passe. Ce banc n'attend ni ne recharge de
+// fenêtre — sans cette surcharge (même mécanique que CLAUDE_QUOTA_WAVE_STABLE_MS
+// ci-dessus), les 60 s dépassent largement sa durée totale et AUCUNE vague
+// auto ne peut jamais partir, quel que soit le mode ou la preuve : c'est
+// exactement le « 9 ok, 5 fail » qui a motivé cette relecture (2026-08-27) —
+// le banc ignorait une garde légitime ajoutée après son dernier lot, pas une
+// régression du moteur.
+process.env.CLAUDE_QUOTA_ACTIVATION_GRACE_MS = '10';
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'qb-wave-'));
 os.homedir = () => SANDBOX;                       // AVANT tout require du module
@@ -46,6 +62,10 @@ const globalState = {
 const tabListeners = [];
 const emitTabs = (e) => tabListeners.forEach((cb) => cb(e));
 const pushed = [];
+// Le message que le webview enverrait au clic sur l'interrupteur de l'en-tête
+// (section 6) : on garde le vrai handler d'extension.js plutôt que d'appeler
+// une fonction interne — c'est le CÂBLAGE qu'on teste ici.
+let onPanelMessage = null;
 const clips = [];
 const openedCmds = [];
 
@@ -159,6 +179,13 @@ function writeTranscript(id, title) {
 // entrée hooks encore `done`). Groupe B : vague 1 encore `busy` et VIVANTE.
 writeTranscript('w1a', 'Groupe A vague une terminée');
 writeTranscript('w1b', 'Groupe B vague une en cours');
+// Groupe C : MANUEL, vague 1 finie exactement comme celle de A — seul le mode
+// les distingue, c'est tout l'objet de la comparaison.
+writeTranscript('w1c', 'Groupe C vague une terminée');
+// Groupe D : AUTO, vague 1 finie mais dont PLUS AUCUNE SOURCE ne parle (aucune
+// entrée hooks) — la situation exacte de l'incident : l'user ferme l'onglet, la
+// ligne disparaît, l'état s'évapore, et l'affichage conclut « terminée ».
+writeTranscript('w1d', 'Groupe D vague une sans etat');
 
 const STATE_FILE = path.join(SANDBOX, '.claude', 'sessions-state.json');
 const now = Date.now();
@@ -166,6 +193,9 @@ function writeSessionsState(obj) { fs.writeFileSync(STATE_FILE, JSON.stringify({
 writeSessionsState({
   w1a: { state: 'done', since: now, updated_at: now, transcript: path.join(projectDir, 'w1a.jsonl') },
   w1b: { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'w1b.jsonl') },
+  w1c: { state: 'done', since: now, updated_at: now, transcript: path.join(projectDir, 'w1c.jsonl') },
+  // w1d : AUCUNE entrée, volontairement. Son transcript existe, sa session est
+  // morte, personne ne dit plus rien d'elle.
 });
 
 // Registre des sessions VIVANTES (~/.claude/sessions/<pid>.json) : w1b tourne
@@ -190,6 +220,21 @@ WORKSPACE_STORE.set('batchGroups', [
     id: 'gB', name: 'Groupe B', createdAt: now, collapsed: false,
     masterSessionId: null, masterTitle: '',
     members: [member('m1', 1, 'wave1b', 'w1b', now), member('m2', 2, 'PROMPT-B-WAVE2', null, null)],
+  },
+  // Groupe C : MANUEL. Vague 1 terminée et PROUVÉE terminée (entrée hooks
+  // `done`, exactement comme A) — le seul écart avec A est le mode. Si quoi que
+  // ce soit s'ouvre ici, c'est que le mode n'est pas respecté.
+  {
+    id: 'gC', name: 'Groupe C', createdAt: now, collapsed: false, waveMode: 'manual',
+    masterSessionId: null, masterTitle: '',
+    members: [member('m1', 1, 'wave1c', 'w1c', now), member('m2', 2, 'PROMPT-C-WAVE2', null, null)],
+  },
+  // Groupe D : AUTO, mais vague 1 sans aucune source d'état. L'affichage la
+  // donne terminée ; l'ouverture, elle, doit exiger une preuve.
+  {
+    id: 'gD', name: 'Groupe D', createdAt: now, collapsed: false, waveMode: 'auto',
+    masterSessionId: null, masterTitle: '',
+    members: [member('m1', 1, 'wave1d', 'w1d', now), member('m2', 2, 'PROMPT-D-WAVE2', null, null)],
   },
 ]);
 
@@ -216,62 +261,94 @@ async function run() {
     webview: {
       options: {}, cspSource: 'vscode-resource:', html: '',
       postMessage: (m) => { pushed.push(m); },
-      onDidReceiveMessage: () => ({ dispose() {} }),
+      onDidReceiveMessage: (cb) => { onPanelMessage = cb; return { dispose() {} }; },
     },
     onDidDispose: () => ({ dispose() {} }),
   });
 
-  console.log('\n1. Avance AU BOOT : vague 1 finie extension éteinte → vague 2 lancée sans autre événement');
-  // Depuis le verrou de stabilisation (2026-08-17), le lancement n'est PLUS
-  // synchrone : le boot ARME (première lecture « prêt »), et c'est le timer
+  console.log('\n1. AUTO, avance AU BOOT : vague 1 finie extension éteinte → vague 2 lancée sans autre événement');
+  // Depuis le verrou de stabilisation (2026-08-17), le lancement n'est PAS
+  // instantané : le boot ARME (première lecture « prêt »), et c'est le timer
   // d'échéance qui lance quand la vague est restée prête WAVE_STABLE_MS
-  // d'affilée — sans qu'aucun onChange n'ait à tirer, ce qui reste la chose
-  // que cette section prouve. On vérifie donc les DEUX moitiés du contrat :
-  // pas de lancement instantané (c'était le bug : une fenêtre de quelques
-  // secondes où un `done` de fin de tour, aussitôt relancé par un hook Stop à
-  // feedback, ouvrait la vague suivante), puis lancement à l'échéance.
+  // d'affilée — sans qu'aucun onChange n'ait à tirer, ce qui reste la chose que
+  // cette section prouve. On vérifie donc les DEUX moitiés du contrat : pas de
+  // lancement instantané (c'était le bug : un `done` de fin de tour aussitôt
+  // relancé par un hook Stop à feedback ouvrait la vague suivante), puis
+  // lancement à l'échéance.
   check('groupe A : PAS de lancement instantané au boot (verrou de stabilisation armé)',
     !launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
-  await sleep(400);   // bien au-dela du verrou de stabilisation (150 ms ici)
-  check('groupe A : vague 2 TOUJOURS pas lancee apres l echeance du verrou (plus aucune avance auto)',
-    !launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
+  await sleep(400);   // bien au-delà du verrou de stabilisation (150 ms ici)
+  check('groupe A : vague 2 lancée à l\'échéance du verrou, sans aucun événement',
+    launched('gA', 'm2'), JSON.stringify(memberOf('gA', 'm2')));
 
   console.log('\n2. Pas d\'avance prématurée : vague 1 encore `busy` au boot → vague 2 en attente');
   check('groupe B : vague 2 TOUJOURS en file au boot (vague 1 busy)',
     !launched('gB', 'm2'), JSON.stringify(memberOf('gB', 'm2')));
 
+  console.log('\n3. MODE MANUEL : la même vague 1 terminée n\'ouvre RIEN');
+  // gC est le jumeau de gA — même état, même preuve, même échéance déjà passée
+  // (le sleep de la section 1 vaut pour tous les groupes). Seul le mode change.
+  check('groupe C (manuel) : vague 2 jamais lancée, même vague 1 prouvée finie',
+    !launched('gC', 'm2'), JSON.stringify(memberOf('gC', 'm2')));
+
+  console.log('\n4. AUTO + état DISPARU : « terminée » affichée ne suffit pas à ouvrir');
+  // L'incident du 2026-08-26, reproduit : transcript présent, session morte,
+  // aucune entrée hooks. L'affichage conclut « terminée » (et doit continuer
+  // de le faire) ; l'OUVERTURE, elle, exige `doneProven`.
+  check('groupe D (auto) : vague 2 PAS lancée sur un état absent',
+    !launched('gD', 'm2'), JSON.stringify(memberOf('gD', 'm2')));
+
   // Le repli presse-papier du lancement de gA/m2 est asynchrone : on attend
   // qu'il ait écrit (condition, pas durée), puis on vérifie qu'un lancement a
   // bien été TENTÉ (et pas seulement le flag posé).
-  check('groupe A : aucun lancement tente (rien au presse-papier)',
-    !clips.includes('PROMPT-A-WAVE2'), JSON.stringify(clips));
+  await waitFor(function () { return clips.includes('PROMPT-A-WAVE2'); });
+  check('groupe A : lancement réellement tenté (prompt au presse-papier)',
+    clips.includes('PROMPT-A-WAVE2'), JSON.stringify(clips));
   check('groupe B : aucun lancement tenté tant que la vague 1 tourne',
     !clips.includes('PROMPT-B-WAVE2'), JSON.stringify(clips));
+  check('groupe C : rien au presse-papier (manuel)', !clips.includes('PROMPT-C-WAVE2'), JSON.stringify(clips));
+  check('groupe D : rien au presse-papier (état non prouvé)', !clips.includes('PROMPT-D-WAVE2'), JSON.stringify(clips));
 
-  console.log('\n3. La transition busy→done de la vague 1 (groupe B) lance la vague 2');
+  console.log('\n5. AUTO : la transition busy→done de la vague 1 (groupe B) lance la vague 2');
   // Vague 1 du groupe B se termine MAINTENANT (extension allumée) : session
   // morte + hooks `done`. L'onglet reste ouvert (la conv finie garde son onglet).
   fs.rmSync(LIVE_W1B, { force: true });
   writeSessionsState({
     w1a: { state: 'done', since: now, updated_at: now, transcript: path.join(projectDir, 'w1a.jsonl') },
     w1b: { state: 'done', since: now, updated_at: now, transcript: path.join(projectDir, 'w1b.jsonl') },
+    w1c: { state: 'done', since: now, updated_at: now, transcript: path.join(projectDir, 'w1c.jsonl') },
   });
   // Un événement d'onglet (bénin) force un recompute ; la transition d'état
   // change le renderKey → onChange tire → maybeAdvanceWaves.
   emitTabs({ closed: [], opened: [], changed: [claude('Groupe B vague une en cours')] });
 
   let gbLaunched = false;
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 200; i++) {
     if (launched('gB', 'm2')) { gbLaunched = true; break; }
     await sleep(10);
   }
-  check('groupe B : la transition busy->done NE lance PAS la vague 2 (le play seul le fait)',
-    !gbLaunched, JSON.stringify(memberOf('gB', 'm2')));
-  await sleep(60);
-  check('groupe B : toujours rien au presse-papier',
-    !clips.includes('PROMPT-B-WAVE2'), JSON.stringify(clips));
+  check('groupe B : la transition busy→done ouvre la vague 2', gbLaunched, JSON.stringify(memberOf('gB', 'm2')));
+  await waitFor(function () { return clips.includes('PROMPT-B-WAVE2'); });
+  check('groupe B : lancement tenté (prompt au presse-papier)',
+    clips.includes('PROMPT-B-WAVE2'), JSON.stringify(clips));
+  check('groupe C : toujours rien, la transition ne le concerne pas',
+    !launched('gC', 'm2') && !clips.includes('PROMPT-C-WAVE2'), JSON.stringify(clips));
+  check('groupe D : toujours rien non plus',
+    !launched('gD', 'm2') && !clips.includes('PROMPT-D-WAVE2'), JSON.stringify(clips));
 
-  console.log('\n4. Aucun résidu');
+  console.log('\n6. MANUEL → AUTO : basculer l\'interrupteur ouvre enfin la vague en attente');
+  // Le mode vit dans le workspaceState : on le bascule comme le fait le clic
+  // du panneau (setGroupWaveMode), puis on laisse le verrou arriver à échéance.
+  onPanelMessage({ type: 'setGroupWaveMode', id: 'gC', mode: 'auto' });
+  let gcLaunched = false;
+  for (let i = 0; i < 200; i++) {
+    if (launched('gC', 'm2')) { gcLaunched = true; break; }
+    await sleep(10);
+  }
+  check('groupe C : passé en auto, la vague 2 part (vague 1 prouvée finie)',
+    gcLaunched, JSON.stringify(memberOf('gC', 'm2')));
+
+  console.log('\n7. Aucun résidu');
   for (const s of context.subscriptions) { try { s.dispose(); } catch {} }
   ext.deactivate();
 

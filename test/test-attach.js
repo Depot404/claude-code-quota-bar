@@ -17,7 +17,7 @@ const os = require('os');
 const path = require('path');
 
 const EXT = path.join(__dirname, '..');
-const { matchPending, pendingForRelink, looksLikeSamePrompt, identifiesConversation, MIN_PREFIX } = require(path.join(EXT, 'attach.js'));
+const { matchPending, pendingForRelink, matchHeirs, looksLikeSamePrompt, identifiesConversation, MIN_PREFIX } = require(path.join(EXT, 'attach.js'));
 const { memberTruth } = require(path.join(EXT, 'member-truth.js'));
 const { firstUserText } = require(path.join(EXT, 'hooks', 'transcript.js'));
 const { createGroupStore } = require(path.join(EXT, 'groups.js'));
@@ -235,6 +235,39 @@ function run() {
     && pendingForRelink([null, { id: 'x', members: [null, { key: 'k' }] }], truth).length === 0);
   check('truthOf qui lève → membre ignoré, jamais d\'exception',
     pendingForRelink(inc.all(), () => { throw new Error('boom'); }).length === 0);
+
+  console.log(''); console.log("7. Étage 1bis — l'héritier du lien mort-né (matchHeirs, 2026-08-26)");
+  // Le CLI lié par l'étage 1 meurt sans rien envoyer et l'extension officielle
+  // en respawne un autre sous le même onglet : sans Entrée, aucun transcript,
+  // donc l'étage 2 est aveugle. L'héritier se reconnaît au TEMPS (né dans la
+  // fenêtre du lancement) et à l'UNICITÉ — toute ambiguïté rend [].
+  const L = 1000000;
+  const un = [{ groupId: 'g', key: 'k1', launchedAt: L }];
+  check('héritier unique né dans la fenêtre → re-lié',
+    JSON.stringify(matchHeirs(un, [{ sessionId: 'h1', startedAt: L + 3000 }]))
+      === JSON.stringify([{ groupId: 'g', key: 'k1', sessionId: 'h1' }]));
+  check('née AVANT le lancement (hors marge d’horloge) → rien',
+    matchHeirs(un, [{ sessionId: 'h1', startedAt: L - 6000 }]).length === 0);
+  check('née juste avant (dans la marge de 5 s) → acceptée',
+    matchHeirs(un, [{ sessionId: 'h1', startedAt: L - 4000 }]).length === 1);
+  check('née après la fenêtre (> 60 s) → rien',
+    matchHeirs(un, [{ sessionId: 'h1', startedAt: L + 61000 }]).length === 0);
+  check('DEUX orphelines dans la fenêtre → ambiguïté, rien',
+    matchHeirs(un, [{ sessionId: 'h1', startedAt: L + 2000 },
+                    { sessionId: 'h2', startedAt: L + 4000 }]).length === 0);
+  check('deux membres perdus, une orpheline compatible avec les deux → rien',
+    matchHeirs([{ groupId: 'g', key: 'k1', launchedAt: L },
+                { groupId: 'g', key: 'k2', launchedAt: L + 1000 }],
+               [{ sessionId: 'h1', startedAt: L + 3000 }]).length === 0);
+  check('fenêtres disjointes → chacun re-lié au sien',
+    matchHeirs([{ groupId: 'g', key: 'k1', launchedAt: L },
+                { groupId: 'g', key: 'k2', launchedAt: L + 300000 }],
+               [{ sessionId: 'h1', startedAt: L + 2000 },
+                { sessionId: 'h2', startedAt: L + 302000 }]).length === 2);
+  check('startedAt absent ou 0 → jamais candidate',
+    matchHeirs(un, [{ sessionId: 'h1', startedAt: 0 }, { sessionId: 'h2' }]).length === 0);
+  check('entrées malformées → tableau vide, jamais d’exception',
+    matchHeirs(null, null).length === 0 && matchHeirs(un, [null]).length === 0);
 
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   console.log(`\n${pass} ok, ${fail} fail`);

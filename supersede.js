@@ -131,6 +131,27 @@ function resolveGroup(group, out) {
       // chacune). Un successeur VIVANT, lui, prouve la continuité par son
       // process : le fold reste, c'est la forme même de l'incident d'origine.
       if (!succ.live && c.tabOpen && enoughTabsForEveryone) continue;
+      // VETO PAR LE PREMIER MESSAGE (2026-08-27). Le groupement secondaire, plus
+      // bas, tient deux premiers messages identiques pour une IDENTITÉ : un
+      // resume REJOUE ce message tel quel. La réciproque doit donc valoir ICI —
+      // deux premiers messages qui DIVERGENT prouvent deux conversations
+      // distinctes, quoi qu'en dise leur titre, et aucune preuve de continuité
+      // (successeur vivant compris) ne peut rattraper ça : un process vivant
+      // prouve que le SUCCESSEUR travaille, jamais qu'il est né de ce husk-là.
+      // Relevé le 2026-08-27 : deux lots différents, lancés à 10 h d'intervalle
+      // sur deux plans différents, fondus l'un dans l'autre sur le titre commun
+      // « Lot 4 contrats & doc » — titre qui venait du STORE D'ONGLETS de VS
+      // Code (`agentSessions.model.cache`, cf. session-titles.js), lequel garde
+      // ses entrées POUR TOUJOURS, onglet fermé compris : `titleSource`
+      // 'tab-store' est donc « fiable » sans qu'aucun onglet n'existe encore, et
+      // la garde du COMPTE d'onglets juste au-dessus ne pouvait rien voir (le
+      // husk n'en revendiquait aucun). Conséquences constatées : la vieille
+      // conversation amputée de la liste, et son lot réduit à une poignée seule
+      // (sa ligne rendue par le lot voisin, cf. panel.js `rowOwner`).
+      // Dégradation silencieuse conservée : un seul des deux `firstUser`
+      // manquant (transcript illisible, appelant qui ne les fournit pas) ⇒ aucun
+      // veto, comportement d'avant à l'octet près.
+      if (c.firstUser && succ.firstUser && !looksLikeSamePrompt(c.firstUser, succ.firstUser)) continue;
       out[c.sessionId] = succ.sessionId;
     }
   }

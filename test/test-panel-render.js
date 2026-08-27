@@ -31,6 +31,12 @@ Module._load = function (req, ...rest) {
   return origLoad.call(this, req, ...rest);
 };
 const { ClaudePanelProvider } = require(path.join(__dirname, '..', 'panel.js'));
+// Jetons de couleur des thèmes RÉELS de l'installation (theme-palette.js) : le
+// host offscreen n'injecte aucun --vscode-*, or la ligne d'ajout « armée » se
+// peint avec button.background. Le mesurer suppose donc de le poser d'abord,
+// comme le ferait VS Code — et de le poser à sa VRAIE valeur.
+const { palettes } = require(path.join(__dirname, 'theme-palette.js'));
+const PALETTE = palettes(fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8'));
 
 const BRAVE_CANDIDATES = [
   process.env.BRAVE_EXE,
@@ -477,12 +483,30 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       grpBusyInk.pos === 'absolute' && grpBusyInk.content === '""', JSON.stringify(grpBusyInk));
     // Preuve par les PIXELS (même motif createImageBitmap que le §17g — la CSP
     // interdit img.src data: mais pas une image construite en mémoire) : on
-    // échantillonne 24×24 autour de l'icône busy du groupe et on compte les
-    // pixels de teinte bleue (l'arc, --busy #03a9f4). Avant le fix (2026-08-06):
-    // 0 — l'arc était peint puis ENTIÈREMENT recouvert par le disque opaque.
-    // Seuils SERRÉS (R<50, B>220) : le rail de CE groupe de test est LUI AUSSI
-    // bleuté (hsl(210,45%,55%) ≈ 89,140,192, cf. hueBorder en JS) — un seuil
-    // large confondrait l'encre de l'arc avec celle du rail voisin.
+    // échantillonne 24×24 autour de l'icône busy du groupe. Avant le fix
+    // (2026-08-06) : 0 pixel distinct — l'arc était peint puis ENTIÈREMENT
+    // recouvert par le disque opaque de l'anneau.
+    // Amendé (chantier contraste, 2026-08-26) : cette conv (c1) est AUSSI la
+    // ligne active du panneau (héritée de STATE), et .conv.active adoucit
+    // désormais --busy en color-mix(--vscode-charts-blue 30%, --sel-fg) pour
+    // rester lisible sur le fond de sélection saturé (mesuré : ratio 3.77,
+    // cf. audit-contraste.js) — l'ancien seuil de bleu SATURÉ pur (R<50 &&
+    // B>220) ne le détecte plus, et l'élargir confondrait l'encre de l'arc
+    // avec celle du RAIL voisin (hsl(210,45%,55%) ≈ 89,140,192, visible dans
+    // le même carré 24×24 au-dessus/en-dessous du disque de l'anneau, cf.
+    // hueBorder en JS — LUI AUSSI bleuté). On mesure donc RELATIVEMENT : deux
+    // couleurs de référence lues sur le rendu réel (le rail, la ligne active
+    // elle-même) plutôt que des seuils RVB figés — un pixel ne compte comme
+    // « encre de l'anneau » que s'il diffère nettement des DEUX. Et pour
+    // prouver que ce n'est pas un simple disque uni (le bug exact de
+    // 2026-08-06 : arc + piste fondus en une seule teinte), il faut au moins
+    // DEUX teintes distinctes parmi cette encre — le serpentin et sa piste.
+    const busyRefs = await cdp.evaluate(`(() => {
+      const rail = document.querySelector('#flow .grp-rail');
+      const rowEl = document.querySelector('#flow .ico-busy').closest('.conv');
+      const parse = (s) => (s.match(/\\d+(\\.\\d+)?/g) || []).slice(0, 3).map(Number);
+      return { rail: parse(getComputedStyle(rail).borderLeftColor), row: parse(getComputedStyle(rowEl).backgroundColor) };
+    })()`);
     const busyPng = (await cdp.send('Page.captureScreenshot', {
       format: 'png', captureBeyondViewport: false,
       clip: await cdp.evaluate(`(() => { const b = document.querySelector('#flow .ico-busy').getBoundingClientRect();
@@ -493,21 +517,30 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const bin = atob('` + busyPng + `');
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const rail = ${JSON.stringify(busyRefs.rail)}, row = ${JSON.stringify(busyRefs.row)};
+      const dist = (r, g, b, ref) => Math.hypot(r - ref[0], g - ref[1], b - ref[2]);
       createImageBitmap(new Blob([bytes], { type: 'image/png' })).then(function (img) {
         const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
-        const g = cv.getContext('2d'); g.drawImage(img, 0, 0);
-        const d = g.getImageData(0, 0, cv.width, cv.height).data;
-        let blue = 0;
+        const ctx2d = cv.getContext('2d'); ctx2d.drawImage(img, 0, 0);
+        const d = ctx2d.getImageData(0, 0, cv.width, cv.height).data;
+        const buckets = new Map();
+        let ink = 0;
         for (let i = 0; i < d.length; i += 4) {
-          if (d[i] < 50 && d[i + 2] > 220 && d[i + 1] > 100) blue++;
+          const r = d[i], gg = d[i + 1], b = d[i + 2];
+          if (dist(r, gg, b, rail) > 40 && dist(r, gg, b, row) > 40) {
+            ink++;
+            const key = Math.round(r / 15) + ',' + Math.round(gg / 15) + ',' + Math.round(b / 15);
+            buckets.set(key, (buckets.get(key) || 0) + 1);
+          }
         }
-        window.__busyInk = { blue };
+        const shades = [...buckets.values()].filter((n) => n > 30).length;
+        window.__busyInk = { ink, shades };
       });
     })()`);
     let busyInk = null;
     for (let i = 0; i < 20 && !busyInk; i++) { await sleep(100); busyInk = await cdp.evaluate(`window.__busyInk`); }
-    check('… et l\'arc bleu est VISIBLE dans l\'anneau du groupe (pixels, pas style calculé)',
-      !!busyInk && busyInk.blue > 50, JSON.stringify(busyInk));
+    check('… et l\'arc bleu est VISIBLE dans l\'anneau du groupe, en AU MOINS deux teintes distinctes serpentin/piste, ni rail ni fond (pixels, pas style calculé)',
+      !!busyInk && busyInk.ink > 50 && busyInk.shades >= 2, JSON.stringify(busyInk));
     // `anim.name` capturé section 3 sur une ligne PLATE (.ico-busy hors groupe) :
     // même nom d'animation ici ⇒ une seule définition CSS, aucune divergence.
     check('… même nom d\'animation que .ico-busy des lignes plates (une seule définition)',
@@ -553,7 +586,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('en-tête « wave 1 » absent : plus aucun membre visible dessous',
       !waveLabels.includes('wave 1'), JSON.stringify(waveLabels));
     check('… en-têtes des vagues encore utiles présents (jamais toutes retirées d\'un coup)',
-      waveLabels.includes('wave 2') && waveLabels.includes('▶ wave 3'), JSON.stringify(waveLabels));
+      waveLabels.includes('wave 2') && waveLabels.includes('wave 3 — queued'), JSON.stringify(waveLabels));
     check('compteur « terminées » : calculé sur le store COMPLET (les cachés comptent)',
       await cdp.evaluate(`document.querySelector('.grp-count').textContent`) === '2/5 done');
     check('des membres restent à faire : le lot est toujours rendu',
@@ -720,36 +753,26 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('en-tête de vague affiché (groupe multi-vagues)',
       await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr').length`) === 2);
     const waveHdrTexts = await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .wave-hdr')).map(h => h.textContent).join('|')`);
-    // Lot 4 §2 : la mention « — queued » ne reste que pour une vague plus loin
-    // en file — la PROCHAINE à lancer (ici la vague 2) devient elle-même le
-    // bouton ▶ (vérifié plus bas), elle ne porte donc plus « — queued ».
-    check('avec 2 vagues, aucun séparateur ne porte encore « — queued » (la vague 2 est la prochaine à lancer)',
-      waveHdrTexts.indexOf('queued') === -1, waveHdrTexts);
+    // Resserré 2026-08-27 (MOCKUP_auto_sans_bouton) : en AUTO, plus AUCUN
+    // séparateur n'est cliquable, jamais — pas même la PROCHAINE vague à
+    // ouvrir, qui garde donc la même mention « — queued » que toute autre
+    // vague en file. La seule porte vers un forçage est l'interrupteur
+    // manuel/auto de l'en-tête (couvert plus bas).
+    check('avec 2 vagues en AUTO, la vague 2 (prochaine à lancer) reste inerte « — queued »',
+      waveHdrTexts.indexOf('wave 2 — queued') !== -1, waveHdrTexts);
     check('membre en attente de sa vague : « queued » dans le titre, pas « pas encore lié »',
       await cdp.evaluate(`(document.querySelector('.m-pending')||{}).title`) === 'Queued — opens when this wave starts.');
-    // Lot 4 §2 (2026-07-24) : plus de bouton ▶ dédié — le séparateur de la
-    // PROCHAINE vague à ouvrir (g.nextWave) devient lui-même le bouton.
     check('aucun bouton ▶ dédié en bas de vague (supprimé, lot 4)',
       await cdp.evaluate(`!Array.from(document.querySelectorAll('#flow button')).some(b => b.textContent.includes('Launch wave'))`) === true);
-    check('le séparateur de la vague 2 devient le bouton de lancement (▶ wave 2)',
-      await cdp.evaluate(`(() => { const h = document.querySelector('#flow .wave-hdr.launch'); return h ? h.textContent.trim() : null; })()`) === '▶ wave 2');
-    // Lot allègement 2026-07-24 — décision 3 amendée, portée par le lot 4 §2 sur
-    // le séparateur : reste toujours cliquable mais atténué (classe dim) en
-    // mode auto tant que rien n'est bloqué ; plus aucune bannière de succès.
-    check('séparateur atténué (dim) en mode auto, vague non bloquée',
-      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('dim')`) === true);
-    check('… et pas "pri" (bleu) en même temps',
-      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === false);
+    check('AUCUN séparateur cliquable en AUTO, vague non bloquée (plus de style "launch")',
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr.launch').length`) === 0);
     check('aucune bannière de succès affichée', await cdp.evaluate(`!document.querySelector('#flow .banner.info')`) === true);
-    // Clic sur le séparateur en mode auto/non bloqué → launchWave avec force:true
-    // (même confirmation modale que l'ancien bouton, côté extension.js).
+    // Cliquer un séparateur inerte ne doit plus jamais rien envoyer en AUTO.
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').click()`);
-    const afterLaunchClick = await cdp.evaluate(`window.__sent`);
-    check('clic séparateur (dim) → launchWave avec force: true',
-      Array.isArray(afterLaunchClick) && afterLaunchClick.length === 1 && afterLaunchClick[0].type === 'launchWave'
-      && afterLaunchClick[0].id === 'g1' && afterLaunchClick[0].wave === 2 && afterLaunchClick[0].force === true,
-      JSON.stringify(afterLaunchClick));
+    await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .wave-hdr'))[1].click()`);
+    const afterInertClick = await cdp.evaluate(`window.__sent`);
+    check('clic sur le séparateur de la vague 2 en AUTO → rien envoyé',
+      Array.isArray(afterInertClick) && afterInertClick.length === 0, JSON.stringify(afterInertClick));
     // Lot allègement v2 2026-07-24 : plus aucune ligne wave-sub, ni en mode
     // auto ni en mode manuel — l'info est déjà portée par les séparateurs de
     // vague, les icônes d'état et le bouton ▶.
@@ -764,8 +787,12 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     blockedWave.groups[0].members[0].status = 'stale';
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: blockedWave })}, '*')`);
     await sleep(120);
-    check('séparateur franc/bleu (pri) quand la vague est bloquée (chemin de secours)',
-      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === true);
+    // L'ancien « chemin de secours » (séparateur franc/bleu cliquable même en
+    // AUTO pour une vague hard-bloquée) est retiré (2026-08-27, contrat
+    // AUTO-sans-bouton) : plus rien n'est cliquable en AUTO, hard-bloquée ou
+    // non — seule bascule vers MANUEL ouvre une porte.
+    check('AUTO + vague hard-bloquée : toujours aucun séparateur cliquable',
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr.launch').length`) === 0);
     // Bandeaux PROPORTIONNÉS (plan lien-mort-né 2026-08-04) : le rouge est
     // réservé à une conv vraiment interrompue à mi-travail.
     const bannerOf = `(() => {
@@ -777,6 +804,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       banner && banner.cls.indexOf('err') !== -1, JSON.stringify(banner));
     check('… et son texte ne prétend plus rien sur l\'onglet',
       banner && banner.text.indexOf('tab was closed') === -1, JSON.stringify(banner));
+    check('… et ne mentionne plus ▶ ni l\'avance auto suspendue, en AUTO',
+      banner && banner.text.indexOf('▶') === -1 && banner.text.indexOf('suspended') === -1, JSON.stringify(banner));
     // Étape 16 : la zone waveCtrl (bannières) ne recouvre pas l'axe du rail,
     // même règle que les séparateurs de vague (padding-left après l'axe). Le
     // padding est DANS la boîte de .wave-ctrl (sa propre rect ne bouge pas) —
@@ -806,8 +835,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       banner && banner.cls.indexOf('info') !== -1 && banner.cls.indexOf('err') === -1, JSON.stringify(banner));
     check('… avec le remède énoncé (Entrée dans l\'onglet, sinon Relaunch)',
       banner && /Enter/.test(banner.text) && /Relaunch/.test(banner.text), JSON.stringify(banner));
-    check('… et l\'auto reste suspendu (le séparateur garde son chemin de secours)',
-      await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').classList.contains('pri')`) === true);
+    check('… toujours aucun séparateur cliquable en AUTO (lien mort-né)',
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr.launch').length`) === 0);
     // Mélange des deux dans la même vague : la conv interrompue prime.
     const mixedWave = JSON.parse(JSON.stringify(lostWave));
     mixedWave.groups[0].members[1].waveStatus = 'stale';
@@ -821,15 +850,13 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(120);
     const afterBlockedClick = await cdp.evaluate(`(() => {
       window.__sent = [];
-      document.querySelector('#flow .wave-hdr.launch').click();
+      Array.from(document.querySelectorAll('#flow .wave-hdr'))[1].click();
       return window.__sent;
     })()`);
-    check('… clic sans force (pri, pas dim) → launchWave sans force',
-      Array.isArray(afterBlockedClick) && afterBlockedClick.length === 1
-      && afterBlockedClick[0].type === 'launchWave' && afterBlockedClick[0].force === undefined,
-      JSON.stringify(afterBlockedClick));
-    // Une vague PLUS LOIN en file que la prochaine à lancer garde bien
-    // « — queued » — seule la prochaine (ici toujours la vague 2) devient ▶.
+    check('clic sur le séparateur d\'une vague hard-bloquée en AUTO → rien envoyé (plus d\'échappatoire)',
+      Array.isArray(afterBlockedClick) && afterBlockedClick.length === 0, JSON.stringify(afterBlockedClick));
+    // Une vague PLUS LOIN en file que la prochaine à lancer garde elle aussi
+    // « — queued » : aucune des deux n'est jamais singularisée en AUTO.
     const triWave = JSON.parse(JSON.stringify(grouped));
     triWave.groups[0].members.push({
       key: 'm4', prompt: 'Vague 3', wave: 3, asked: { model: null, effort: null },
@@ -839,8 +866,32 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: triWave })}, '*')`);
     await sleep(120);
     const triHdrTexts = await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .wave-hdr')).map(h => h.textContent).join('|')`);
-    check('3 vagues : la 2 (prochaine à lancer) devient ▶ wave 2, la 3 (plus loin) garde « — queued »',
-      triHdrTexts.indexOf('▶ wave 2') !== -1 && triHdrTexts.indexOf('wave 3 — queued') !== -1, triHdrTexts);
+    check('3 vagues en AUTO : aucune ne devient ▶, la 2 comme la 3 restent « — queued »',
+      triHdrTexts.indexOf('wave 2 — queued') !== -1 && triHdrTexts.indexOf('wave 3 — queued') !== -1
+      && triHdrTexts.indexOf('▶') === -1, triHdrTexts);
+    // ── Mode MANUEL (2026-08-26, resserré 2026-08-27) : seule porte restante
+    // vers un forçage — le ▶ suit toujours les règles 2.73.0 (vague finie ou
+    // hard-bloquée), inchangées par ce lot.
+    const manualNotReady = JSON.parse(JSON.stringify(grouped));
+    manualNotReady.groups[0].waveMode = 'manual';
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: manualNotReady })}, '*')`);
+    await sleep(120);
+    check('MANUEL, vague courante pas finie : séparateur toujours inerte',
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr.launch').length`) === 0);
+    const manualReadyState = JSON.parse(JSON.stringify(manualNotReady));
+    manualReadyState.groups[0].members[0].status = 'done';
+    manualReadyState.groups[0].members[0].waveStatus = 'done';
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: manualReadyState })}, '*')`);
+    await sleep(120);
+    check('MANUEL, vague courante finie : ▶ wave 2 apparaît (pri)',
+      await cdp.evaluate(`(() => { const h = document.querySelector('#flow .wave-hdr.launch'); return h ? h.textContent.trim() + '|' + h.classList.contains('pri') : null; })()`) === '▶ wave 2|true');
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('#flow .wave-hdr.launch').click()`);
+    const afterManualClick = await cdp.evaluate(`window.__sent`);
+    check('MANUEL : clic ▶ → launchWave (le clic EST l\'acte, sans confirmation)',
+      Array.isArray(afterManualClick) && afterManualClick.length === 1 && afterManualClick[0].type === 'launchWave'
+      && afterManualClick[0].id === 'g1' && afterManualClick[0].wave === 2 && afterManualClick[0].force === undefined,
+      JSON.stringify(afterManualClick));
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(120);
     // Lot 5 : la croix rouge (.m-out) est désormais l'UNIQUE action de sortie,
@@ -1097,21 +1148,21 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
           queued: !!m.querySelector('.m-pending'),
           h: Math.round(m.getBoundingClientRect().height * 10) / 10,
           foot: foot ? Math.round(foot.getBoundingClientRect().height * 10) / 10 : null,
-          movers: mv ? Array.from(mv.querySelectorAll('.m-mv')).filter(function (b) { return getComputedStyle(b).display !== 'none'; }).length : 0,
+          movers: mv ? Array.from(mv.querySelectorAll('.m-jump')).filter(function (b) { return getComputedStyle(b).display !== 'none'; }).length : 0,
           movePos: mv ? getComputedStyle(mv).position : null,
           movePE: mv ? getComputedStyle(mv).pointerEvents : null,
         };
       });
       return { rows: rows, launched: rows.filter(function (r) { return !r.queued; }), queued: rows.filter(function (r) { return r.queued; }) };
     })()`);
-    check('au moins une tâche en file propose bien un mouveur ◂/▸ (sinon ce banc ne prouve rien)',
+    check('au moins une tâche en file propose bien son menu de vague (sinon ce banc ne prouve rien)',
       rowH.queued.some(function (r) { return r.movers > 0; }), JSON.stringify(rowH.queued));
     check('… et elle n\'est JAMAIS plus haute qu\'une tâche lancée (le pied ne réserve plus rien)',
       rowH.queued.every(function (q) { return rowH.launched.every(function (l) { return q.h <= l.h; }); }),
       JSON.stringify(rowH.rows));
     check('… pied replié pour de bon (hauteur 0, pas seulement « petite »)',
       rowH.queued.every(function (q) { return q.foot === 0; }), JSON.stringify(rowH.queued));
-    check('les mouveurs sont un OVERLAY, clics désarmés au repos (ils ne volent pas le clic de la ligne)',
+    check('le menu de vague est un OVERLAY, clics désarmés au repos (il ne vole pas le clic de la ligne)',
       rowH.rows.every(function (r) { return r.movePos === 'absolute' && r.movePE === 'none'; }), JSON.stringify(rowH.rows));
     // Le survol ne doit RIEN pousser : même hauteur, mouveurs et ⤴ côte à côte
     // sans se recouvrir, tout à l'intérieur de la ligne.
@@ -1132,62 +1183,142 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… mouveurs et ⤴ côte à côte, dans les bords de la ligne',
       hoverGeom.overlap === false && hoverGeom.inside === true, JSON.stringify(hoverGeom));
 
-    console.log('\n10quinquies. ◂ / ▸ : ce qui est PROPOSÉ à l\'écran = ce que le store accepte (2026-08-22)');
-    // Bug signalé par l'user : déplacer la seule ligne d'une vague la faisait
-    // disparaître SANS RETOUR (le ◂ restait affiché, le store refusait en
-    // silence), et rien ne savait créer une vague au bout de la file (le ▸
-    // était masqué sur la dernière vague). Depuis que la vague est une POSITION
-    // (groups.js moveQueuedMember), ce que peut un membre dépend de s'il est
-    // SEUL chez lui — et l'affichage doit dire EXACTEMENT ça, sinon on remet un
-    // bouton menteur. C'est le seul banc qui peut le voir : la condition est du
-    // CSS (display), pas une valeur de retour.
+    console.log('\n10quinquies. Menu « vague n ▾ » : ce qui est PROPOSÉ à l\'écran = ce que le store accepte (2026-08-27)');
+    // Le pill a remplacé les ◂/▸ : celles-ci déplaçaient d\'un CRAN, geste juste
+    // mais indirect — autant de clics que de vagues à franchir, et un résultat
+    // qui dépendait de qui partageait la vague de départ. Ce que ce bloc
+    // verrouille est le même invariant qu\'elles avaient : un contrôle qui ne
+    // fait rien MENT, donc ce que le menu offre doit être exactement ce que
+    // groups.js setMemberWave accepterait. C\'est le seul banc qui peut le voir
+    // (la condition est du DOM, pas une valeur de retour).
     const movers = JSON.parse(JSON.stringify(grouped));
     movers.groups[0].members.push(
       { key: 'm4', prompt: 'Vague 2, accompagnée', wave: 2, asked: { model: null, effort: null }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' },
       { key: 'm5', prompt: 'Vague 3, toute seule', wave: 3, asked: { model: null, effort: null }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' });
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: movers })}, '*')`);
     await sleep(150);
-    const seenBtns = `(() => {
-      const seen = function (b) { return getComputedStyle(b).display !== 'none'; };
+
+    const jumpRows = `(() => {
       return Array.from(document.querySelectorAll('#flow .member')).map(function (m) {
         const p = m.querySelector('.m-prompt');
-        const btns = Array.from(m.querySelectorAll('.m-move .m-mv'));
+        const j = m.querySelector('.m-jump');
         return {
           prompt: p ? p.textContent : null,
           queued: !!m.querySelector('.m-pending'),
-          back: btns.length ? seen(btns[0]) : false,
-          fwd: btns.length > 1 ? seen(btns[1]) : false,
+          jump: !!j && getComputedStyle(j).display !== 'none',
+          label: j ? j.textContent : null,
         };
       });
     })()`;
-    const mvs = await cdp.evaluate(seenBtns);
-    const mvRow = function (list, txt) { return list.find(function (r) { return r.prompt === txt; }) || {}; };
-    check('membre ACCOMPAGNÉ (vague 2, deux lignes) : les DEUX flèches sont offertes',
-      mvRow(mvs, 'Pas encore lancée').back === true && mvRow(mvs, 'Pas encore lancée').fwd === true, JSON.stringify(mvs));
-    check('… y compris le ◂, alors que la vague d\'avant est déjà partie : il se DÉTACHE devant ses voisines',
-      mvRow(mvs, 'Vague 2, accompagnée').back === true, JSON.stringify(mvRow(mvs, 'Vague 2, accompagnée')));
-    check('membre SEUL de la DERNIÈRE vague : ▸ masqué (le pousser ne ferait que renuméroter)',
-      mvRow(mvs, 'Vague 3, toute seule').fwd === false, JSON.stringify(mvRow(mvs, 'Vague 3, toute seule')));
-    check('… mais son ◂ reste offert : il refusionne avec la vague d\'avant, encore en file',
-      mvRow(mvs, 'Vague 3, toute seule').back === true, JSON.stringify(mvRow(mvs, 'Vague 3, toute seule')));
-    check('une tâche DÉJÀ LANCÉE n\'a aucune flèche (elle ne bouge plus)',
-      mvs.filter(function (r) { return !r.queued; }).every(function (r) { return !r.back && !r.fwd; }),
-      JSON.stringify(mvs.filter(function (r) { return !r.queued; })));
-    // Contre-épreuve du bug : sur la MÊME dernière vague, dès qu'une seconde
-    // ligne l'accompagne, le ▸ réapparaît — c'est lui qui fabrique la vague
-    // suivante, et c'est ce chemin-là qui n'existait pas.
+    const jr = await cdp.evaluate(jumpRows);
+    const jRow = function (list, txt) { return list.find(function (r) { return r.prompt === txt; }) || {}; };
+    check('chaque tâche EN FILE porte son numéro de vague en bouton-menu',
+      jr.filter(function (r) { return r.queued; }).every(function (r) { return r.jump === true; }), JSON.stringify(jr));
+    check('… et le libellé porte bien SA vague (celle de la ligne, pas celle du lot)',
+      /3/.test(jRow(jr, 'Vague 3, toute seule').label || ''), JSON.stringify(jRow(jr, 'Vague 3, toute seule')));
+    check('une tâche DÉJÀ LANCÉE n\'en a aucun (elle ne bouge plus)',
+      jr.filter(function (r) { return !r.queued; }).every(function (r) { return r.jump === false; }),
+      JSON.stringify(jr.filter(function (r) { return !r.queued; })));
+
+    // Ouverture : rien n\'est envoyé tant qu\'aucune destination n\'est choisie,
+    // et l\'overlay est tenu ouvert — sans quoi le pointeur, en descendant dans
+    // le menu, sortirait de la ligne et le ferait disparaître.
+    const openJumpOn = function (txt) {
+      return `(() => {
+        const m = Array.from(document.querySelectorAll('#flow .member')).find(function (x) {
+          const p = x.querySelector('.m-prompt');
+          return p && p.textContent === ${JSON.stringify(txt)};
+        });
+        m.querySelector('.m-jump').click();
+      })()`;
+    };
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(openJumpOn('Vague 2, accompagnée'));
+    const menu = await cdp.evaluate(`(() => {
+      const m = document.querySelector('#flow .m-menu');
+      if (!m) return { open: false };
+      const btns = Array.from(m.querySelectorAll('button'));
+      return {
+        open: true,
+        sent: window.__sent.length,
+        labels: btns.map(function (b) { return b.textContent.trim(); }),
+        dead: btns.filter(function (b) { return b.disabled; }).map(function (b) { return b.textContent.trim(); }),
+        held: !!m.closest('.member').classList.contains('menu-open'),
+      };
+    })()`);
+    check('clic sur le pill : le menu s\'ouvre sans rien envoyer, et l\'overlay est tenu ouvert',
+      menu.open === true && menu.sent === 0 && menu.held === true, JSON.stringify(menu));
+    check('… il liste les vagues encore EN FILE (2 et 3), jamais la vague 1 déjà partie',
+      menu.labels.length === 3 && /2/.test(menu.labels[0]) && /3/.test(menu.labels[1]),
+      JSON.stringify(menu.labels));
+    check('… la vague COURANTE est marquée « ici » et n\'est pas cliquable (le store la refuserait)',
+      menu.dead.length === 1 && /2/.test(menu.dead[0]) && /\(ici\)|\(here\)/.test(menu.dead[0]), JSON.stringify(menu));
+    check('… et « nouvelle vague à la fin » ferme la liste',
+      /fin|end/i.test(menu.labels[2]), JSON.stringify(menu.labels));
+
+    // Le geste : UN clic, une destination ABSOLUE — là où il fallait autant de
+    // flèches que de vagues à franchir.
+    await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .m-menu button')).find(function (b) { return !b.disabled && /3/.test(b.textContent); }).click()`);
+    const afterJump = await cdp.evaluate(`window.__sent`);
+    check('choisir une vague → un seul setMemberWave, avec le numéro visé',
+      Array.isArray(afterJump) && afterJump.length === 1 && afterJump[0].type === 'setMemberWave'
+      && afterJump[0].id === 'g1' && afterJump[0].key === 'm4' && afterJump[0].wave === 3, JSON.stringify(afterJump));
+    check('… et le menu s\'est refermé', await cdp.evaluate(`!document.querySelector('#flow .m-menu')`) === true);
+
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(openJumpOn('Vague 2, accompagnée'));
+    await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .m-menu button')).find(function (b) { return /fin|end/i.test(b.textContent); }).click()`);
+    const afterJumpNew = await cdp.evaluate(`window.__sent`);
+    check('« nouvelle vague à la fin » → setMemberWave avec wave: null',
+      Array.isArray(afterJumpNew) && afterJumpNew.length === 1
+      && afterJumpNew[0].type === 'setMemberWave' && afterJumpNew[0].wave === null, JSON.stringify(afterJumpNew));
+
+    // Le MIROIR du refus du store (setMemberWave) : un membre déjà SEUL au bout
+    // de la file est déjà « à la fin » — la proposer ne ferait que renuméroter.
+    await cdp.evaluate(openJumpOn('Vague 3, toute seule'));
+    const soloMenu = await cdp.evaluate(`(() => {
+      const m = document.querySelector('#flow .m-menu');
+      return m ? Array.from(m.querySelectorAll('button')).map(function (b) { return b.textContent.trim(); }) : null;
+    })()`);
+    check('membre SEUL de la DERNIÈRE vague : « nouvelle vague à la fin » n\'est PAS proposée',
+      Array.isArray(soloMenu) && !soloMenu.some(function (l) { return /fin|end/i.test(l); }), JSON.stringify(soloMenu));
+    check('… mais les autres vagues en file le restent (il peut toujours rejoindre la 2)',
+      Array.isArray(soloMenu) && soloMenu.some(function (l) { return /2/.test(l); }), JSON.stringify(soloMenu));
+    await cdp.evaluate(`document.body.click()`);
+
+    // Contre-épreuve : dès qu\'une seconde ligne l\'accompagne sur cette dernière
+    // vague, « à la fin » revient — c\'est ce cas-là qui fabrique une vague au
+    // bout, et le store l\'accepte.
     const moversPair = JSON.parse(JSON.stringify(movers));
     moversPair.groups[0].members.push(
       { key: 'm6', prompt: 'Vague 3, plus seule', wave: 3, asked: { model: null, effort: null }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' });
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: moversPair })}, '*')`);
     await sleep(150);
-    const mvs2 = await cdp.evaluate(seenBtns);
-    check('même ligne, désormais accompagnée sur la dernière vague : le ▸ REVIENT (une vague naît au bout)',
-      mvRow(mvs2, 'Vague 3, toute seule').fwd === true, JSON.stringify(mvs2));
-    // Géométrie du cas à DEUX flèches, devenu la norme depuis ce lot (avant, un
-    // membre de dernière vague n'en montrait qu'une). Le gabarit est celui de
-    // 10quater, mais mesuré là où il est le plus large : deux disques PLUS le ⤴.
-    const mvGeom = await cdp.evaluate(`(() => {
+    await cdp.evaluate(openJumpOn('Vague 3, toute seule'));
+    const pairMenu = await cdp.evaluate(`(() => {
+      const m = document.querySelector('#flow .m-menu');
+      return m ? Array.from(m.querySelectorAll('button')).map(function (b) { return b.textContent.trim(); }) : null;
+    })()`);
+    check('même ligne, désormais accompagnée : « nouvelle vague à la fin » REVIENT',
+      Array.isArray(pairMenu) && pairMenu.some(function (l) { return /fin|end/i.test(l); }), JSON.stringify(pairMenu));
+
+    // Un lot vivant pousse son état toutes les 30 s et à chaque transition : le
+    // menu est REPEINT, jamais refermé sous les doigts.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: moversPair })}, '*')`);
+    await sleep(150);
+    check('un push d\'état pendant que le menu est ouvert ne le referme pas',
+      await cdp.evaluate(`!!document.querySelector('#flow .m-menu')`) === true);
+    await cdp.evaluate(`document.body.click()`);
+    check('un clic ailleurs referme le menu',
+      await cdp.evaluate(`!document.querySelector('#flow .m-menu')`) === true);
+    await cdp.evaluate(openJumpOn('Vague 3, toute seule'));
+    await cdp.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    check('Échap referme le menu',
+      await cdp.evaluate(`!document.querySelector('#flow .m-menu')`) === true);
+
+    // Géométrie : le pill est un OVERLAY comme les flèches qu\'il remplace — au
+    // survol la ligne ne grandit pas d\'un pixel, et il ne recouvre pas le ⤴.
+    const jGeom = await cdp.evaluate(`(() => {
       const m = Array.from(document.querySelectorAll('#flow .member')).find(function (x) {
         const p = x.querySelector('.m-prompt');
         return p && p.textContent === 'Vague 3, toute seule';
@@ -1198,24 +1329,16 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const head = m.querySelector('.m-head').getBoundingClientRect();
       const mv = m.querySelector('.m-move').getBoundingClientRect();
       const out = m.querySelector('.m-out').getBoundingClientRect();
-      return { before: Math.round(before * 10) / 10, after: Math.round(m.getBoundingClientRect().height * 10) / 10,
-               shown: Array.from(m.querySelectorAll('.m-move .m-mv')).filter(function (b) { return getComputedStyle(b).display !== 'none'; }).length,
-               overlap: Math.round(mv.right) > Math.round(out.left),
-               inside: Math.round(mv.left) >= Math.round(head.left) && Math.round(mv.right) <= Math.round(head.right) };
+      return {
+        before: Math.round(before * 10) / 10, after: Math.round(m.getBoundingClientRect().height * 10) / 10,
+        overlap: Math.round(mv.right) > Math.round(out.left),
+        inside: Math.round(mv.left) >= Math.round(head.left) && Math.round(mv.right) <= Math.round(head.right),
+      };
     })()`);
-    check('deux flèches visibles à la fois : la ligne ne grandit toujours pas d\'un pixel',
-      mvGeom.shown === 2 && mvGeom.before === mvGeom.after, JSON.stringify(mvGeom));
-    check('… et les deux disques + le ⤴ tiennent côte à côte dans les bords de la ligne',
-      mvGeom.overlap === false && mvGeom.inside === true, JSON.stringify(mvGeom));
-    // Ce que l'ŒIL a validé (2026-08-22) : sur la ligne survolée de la DERNIÈRE
-    // vague, les trois pastilles ◂ ▸ ⤴ apparaissent côte à côte, dans les bords
-    // de la ligne, sans la faire grandir — le ▸ étant précisément celui que ce
-    // lot rend possible. La capture a été prise par un vrai mouvement de souris
-    // (Input.dispatchMouseEvent : un MouseEvent synthétique n'allume pas :hover)
-    // et REGARDÉE. Elle ne reste pas dans le banc : ce geste laisse le pointeur
-    // posé sur la ligne pour toutes les sections suivantes, et la lecture de
-    // :hover juste après s'est montrée instable d'un passage à l'autre. Les
-    // mesures ci-dessus, elles, ne dépendent d'aucun survol.
+    check('au survol, la ligne ne grandit pas d\'un pixel',
+      jGeom.before === jGeom.after, JSON.stringify(jGeom));
+    check('… et le pill + le ⤴ tiennent côte à côte dans les bords de la ligne',
+      jGeom.overlap === false && jGeom.inside === true, JSON.stringify(jGeom));
 
     // Modèle · effort PRÉVUS grisés sur une tâche en file (m3, pas encore liée).
     const intentState = JSON.parse(JSON.stringify(grouped));
@@ -1332,6 +1455,80 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     })()`);
     check('… et réapparaissent dès qu\'une tâche active existe dans le champ',
       ghostVisFilled.ghostNewDisplay !== 'none' && ghostVisFilled.addRowDisplay !== 'none', JSON.stringify(ghostVisFilled));
+
+    // ARMÉES (2026-08-27) : réapparaître ne suffisait pas. Ces deux lignes
+    // EXISTAIENT déjà — c'est leur discrétion qui coûtait quatre gestes pour
+    // insérer en vague 2 : ne s'allumant qu'au survol, elles se découvraient
+    // par hasard, et « + new wave » finissait par servir de porte unique (la
+    // tâche tombait en dernière vague, puis se remontait à la main). Dès qu'un
+    // prompt attend, elles prennent donc la couleur d'ACTION du thème, celle
+    // des boutons — le seul jeton dont la vivacité est garantie dans tous les
+    // thèmes (cf. CLAUDE.md du dossier : list.activeSelectionBackground ne
+    // l'est pas). Mesuré sur le style calculé, pas sur la classe : c'est la
+    // couleur qui doit changer, pas un attribut.
+    await cdp.evaluate(`document.documentElement.style.setProperty('--vscode-button-background', ${JSON.stringify(PALETTE.dark['--vscode-button-background'])})`);
+    await sleep(60);
+    const armed = await cdp.evaluate(`(() => {
+      const hex = function (c) {
+        const m = c.match(/\\d+/g);
+        return m ? '#' + m.slice(0, 3).map(function (n) { return ('0' + Number(n).toString(16)).slice(-2); }).join('') : c;
+      };
+      const ghostNew = document.querySelector('#flow .wave-ghost.wave-new');
+      const addRow = document.querySelector('#flow .wave-add-row');
+      return {
+        ghostNewBg: hex(getComputedStyle(ghostNew).backgroundColor),
+        addRowBg: hex(getComputedStyle(addRow).backgroundColor),
+        bodyBg: hex(getComputedStyle(document.body).backgroundColor),
+        ghostNewArmed: ghostNew.classList.contains('armed'),
+        addRowArmed: addRow.classList.contains('armed'),
+      };
+    })()`);
+    const BTN = String(PALETTE.dark['--vscode-button-background'] || '').slice(0, 7).toLowerCase();
+    check('… et elles s\'ALLUMENT : fond à la couleur d\'action du thème, sans attendre le survol',
+      armed.ghostNewArmed === true && armed.addRowArmed === true
+      && armed.ghostNewBg.toLowerCase() === BTN && armed.addRowBg.toLowerCase() === BTN,
+      JSON.stringify({ armed: armed, attendu: BTN }));
+    check('… et ce fond se DÉTACHE de celui du panneau (c\'est tout l\'objet : se voir sans survol)',
+      armed.ghostNewBg.toLowerCase() !== armed.bodyBg.toLowerCase(), JSON.stringify(armed));
+
+    // … et elles s'éteignent avec le prompt : une cible en couleur pleine sans
+    // rien à y déposer serait le bouton menteur que tout le panneau évite.
+    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = ''; ta.dispatchEvent(new Event('input')); })()`);
+    check('champ vidé : elles s\'éteignent (plus de couleur d\'action sur une cible sans matière)',
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-ghost.armed').length`) === 0);
+
+    // LA ZONE DE SAISIE NE BOUGE PAS (2026-08-27, signalé par l'user). Le
+    // formulaire est SOUS les lots : allumer une ligne d'ajout dans chacun
+    // pousse tout ce qui suit, et le champ fuyait sous le curseur à la
+    // première frappe — le panneau entier semblait défiler. Mesuré ici de la
+    // seule façon qui prouve quelque chose : la position À L'ÉCRAN du champ,
+    // avant et après la bascule, panneau réellement défilable (sinon il n'y a
+    // rien à compenser et le test passerait sans rien couvrir).
+    const stay = await cdp.evaluate(`(() => {
+      const form = document.getElementById('batchForm');
+      const ta = document.querySelector('.task-top textarea.inp');
+      const sc = document.scrollingElement || document.documentElement;
+      const scrollable = sc.scrollHeight - sc.clientHeight;
+      ta.value = '';
+      ta.dispatchEvent(new Event('input'));
+      const before = form.getBoundingClientRect().top;
+      const rowsBefore = document.querySelectorAll('#flow .wave-ghost.armed').length;
+      ta.value = 'Une tache qui attend';
+      ta.dispatchEvent(new Event('input'));
+      return {
+        scrollable: scrollable,
+        rowsBefore: rowsBefore,
+        rowsAfter: document.querySelectorAll('#flow .wave-ghost.armed').length,
+        moved: Math.round((form.getBoundingClientRect().top - before) * 10) / 10,
+      };
+    })()`);
+    check('(mise en place) le panneau est bien défilable et des lignes s\'allument vraiment',
+      stay.scrollable > 0 && stay.rowsBefore === 0 && stay.rowsAfter > 0, JSON.stringify(stay));
+    check('la zone de saisie ne bouge PAS d\'un pixel quand les lignes s\'allument',
+      Math.abs(stay.moved) <= 1, JSON.stringify(stay));
+
+    await cdp.evaluate(`document.documentElement.style.removeProperty('--vscode-button-background')`);
+    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Geometrie fantome'; ta.dispatchEvent(new Event('input')); })()`);
     const mergedGhost = await cdp.evaluate(`(() => {
       const line = document.querySelector('#flow .ghost-line');
       const addRow = line && line.querySelector('.wave-add-row');
@@ -2363,11 +2560,22 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… le ResizeObserver corrige tout seul la hauteur corrompue, SANS nouveau postMessage',
       healed.railHeight > 10 && healed.aboveGhost === true, JSON.stringify(healed));
 
-    // (c) Anneau vs fond du panneau, dans les DEUX thèmes RÉELS — le §7
-    // existant (prefers-color-scheme) ne change RIEN ici : aucune @media
-    // n'en dépend, tout passe par les variables --vscode-* que seul VRAI VS
-    // Code injecte. On les pose nous-mêmes, comme le ferait le host, pour
-    // que ce banc mesure ce que l'œil voit vraiment dans chaque thème.
+    // (c) Anneau vs fond RÉEL de la ligne qui le porte, dans les DEUX thèmes
+    // RÉELS — le §7 existant (prefers-color-scheme) ne change RIEN ici :
+    // aucune @media n'en dépend, tout passe par les variables --vscode-* que
+    // seul VRAI VS Code injecte. On les pose nous-mêmes, comme le ferait le
+    // host, pour que ce banc mesure ce que l'œil voit vraiment.
+    // Amendé (chantier contraste, 2026-08-26) : depuis que .conv.active peint
+    // son PROPRE --row-bg (la couleur de sélection, PAS le fond du panneau —
+    // cf. commentaire sur --row-bg dans panel.js, étape 2026-08-26), l'ancien
+    // invariant unique « l'anneau égale le fond du PANNEAU » n'est plus vrai
+    // que pour un membre ORDINAIRE. Sur le membre ACTIF (m1, aussi busy — la
+    // même conv qu'au §9 juste au-dessus), l'anneau doit désormais égaler le
+    // fond RÉEL DE SA LIGNE, sa couleur de sélection — exactement ce que
+    // audit-contraste.js mesure déjà (ratio 1, faux positif VOULU, cf. son
+    // commentaire "Faux positif UNIQUE et voulu"). Les DEUX preuves survivent
+    // ici : le membre ordinaire garde le test d'origine (étape 12, régression
+    // thème clair), le membre actif obtient le sien.
     const THEMES = {
       dark: { '--vscode-sideBar-background': '#252526', '--vscode-editor-background': '#1e1e1e' },
       light: { '--vscode-sideBar-background': '#f3f3f3', '--vscode-editor-background': '#ffffff' },
@@ -2376,12 +2584,21 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const setVars = Object.entries(vars).map(([k, v]) => `document.documentElement.style.setProperty('${k}','${v}')`).join(';');
       await cdp.evaluate(`(() => { ${setVars}; })()`);
       await sleep(80);
-      const ringVsBody = await cdp.evaluate(`(() => {
-        const ico = document.querySelector('#flow .grp-body .member .conv .ico');
-        return { ringBg: getComputedStyle(ico, '::after').backgroundColor, bodyBg: getComputedStyle(document.body).backgroundColor };
+      const rings = await cdp.evaluate(`(() => {
+        const icos = [...document.querySelectorAll('#flow .grp-body .member .conv .ico')];
+        const ordinary = icos.find((n) => !n.closest('.conv').classList.contains('active'));
+        const active = icos.find((n) => n.closest('.conv').classList.contains('active'));
+        return {
+          ordinaryRingBg: ordinary && getComputedStyle(ordinary, '::after').backgroundColor,
+          bodyBg: getComputedStyle(document.body).backgroundColor,
+          activeRingBg: active && getComputedStyle(active, '::after').backgroundColor,
+          activeRowBg: active && getComputedStyle(active.closest('.conv')).backgroundColor,
+        };
       })()`);
-      check(`thème ${name} : le fond de l'anneau égale EXACTEMENT le fond réel du panneau (même chaîne de variables)`,
-        ringVsBody.ringBg === ringVsBody.bodyBg && ringVsBody.ringBg !== 'rgba(0, 0, 0, 0)', JSON.stringify(ringVsBody));
+      check(`thème ${name} : le fond de l'anneau d'un membre ORDINAIRE égale EXACTEMENT le fond réel du panneau (même chaîne de variables)`,
+        rings.ordinaryRingBg === rings.bodyBg && rings.ordinaryRingBg !== 'rgba(0, 0, 0, 0)', JSON.stringify(rings));
+      check(`thème ${name} : le fond de l'anneau du membre ACTIF égale le fond RÉEL DE SA LIGNE (couleur de sélection, plus le fond du panneau — 2026-08-26)`,
+        rings.activeRingBg === rings.activeRowBg && rings.activeRingBg !== rings.bodyBg && rings.activeRingBg !== 'rgba(0, 0, 0, 0)', JSON.stringify(rings));
     }
     for (const k of Object.keys(THEMES.dark)) await cdp.evaluate(`document.documentElement.style.removeProperty('${k}')`);
 
@@ -3053,18 +3270,36 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       await sleep(180);
     };
 
-    // (a) Sans filiation : DEUX blocs frères, et la ligne a2 revendiquée deux
-    // fois — c'est l'état d'avant, qu'on mesure pour que l'écart soit un fait
-    // et pas une impression. `emptySlots` compte les emplacements de membre
-    // restés vides : c'est la signature exacte du bug.
+    // (a) Sans filiation : DEUX blocs frères, la ligne a2 revendiquée deux fois
+    // (membre de A, maîtresse de B) — c'est l'état d'avant, qu'on mesure pour
+    // que l'écart soit un fait et pas une impression.
+    //
+    // AMENDEMENT 2026-08-27 — `emptySlots` valait 1 ici jusqu'à cette date :
+    // le dernier bloc rendu prenait le nœud de conversation et le premier
+    // gardait un emplacement VIDE, donc invisible. Ce n'était pas seulement la
+    // preuve « il faut la filiation », c'était aussi une ligne PERDUE à
+    // l'écran, sans filiation pour la sauver quand les deux blocs sont bien
+    // deux blocs (lot dont la maîtresse est le membre d'un autre lot que la
+    // filiation a refusé de nester — ou deux membres poussés sur la même conv
+    // par une redirection husk→successeur, cf. panel.js `rowOwner`). Le
+    // panneau tranche désormais AVANT de rendre : le membre garde sa ligne,
+    // la tête de B retombe sur son repli dégradé. `emptySlots` doit donc
+    // valoir 0 ici comme partout ailleurs — plus jamais d'emplacement vide,
+    // quelle que soit la cause de la double revendication.
     await pushNest([mkA(), mkB(false)]);
     const nestBefore = await cdp.evaluate(`(() => ({
       rootBlocks: document.querySelectorAll('#flow > .grp').length,
       emptySlots: Array.from(document.querySelectorAll('#flow .m-slot')).filter(s => !s.children.length).length,
       convNodes: document.querySelectorAll('.conv').length,
+      // La ligne disputée reste chez le MEMBRE (A/m2), jamais escamotée.
+      a2InMember: !!Array.from(document.querySelectorAll('#flow .member .conv .title'))
+        .find(t => t.textContent === 'A task two — opens B'),
+      // …et la tête de B affiche son repli dégradé plutôt qu'une capsule vide.
+      bMasterFallback: !!document.querySelector('.grp-master-fallback'),
     }))()`);
-    check('(témoin, sans filiation) deux blocs frères, et un emplacement de membre reste VIDE — le bug que ce lot corrige',
-      nestBefore.rootBlocks === 2 && nestBefore.emptySlots === 1, JSON.stringify(nestBefore));
+    check('(témoin, sans filiation) deux blocs frères, AUCUN emplacement vide : le membre garde sa ligne',
+      nestBefore.rootBlocks === 2 && nestBefore.emptySlots === 0 && nestBefore.a2InMember === true,
+      JSON.stringify(nestBefore));
 
     // (b) Avec filiation : un seul bloc racine, grip du sous-lot JUSTE AVANT
     // sa ligne de tête, corps JUSTE APRÈS — canon de la maîtresse (amendement
@@ -3141,12 +3376,58 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… et leur bord gauche, au pixel', Math.abs(axes.headLeft - axes.sisterLeft) < 0.5, JSON.stringify(axes));
     check('décalage du CORPS du sous-lot = 28px exactement (minimum prouvé : à 14 son cadre traverse le rail du parent)',
       Math.abs((axes.subBodyLeft - axes.parentBodyLeft) - 28) < 0.5, JSON.stringify(axes));
-    check('… et sa GRIP au même décalage (bleed annulé côté gauche)',
-      Math.abs((axes.subGripLeft - axes.parentBodyLeft) - 28) < 0.5, JSON.stringify(axes));
+    check('… mais sa GRIP, elle, reste PLEINE LARGEUR comme la ligne d\'accueil (2026-08-27, variante B retenue sur capture : la boîte ne décale plus, seul son contenu l\'est via un padding)',
+      Math.abs(axes.subGripLeft - axes.parentBodyLeft) < 0.5, JSON.stringify(axes));
     check('deux rails, deux axes : celui de l\'enfant est 28px à droite de celui du parent',
       Math.abs((axes.subRail - axes.parentRail) - 28) < 0.5, JSON.stringify(axes));
     check('les anneaux de l\'enfant tombent sur le rail de l\'enfant, pas sur celui du parent',
       Math.abs(axes.childIco - axes.subRail) < 0.5, JSON.stringify(axes));
+
+    // (c bis) DEUX MEMBRES, UNE SEULE CONVERSATION (2026-08-27). Le store
+    // garantit qu'un sessionId n'appartient qu'à un membre (groups.js
+    // `attach`) : le doublon ne peut donc venir que d'une redirection
+    // husk→successeur (supersede.js), qui pousse le membre d'un vieux lot sur
+    // la conversation d'un lot voisin. Vécu ce jour-là : le lot le plus ancien
+    // se retrouvait réduit à sa POIGNÉE — sa ligne prise par le voisin, son
+    // emplacement vide donc invisible, et rien à l'écran pour le retirer.
+    // Le lien DIRECT garde la ligne, quel que soit l'ordre du store (ici le
+    // redirigé est rendu EN PREMIER, exprès) ; le redirigé retombe sur sa
+    // ligne « en attente », visible, avec son prompt.
+    const dupGroup = (id, stamp, hue, key, prompt, extra) => ({
+      id, name: 'Dup ' + id, hue, collapsed: false, stamp,
+      launchedWave: 1, nextWave: null, waveNotice: null, done: false,
+      nestedUnder: null, master: null,
+      members: [nmember(key, prompt, 'a1', extra)],
+    });
+    await pushNest([
+      dupGroup('Q', '09:00', 30, 'q1', 'Vieux lot — membre redirigé', { redirected: true }),
+      dupGroup('P', '10:00', 210, 'p1', 'Lot courant — lien direct'),
+    ]);
+    const dup = await cdp.evaluate(`(() => {
+      const blockOf = (stamp) => Array.from(document.querySelectorAll('#flow > .grp'))
+        .find(g => (g.querySelector('.grp-label') || {}).textContent === 'batch ' + stamp);
+      const P = blockOf('10:00'), Q = blockOf('09:00');
+      return {
+        blocks: document.querySelectorAll('#flow > .grp').length,
+        emptySlots: Array.from(document.querySelectorAll('#flow .m-slot')).filter(s => !s.children.length).length,
+        // Un seul nœud pour la conv disputée, et il est chez le lien DIRECT.
+        rowNodes: Array.from(document.querySelectorAll('.conv .title')).filter(t => t.textContent === 'A task one').length,
+        rowInDirect: !!(P && Array.from(P.querySelectorAll('.conv .title')).find(t => t.textContent === 'A task one')),
+        rowInRedirected: !!(Q && Array.from(Q.querySelectorAll('.conv .title')).find(t => t.textContent === 'A task one')),
+        // …et le perdant montre bien quelque chose : sa ligne « en attente ».
+        redirectedPending: !!(Q && Q.querySelector('.m-pending')),
+        redirectedPromptShown: !!(Q && Array.from(Q.querySelectorAll('.m-prompt'))
+          .find(p => p.textContent === 'Vieux lot — membre redirigé')),
+      };
+    })()`);
+    check('conv revendiquée par deux membres : un seul nœud, chez le lien DIRECT (l\'ordre du store ne décide pas)',
+      dup.rowNodes === 1 && dup.rowInDirect === true && dup.rowInRedirected === false, JSON.stringify(dup));
+    check('… le lot redirigé garde une ligne VISIBLE (« en attente » + son prompt), jamais un emplacement vide',
+      dup.emptySlots === 0 && dup.redirectedPending === true && dup.redirectedPromptShown === true, JSON.stringify(dup));
+    check('… et les deux lots restent des blocs à part entière', dup.blocks === 2, JSON.stringify(dup));
+    // Le panneau est un état PARTAGÉ entre les cas de cette section : on rend
+    // la scène imbriquée avant de continuer, sinon (d) mesure MON DOM.
+    await pushNest([mkA(), mkB(true)]);
 
     // (d) Les DEUX rails couvrent leurs propres anneaux, du premier au dernier.
     // Le bloc imbriqué s'intercale entre deux membres du parent : il ne doit pas
@@ -3298,10 +3579,13 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('grip du sous-lot : bas ouvert, coin bas-droit carré (même canon qu\'un lot racine avec master)',
       gripShape.borderBottomWidth === '0px' && gripShape.borderBottomRightRadius === '0px', JSON.stringify(gripShape));
     // La ligne de tête, elle, n'est PAS indentée (elle appartient au flux
-    // normal du parent) — c'est sa CAPSULE (pseudo, décalée à --nest-indent
-    // DEPUIS le bord de m-head) qui tombe au même endroit que la grip.
-    check('bords gauche/droite de la grip et de la capsule de la ligne de tête alignés au pixel (un seul cadre continu)',
-      Math.abs(gripShape.gripLeft - (gripShape.headLeft + 28)) < 0.5 && Math.abs(gripShape.gripRight - gripShape.headRight) < 0.5, JSON.stringify(gripShape));
+    // normal du parent). RÉVISÉ 2026-08-27 (constat user sur capture réelle,
+    // panneau étroit — variante B) : la grip ne décale plus SA BOÎTE non plus,
+    // seul son contenu (chevron/libellé) l'est par un padding — les deux
+    // boîtes tombent donc au même bord, gauche ET droit, sans qu'aucune des
+    // deux n'ait dû bouger.
+    check('bords gauche/droite de la grip et de la ligne d\'accueil alignés au pixel (un seul cadre continu)',
+      Math.abs(gripShape.gripLeft - gripShape.headLeft) < 0.5 && Math.abs(gripShape.gripRight - gripShape.headRight) < 0.5, JSON.stringify(gripShape));
     check('⌂ masqué sur la grip d\'un sous-lot (sa maîtresse est déjà la ligne du dessous)', gripShape.masHidden === true, JSON.stringify(gripShape));
     check('✕ (dissolution) présent sur la grip du sous-lot', gripShape.killPresent === true, JSON.stringify(gripShape));
 
@@ -3386,9 +3670,13 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       && nestBack.grips === 2 && nestBack.masterHeads === 2 && nestBack.hosts === 0,
       JSON.stringify(nestBack));
 
-    // (j) Chaîne à trois niveaux : C sous B sous A. Chaque cran ajoute 28px, et
-    // il n'y a toujours qu'un seul bloc racine — deux grips et deux corps
-    // imbriqués (B sous A, C sous B).
+    // (j) Chaîne à trois niveaux : C sous B sous A. RÉVISÉ 2026-08-27
+    // (variante B) : la grip ne décale plus sa propre boîte — seul le CORPS
+    // d'un sous-lot reste indenté de 28px par cran. La grip de B, posée
+    // directement dans le corps de A, tombe donc à 0 ; celle de C, posée dans
+    // le corps DE B (déjà décalé de 28), hérite de ce 28 sans qu'un second
+    // cran ne s'ajoute. Il n'y a toujours qu'un seul bloc racine — deux grips
+    // et deux corps imbriqués (B sous A, C sous B).
     const cConvs = nestConvs.concat([nconv('c1', 'C task one', { groupId: 'C', state: 'busy' })]);
     const groupC = {
       id: 'C', name: 'Grandchild batch', hue: 120, collapsed: false, stamp: '16:05',
@@ -3412,8 +3700,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     })()`);
     check('chaîne à 3 niveaux : toujours UN seul bloc racine, deux grips et deux corps imbriqués',
       nestChain.rootBlocks === 1 && nestChain.grips === 2 && nestChain.bodies === 2, JSON.stringify(nestChain));
-    check('… chaque cran décale de 28px de plus (28 puis 56)',
-      nestChain.depths.sort((a, b) => a - b).join(',') === '28,56', JSON.stringify(nestChain));
+    check('… la grip de B est pleine largeur (0), celle de C hérite seulement du décalage du CORPS de B (28) — pas de cumul 28+28',
+      nestChain.depths.sort((a, b) => a - b).join(',') === '0,28', JSON.stringify(nestChain));
 
     // (k) Rang dans le flux : le bloc parent parle pour TOUT ce qu'il affiche,
     // sous-lots compris. Ici l'onglet le plus à gauche du bloc appartient au

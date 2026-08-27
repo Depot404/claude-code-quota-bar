@@ -28,8 +28,12 @@ Publish.ps1
 # Relevés internes sur le bundle de l'extension officielle et maquette HTML de
 # travail : ni doc utilisateur, ni code exécuté — repérés par le contrôle
 # liste-blanche du 2026-07-24 (embarqués depuis leur création faute de règle).
-NOTES_api_claude_code_extension.md
-NOTES_architecture.md
+# Motif, PAS deux noms : ces deux-la etaient exclus nommement, et
+# NOTES_exposition_auth_2026-08-25.md — cree apres la regle — est passe au
+# travers jusque DANS le paquet 2.85.0 publie (audit interne de 24 Ko : chemins
+# du poste, identite de l'editeur, deliberation sur la politique d'usage). Une
+# liste nominative ne protege que du fichier deja connu.
+NOTES_*.md
 MOCKUP_*.html
 # Planches de validation visuelle (captures du panneau, base64) : artefact de
 # revue interne, ~1 Mo — jamais dans le paquet publié.
@@ -44,6 +48,10 @@ images/screenshot*.png
 # de fraicheur des captures, qui tourne ici et dans le clone public. Le paquet
 # n'embarque pas les bancs, donc il n'a rien a faire de ce fichier.
 images/shots-source.json
+# GIF de demonstration du README : meme raison que les screenshot*.png
+# ci-dessus — la fiche les resout via le repo GitHub, et ils pesent a eux
+# deux l'essentiel du poids du paquet.
+images/demo-*.gif
 
 # Captures d ecran de la procedure d upload (publish-vsix-marketplace.mjs) :
 # elles montrent le back-office Marketplace de l editeur - nom, adresse mail,

@@ -65,6 +65,26 @@ const GROUP = [{ id: 'g1', name: 'Lot de démonstration', stamp: '14:12', hue: 2
 const MASTER_CONV = { id: 'm1', title: 'Tête de lot', model: 'Opus 4.8', effort: 'high', ctx: ctx(52),
   cost: cost(1.6), state: 'done', acked: true, active: false, tabOpen: true };
 
+// Bloc claude-convs joué tel quel dans le champ prompt pour mettre la ligne
+// dans son état « maîtresse désignée au collage » (plan agrafe 2026-08-27) —
+// la classe .master-target n'est JAMAIS posée à la main ici : elle doit venir
+// du vrai applyBlockPaste + de la vraie réponse masterResolved, sinon l'audit
+// mesurerait un état que le panneau ne produit pas.
+const MASTER_BLOCK = [
+  '```claude-convs',
+  'group: Audit',
+  'model: sonnet',
+  'effort: medium',
+  'stage: 1',
+  'Premiere tache de mesure, assez longue pour depasser le seuil de recherche.',
+  '[---]',
+  'model: opus',
+  'effort: high',
+  'stage: 2',
+  'Seconde tache de mesure, elle aussi assez longue pour la meme raison.',
+  '```',
+].join('\n');
+
 const state = (conv, withGroup) => ({
   conversations: withGroup ? [MASTER_CONV, Object.assign({}, conv, { groupId: 'g1' })] : [conv, ...OTHERS],
   groups: withGroup ? GROUP : [],
@@ -103,8 +123,11 @@ class Cdp {
 // Mesure exécutée DANS la page : contraste WCAG de chaque élément de la ligne
 // active contre le fond réel de la ligne (transparences composées).
 const PROBE = `(() => {
-  const row = document.querySelector('.conv.active');
-  if (!row) return { error: 'pas de ligne active' };
+  // Cible par défaut la ligne SÉLECTIONNÉE ; window.__auditSel la déplace sur
+  // une autre ligne (ex. la maîtresse désignée au collage, qui n'est pas
+  // forcément celle qu'on regarde).
+  const row = document.querySelector(window.__auditSel || '.conv.active');
+  if (!row) return { error: 'pas de ligne a mesurer (' + (window.__auditSel || '.conv.active') + ')' };
   // Passer par un canvas, PAS par une regex sur rgb() : getComputedStyle rend
   // les color-mix() en color(srgb ...) -- c'est-a-dire, ici, exactement les
   // couleurs de la ligne selectionnee. Une regex rgb() les rendait invisibles
@@ -129,7 +152,26 @@ const PROBE = `(() => {
   const ratio = (a, b) => { const l1 = lum(a), l2 = lum(b); const hi = Math.max(l1, l2), lo = Math.min(l1, l2); return (hi + 0.05) / (lo + 0.05); };
   const hex = (c) => '#' + [c.r, c.g, c.b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
 
-  const rowBg = parse(getComputedStyle(row).backgroundColor);
+  // FOND RÉEL de la ligne, et non sa seule backgroundColor. Deux cas que la
+  // lecture naïve ratait :
+  //  - une ligne NON sélectionnée ne peint rien : son fond est celui du
+  //    panneau, qu'il faut aller chercher chez ses ancêtres (la version
+  //    précédente rendait null et plantait) ;
+  //  - une ligne maîtresse peint sa teinte en CALQUE (background-image), que
+  //    backgroundColor ne voit pas — on la relit sur la custom property
+  //    animée, qui est la couleur exactement peinte à cette image.
+  const bgOf = (el) => {
+    let n = el, acc = null;
+    while (n) {
+      const c = parse(getComputedStyle(n).backgroundColor);
+      if (c) { acc = acc ? over(acc, c) : c; if (c.a >= 0.999) return acc; }
+      n = n.parentElement;
+    }
+    return acc || { r: 255, g: 255, b: 255, a: 1 };
+  };
+  const rowTint = row.classList.contains('master-target')
+    ? parse(getComputedStyle(row).getPropertyValue('--master-cue-bg')) : null;
+  const rowBg = rowTint ? over(rowTint, bgOf(row)) : bgOf(row);
   const out = [];
   const label = (el) => {
     const cls = (el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className) || '';
@@ -219,7 +261,10 @@ async function run() {
     await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
     await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 400, height: 1200, deviceScaleFactor: 1, mobile: false });
-    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.acquireVsCodeApi = () => ({ postMessage(){}, getState(){}, setState(){} });' });
+    // Le stub GARDE les messages sortants : c'est ainsi qu'on relit le numéro
+    // de collage réellement émis par le webview pour lui répondre, au lieu de
+    // l'inventer (la réponse est datée du collage, cf. panel.js).
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__sent = []; window.acquireVsCodeApi = () => ({ postMessage(m){ window.__sent.push(m); }, getState(){}, setState(){} });' });
     await cdp.send('Page.navigate', { url: fileUrl });
     await sleep(700);
 
@@ -230,12 +275,119 @@ async function run() {
       report[theme] = [];
       for (const c of CASES) {
         for (const inGroup of [false, true]) {
-          const conv = Object.assign({}, BASE_CONV, c.extra);
-          await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: state(conv, inGroup) })}, '*')`);
+          // asMaster : la MÊME ligne, une fois ordinaire, une fois désignée
+          // conversation maîtresse par un collage — c'est-à-dire avec le fond
+          // teinté de la respiration. Le fond change, donc TOUT ce que la
+          // ligne porte doit être remesuré dessus (règle du dossier : « tout
+          // fond saturé posé sous des éléments existants »).
+          for (const asMaster of [false, true]) {
+            const conv = Object.assign({}, BASE_CONV, c.extra);
+            await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: state(conv, inGroup) })}, '*')`);
+            await sleep(180);
+            const armed = await cdp.evaluate(`(() => {
+              const ta = document.querySelector('#batchForm .task-top textarea.inp');
+              if (!ta) return 'pas de champ prompt';
+              window.__sent.length = 0;
+              ta.value = ${JSON.stringify(asMaster ? MASTER_BLOCK : '')};
+              ta.dispatchEvent(new Event('change', { bubbles: true }));
+              if (!${asMaster}) return 'off';
+              const ask = window.__sent.filter((m) => m && m.type === 'resolveMasterPaste').pop();
+              if (!ask) return 'aucune recherche demandee';
+              window.postMessage({ type: 'masterResolved', seq: ask.seq, sessionId: ${JSON.stringify(BASE_CONV.id)},
+                title: ${JSON.stringify(BASE_CONV.title)}, matches: 1, reason: 'single-match', via: 'search' }, '*');
+              return 'on';
+            })()`);
+            if (asMaster && armed !== 'on') { console.error('  ' + theme + ' / ' + c.name + ' → ' + armed); continue; }
+            await sleep(140);
+            if (asMaster) {
+              // AU PIC de la respiration, et mesuré sur l'animation RÉELLE :
+              // on la met en pause à mi-cycle plutôt que d'espérer tomber au
+              // bon moment. 600ms = la moitié de --master-cue-period (1,2s).
+              const frozen = await cdp.evaluate(`(() => {
+                const row = document.querySelector('.conv.master-target');
+                if (!row) return 'aucune ligne maitresse';
+                const anims = document.getAnimations().filter((a) => a.animationName === 'master-breathe');
+                if (!anims.length) return 'aucune animation master-breathe';
+                anims.forEach((a) => { a.pause(); a.currentTime = 600; });
+                return 'ok';
+              })()`);
+              if (frozen !== 'ok') { console.error('  ' + theme + ' / ' + c.name + ' → ' + frozen); continue; }
+              await sleep(60);
+            }
+            const r = await cdp.evaluate(PROBE);
+            if (r && r.error) { console.error('  ' + theme + ' / ' + c.name + ' → ' + r.error); continue; }
+            report[theme].push({
+              cas: c.name + (inGroup ? ' (membre de lot)' : '') + (asMaster ? ' [maitresse au pic]' : ''),
+              rowBg: r.rowBg, items: r.items, html: r.html,
+            });
+          }
+        }
+      }
+
+      // La maîtresse NON SÉLECTIONNÉE — le cas de loin le plus fréquent, et
+      // celui que le cadrage a chiffré (titre sur le fond au pic). Mesuré à
+      // part parce que la boucle ci-dessus sonde toujours la ligne
+      // sélectionnée : ici c'est une AUTRE ligne qui porte la teinte, sur le
+      // fond du panneau et non sur celui de la sélection.
+      // TÉMOIN OBLIGATOIRE : la même ligne SANS la teinte. Une ligne non
+      // sélectionnée n'avait jamais été sondée jusqu'ici, et plusieurs de ses
+      // couleurs sont sous le seuil PAR DESIGN sur le fond du panneau (la
+      // piste des barres à 12% du texte, le ✓ d'une conversation terminée et
+      // lue à 25% d'alpha). Sans témoin, on attribuerait ces écarts à la
+      // teinte qu'on vient de poser — le suffixe « [temoin sans teinte] »
+      // rend la comparaison lisible dans le rapport JSON.
+      for (const inGroup of [false, true]) {
+        const targetId = inGroup ? MASTER_CONV.id : OTHERS[0].id;
+        const sel = '#flow .conv';
+        for (const tinted of [false, true]) {
+          await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: state(Object.assign({}, BASE_CONV), inGroup) })}, '*')`);
           await sleep(180);
+          const armed = await cdp.evaluate(`(() => {
+            const ta = document.querySelector('#batchForm .task-top textarea.inp');
+            if (!ta) return 'pas de champ prompt';
+            window.__sent.length = 0;
+            ta.value = ${JSON.stringify(MASTER_BLOCK)};
+            ta.dispatchEvent(new Event('change', { bubbles: true }));
+            if (!${tinted}) {
+              ta.value = '';
+              ta.dispatchEvent(new Event('change', { bubbles: true }));
+              return 'off';
+            }
+            const ask = window.__sent.filter((m) => m && m.type === 'resolveMasterPaste').pop();
+            if (!ask) return 'aucune recherche demandee';
+            window.postMessage({ type: 'masterResolved', seq: ask.seq, sessionId: ${JSON.stringify(targetId)},
+              title: 'x', matches: 1, reason: 'single-match', via: 'search' }, '*');
+            return 'on';
+          })()`);
+          if (armed !== (tinted ? 'on' : 'off')) { console.error('  ' + theme + ' / maitresse non selectionnee → ' + armed); continue; }
+          await sleep(140);
+          const frozen = await cdp.evaluate(`(() => {
+            // Le témoin vise la MÊME ligne (par identité, pas par classe) pour
+            // que la comparaison porte sur la seule teinte.
+            const row = [...document.querySelectorAll(${JSON.stringify(sel)})]
+              .find((n) => (n.title || '').indexOf(${JSON.stringify(targetId === MASTER_CONV.id ? MASTER_CONV.title : OTHERS[0].title)}) === 0);
+            if (!row) return 'ligne cible introuvable';
+            if (row.classList.contains('active')) return 'la cible est la ligne selectionnee, cas deja couvert';
+            if (${tinted}) {
+              if (!row.classList.contains('master-target')) return 'la teinte n a pas ete posee';
+              const anims = document.getAnimations().filter((a) => a.animationName === 'master-breathe');
+              if (!anims.length) return 'aucune animation master-breathe';
+              anims.forEach((a) => { a.pause(); a.currentTime = 600; });
+            } else if (row.classList.contains('master-target')) return 'teinte residuelle sur le temoin';
+            row.setAttribute('data-audit-target', '1');
+            window.__auditSel = '[data-audit-target]';
+            return 'ok';
+          })()`);
+          if (frozen !== 'ok') { console.error('  ' + theme + ' / maitresse non selectionnee → ' + frozen); continue; }
+          await sleep(60);
           const r = await cdp.evaluate(PROBE);
-          if (r && r.error) { console.error('  ' + theme + ' / ' + c.name + ' → ' + r.error); continue; }
-          report[theme].push({ cas: c.name + (inGroup ? ' (membre de lot)' : ''), rowBg: r.rowBg, items: r.items, html: r.html });
+          await cdp.evaluate(`(() => { window.__auditSel = null;
+            document.querySelectorAll('[data-audit-target]').forEach((n) => n.removeAttribute('data-audit-target')); })()`);
+          if (r && r.error) { console.error('  ' + theme + ' / maitresse non selectionnee → ' + r.error); continue; }
+          report[theme].push({
+            cas: 'ligne non selectionnee' + (inGroup ? ' (tete de lot)' : '') + (tinted ? ' [maitresse au pic]' : ' [temoin sans teinte]'),
+            rowBg: r.rowBg, items: r.items, html: r.html,
+          });
         }
       }
     }

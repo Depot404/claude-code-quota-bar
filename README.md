@@ -2,18 +2,14 @@
 
 ![QuotaSaver panel — a batch group with waves above the flat conversation list (every state: working, waiting for you, done unread, done read, interrupted), the New conversation form, and quota bars coloured by burn-rate pace](images/screenshot.png)
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="images/demo-dark.gif">
-  <source media="(prefers-color-scheme: light)" srcset="images/demo-light.gif">
-  <img alt="Demo: pasting a claude-convs block into the New conversation form, then wave 1 launching and finishing, wave 2 launching, and the group settling as done" src="images/demo-light.gif">
-</picture>
+![Demo: pasting a claude-convs block into the New conversation form, then wave 1 launching and finishing (one task waiting for you, checkmarks fading as they're read, quota bars climbing and changing colour), wave 2 opening then launching, and the group settling as done](images/demo-dark.gif)
 
 **See which of your Claude Code conversations are actually working, click one to jump straight to its tab — in any VS Code window, even a hidden one — launch a whole batch of conversations in ordered waves from one paste, and hear the difference between "done" and "Claude needs you".**
 
 Most Claude Code usage trackers on the Marketplace stop at a status-bar percentage. This one is a full panel, docked in the **Secondary Side Bar** (right side):
 
 - **Every conversation in the current workspace, with live state** — working / waiting for you / done / stale — not just the tab dot VS Code's own extension shows (a blue dot for a pending permission, an orange one for a finished hidden tab — nothing at all for a conversation asking you a question). A finished conversation keeps a **bright ✓ until you've read it** ([read receipts](#read-receipts))
-- **Launch several conversations at once** — type prompts by hand or **paste one `claude-convs` block**: each task gets its own **model and effort**, tasks are ordered in **waves** (wave 2 opens when wave 1 is done), and the batch lives on as a **group** in the panel, master conversation on top ([Launching conversations](#launching-conversations--one-or-a-whole-batch))
+- **Launch several conversations at once** — type prompts by hand or **paste one `claude-convs` block**: each task gets its own **model and effort**, tasks are ordered in **waves** (wave 2 opens when wave 1 is done — or waits for your click, one switch per batch), and the batch lives on as a **group** in the panel, master conversation on top ([Launching conversations](#launching-conversations--one-or-a-whole-batch))
 - **Click a row → the right tab comes to the front**, in any editor group, **in any VS Code window** — VS Code exposes no API to do this, so the panel works around it (see [Clicking a conversation](#clicking-a-conversation))
 - **Two distinct sounds** — one when a conversation finishes, a different one when Claude is waiting on you (a question, a permission prompt) — so you don't have to keep the panel visible to notice ([Sounds](#sounds); off by default)
 - **A quota bar per active window** — 5h, 7d, and any model-scoped weekly limit the API is currently reporting (e.g. a promotional Fable allowance) — coloured by **projected pace** (are you on track to run out before the reset, not just "how full does it look right now"), with a **▲ marker** showing where you "should" be at this instant if you paced usage evenly across the window
@@ -49,7 +45,9 @@ The **New conversation** form at the bottom of the conversation list opens real 
 
 - **One prompt = one conversation**, with an explicit **model** (haiku / sonnet / opus / fable) and **effort** (low → max), applied through per-conversation environment variables (`ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`) so the choice governs that CLI without touching your defaults.
 - **Several prompts = a batch.** Click **+ Add task**, or simply **paste a `claude-convs` block into any prompt field** — the form recognizes it and prefills everything: one task per section, model, effort, waves, group name. Type **`/handoffs`** in any Claude conversation to have it end its reply with exactly that block, ready to paste: plan in one conversation, paste once, launch everything.
-- **Waves order the batch.** Tasks in wave 1 open immediately; the next wave opens on its own once every conversation of the previous one has finished. Move a task between waves with ◂ ▸, or add a **wave divider** to split what runs in parallel from what must wait.
+- **A pasted block shows what it will do, before you click Create.** The conversation the block was written in is looked up at paste time: it breathes in the list above, a staple links it to the form, and the future conversations are previewed greyed out underneath — dotted square, prompt, intended model and effort, with the block's own wave separators. When the lookup fails the form says so rather than staying silent — *No master conversation found — standalone batch*, or *… none kept* when several conversations contain the same block — and points at **Set master…** to link it by hand.
+- **Waves order the batch.** Tasks in wave 1 open immediately. What happens next is up to the **manual / auto switch on the batch header**: in **auto** (the default) the next wave opens on its own once every conversation of the previous one has finished; in **manual** nothing ever opens by itself — a **▶ wave n** button appears as soon as the current wave is done, and clicking it is the only way forward. The switch belongs to the batch, so two batches running side by side can be on different regimes, and the choice survives a window reload.
+- **Auto only advances on a wave it can prove is finished.** A conversation the panel has lost sight of — tab closed, state file expired — is *displayed* as finished, but that is a presumption, and a presumption never opens a tab: the wave simply stays put and ▶ remains available. A queued task's wave number is itself a menu — **wave n ▾** — listing every wave still in the queue (the current one marked “here”) plus **new wave at the end**: one click sends the task there, instead of walking it across one wave at a time. In the form, before anything is created, the **WAVE ◂ ▸** arrows on each task do the same job, and a **wave divider** splits what runs in parallel from what must wait.
 
 A launched batch lives on as a **group** in the panel:
 
@@ -61,7 +59,7 @@ A launched batch lives on as a **group** in the panel:
 - **Each member row is a live conversation row** — same states, same `model · effort` badge, same context bar as the flat list, down to the pixel: it *is* the same row rendering, and nothing in a group is allowed to shorten it. A task whose conversation hasn't opened yet shows a waiting ring on the group's rail.
 - **Group actions only ever touch metadata, and the panel never removes a row.** The ⤴ arrow that appears on hover takes a conversation *out of its group* — it reappears in the flat list, its tab untouched — and it means the same thing on every row, master included. Dissolving the whole batch is a different reach, so it lives on a different object: ✕ on the group's own header row, and it keeps every conversation too. Nothing here closes or interrupts anything: the only way to make a row disappear is to close its tab in VS Code. Members whose tab you've closed leave the view; the whole group leaves once everything is done and closed — the panel shows what's left to do.
 - **In "Tab order", a group takes its place in the flow** at the rank of its leftmost tab (master included): a conversation whose tab sits to the left of the group's shows *above* it. Inside the group, order is always by wave. The other sort modes keep groups on top.
-- **▶ wave n** on the next wave's header launches it early, without waiting for the current one to finish.
+- **▶ wave n** only ever exists in **manual**, on the next wave's header: it appears once the current wave is done (or is stuck on a task that will never finish on its own), stands out in the theme's action colour, and fires straight away — the click *is* the decision. In **auto**, no wave separator is ever clickable, not even a stuck one: the only way to open a wave by hand is to flip the batch to manual first.
 
 ### Nested batches
 
@@ -248,6 +246,12 @@ There's no way to detect the rename itself, but the *symptom* is detectable: a c
 
 VS Code's extension host only ever sees tabs through a mirror synced from the renderer over RPC. On rare occasions that mirror can freeze for an entire window — no error, no event — while the real tab bar keeps changing normally. When that happens, clicking the right row in the panel still moves the highlight (the click itself is trusted, ahead of a mirror that no longer is), but the automatic self-repair on tab switches stops working until the window is reloaded. A `VS Code stopped reporting tab changes — highlight may lag. Reloading the window fixes it.` line appears under the conversation list when this is detected, and clears on its own once the mirror responds again.
 
+### When the highlight is corrected
+
+The tab mirror can also adopt a wrong active tab and then never emit anything to correct it — measured at 14 minutes of wrong highlight, ended only by a click. So the panel keeps a judge of last resort: the editor layout VS Code's **renderer** persists to workspace storage — the process that actually paints your screen, recorded by exact session identity rather than by tab label. Whenever that record is more recent than the tab tracker's last change of mind and disagrees with it, the record wins and the highlight moves back where it belongs.
+
+A correction is never silent: a dismissible `⚠ … highlight was out of sync and has been corrected` banner above the list gives the time, the conversation the highlight moved to, and what the panel was wrongly showing. It only fires on a disagreement that has lasted a few seconds — filling a *blank* highlight is never reported (nothing wrong was on screen), and a transient the tracker resolves on its own stays quiet.
+
 ### Frozen panel feed
 
 The same class of freeze can hit the opposite direction: the channel that carries state pushes from the extension host *to* the panel's webview. The engine keeps computing correct states, but the panel keeps painting the last one it received — and since a CSS spinner animates locally, a finished conversation can keep "working" on screen indefinitely, which is the worst possible lie. The panel therefore watches its own feed: while visible, 60 s without receiving anything makes it re-request the state (that direction survives these freezes in practice — clicks kept working during the incident that motivated this); after 3 minutes with no answer it shows `The panel stopped receiving updates — statuses shown may be stale. Reloading the window fixes it.` and pauses **every** animation, so nothing on screen claims activity the panel cannot prove. The first state that arrives clears all of it, and returning to the panel after it was hidden requests a fresh state immediately.
@@ -413,6 +417,8 @@ Below each bar, a small ▲ sits at **% of the window already elapsed** — the 
 It's masked (no arrow) under the same conditions as the colour: no reset time, reset already past, or the window barely started. It's capped at 100%.
 
 The arrow **repositions on its own**, without waiting for the next network poll: since its position is pure function of the current clock and the reset time (no data to fetch), the webview re-evaluates it locally every 30 seconds and pauses that timer while the panel isn't visible. Same for the colour — both stay accurate between the 5-minute quota fetches.
+
+Light **tick marks** cut each bar into equal segments — one per hour on the 5h window (5 of them), one per day on a 7-day one (7) — so the fill can be read against elapsed time without doing the arithmetic. They sit in their own thin rail between the fill and the ▲, never inside either. The count is derived from the window's real duration, never from its label.
 
 ### What actually filled the window
 

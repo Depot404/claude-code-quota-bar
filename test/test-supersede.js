@@ -212,6 +212,42 @@ map = computeSupersededBy([
 check('titres et premiers messages différents → aucune supplantation',
   Object.keys(map).length === 0, JSON.stringify(map));
 
+// VETO PAR LE PREMIER MESSAGE (2026-08-27) — le cas réel : deux lots
+// différents, deux plans différents, dix heures d'écart, MÊME titre. Le titre du
+// husk vient du store d'onglets de VS Code, qui garde ses entrées après la
+// fermeture de l'onglet : rien ne distingue plus les deux, sauf leur premier
+// message. Un successeur VIVANT ne rachète pas la divergence.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'tab-store', mtime: 100,
+      firstUser: 'Refactor the billing client and update its contract tests, then run the suite' }),
+  c({ sessionId: 'succ', title: 'Billing client refactor', mtime: 200, live: true, tabOpen: true,
+      firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
+]);
+check('même titre mais premiers messages divergents → aucune supplantation, même successeur vivant',
+  Object.keys(map).length === 0, JSON.stringify(map));
+
+// La contrepartie, à ne pas casser : même titre ET même premier message rejoué
+// = le vrai respawn, il DOIT toujours folder.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'tab-store', mtime: 100,
+      firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
+  c({ sessionId: 'succ', title: 'Billing client refactor', mtime: 200, live: true, tabOpen: true,
+      firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
+]);
+check('même titre ET même premier message rejoué → supplantation conservée (vrai respawn)',
+  map.husk === 'succ' && Object.keys(map).length === 1, JSON.stringify(map));
+
+// Un seul des deux côtés porte son premier message (transcript illisible) : pas
+// de veto possible, on retombe sur le groupement par titre — comportement
+// d'avant, comme toute source optionnelle de ce module.
+map = computeSupersededBy([
+  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'tab-store', mtime: 100 }),
+  c({ sessionId: 'succ', title: 'Billing client refactor', mtime: 200, live: true, tabOpen: true,
+      firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
+]);
+check('un seul firstUser connu → pas de veto, groupement par titre inchangé',
+  map.husk === 'succ' && Object.keys(map).length === 1, JSON.stringify(map));
+
 // firstUser absent partout (bancs existants, appelants qui ne le fournissent
 // pas) → repli exact sur le comportement d'avant, déjà couvert par le §1, mais
 // on le revérifie explicitement avec des titres divergents pour marquer la

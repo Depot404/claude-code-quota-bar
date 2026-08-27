@@ -32,26 +32,26 @@ const { createAckTracker } = require('./ack');
 // ack-journal.js pour le pourquoi de la méthode.
 const { logEvent: logAckEvent } = require('./ack-journal');
 const { convMatchesLabel } = require('./labels');
-const { createSessionTitles, createOpenSessionIds } = require('./session-titles');
+const { createSessionTitles, createOpenSessionIds, createRendererActive } = require('./session-titles');
 const { createSoundPlayer } = require('./sounds');
 // Fenêtre de stabilisation du tout premier rendu (lot micro-allègements
 // 2026-07-24) — cf. warmup.js pour le pourquoi (flash de conv fantôme post-reload).
 const { createBootSettler } = require('./warmup');
 // Création groupée de conversations (lot 1) : le métier est en Node pur dans
 // batch.js, l'orchestration du lancement dans launcher.js — ici, que du câblage.
-const { normalizeTasks, appendTasksAfterWave, conflictingEnvVars, createIntentStore, mismatchOf, readInheritSettings, MODELS, EFFORTS } = require('./batch');
-const { createBatchLauncher, OPEN_COMMAND: LAUNCH_OPEN_COMMAND, NEW_CONVERSATION_COMMAND: LAUNCH_NEW_CONVERSATION_COMMAND } = require('./launcher');
+const { normalizeTasks, appendTasksAfterWave, conflictingEnvVars, createIntentStore, mismatchOf, intentConfirmed, readInheritSettings, MODELS, EFFORTS } = require('./batch');
+const { createBatchLauncher, samePath, OPEN_COMMAND: LAUNCH_OPEN_COMMAND, NEW_CONVERSATION_COMMAND: LAUNCH_NEW_CONVERSATION_COMMAND } = require('./launcher');
 // Recalcul du message de « Create » (lot 6, correctif §3) : un membre lancé
 // mais dont aucun hook n'a encore tiré n'a pas d'entrée dans le snapshot de
 // state.js (le premier hook n'écrit qu'au premier Entrée) — le seul signal
 // disponible pour dire « l'onglet est toujours là, en attente » est le
 // registre des process CLI vivants, déjà utilisé par le rattachement étage 1.
-const { liveSessionIds } = require('./live-sessions.js');
+const { liveSessionIds, liveSessionEntries } = require('./live-sessions.js');
 // Groupes (lot 2) : le store est du Node pur (persistance injectée), le
 // rattachement par préfixe de prompt aussi — les deux se testent sans VS Code.
 const { createGroupStore, hueOf } = require('./groups');
 const { createPinStore } = require('./pins');
-const { matchPending, pendingForRelink } = require('./attach');
+const { matchPending, pendingForRelink, matchHeirs } = require('./attach');
 const { firstUserText } = require('./hooks/transcript.js');
 // Moteur de vagues (lot 4) : Node pur, ne connaît que `{wave, status}` — le
 // statut RÉEL de chaque membre (queued/launched/done/stale) est résolu ici,
@@ -366,8 +366,20 @@ function activate(context) {
     // `null` (onglet ailleurs, relayé) → rien à rapporter ICI : c'est la
     // fenêtre qui répondra au relais qui le fera, sur SON tracker.
     focusConv: (msg) => {
+      // Log INCONDITIONNEL, AVANT ackConversationById (2026-08-27, lot A
+      // surlignage) : ackConversationById sort tôt (state !== 'done') sans
+      // rien journaliser — un clic sur une ligne busy était donc invisible
+      // au journal. `convState` lu ici, une fois, pour ce même clic.
+      const sessionId = msg && msg.id;
+      const c = stateEngine ? stateEngine.getSnapshot().conversations.find((x) => x.sessionId === sessionId) : null;
+      logAckEvent('focus-click', {
+        sessionId, title: msg && msg.title, isTrusted: !!(msg && msg.isTrusted),
+        convState: c ? c.state : null,
+      });
       focusConversation(msg).then((label) => {
-        if (label && tabTracker) tabTracker.reportActivation(label);
+        if (label && tabTracker) {
+          tabTracker.reportActivation(label, { origin: 'panel-click', isTrusted: !!(msg && msg.isTrusted) });
+        }
         if (stateEngine) stateEngine.refresh();
       }).catch(() => {});
       ackConversationById(msg && msg.id);
@@ -376,6 +388,12 @@ function activate(context) {
     toggleCollapse: (msg) => toggleCollapse(msg && msg.section),
     setSortOrder: (msg) => setSortOrder(msg && msg.order),
     createBatch: (msg) => createBatch(msg),
+    // Conversation maîtresse cherchée DÈS LE COLLAGE (plan agrafe
+    // 2026-08-27), et pas seulement au « Create » : la filiation se voit
+    // AVANT de lancer quoi que ce soit. Rien n'est écrit nulle part — c'est
+    // une question, pas un acte ; le lien réel reste posé par createBatch, qui
+    // re-résout de son côté sur un état forcément plus frais.
+    resolveMasterPaste: (msg) => resolveMasterPaste(msg),
     // Actions de groupe (lot 2). Renommer / dissoudre / lier passent par les
     // boîtes NATIVES de VS Code (InputBox, QuickPick, modale) plutôt que par des
     // champs dans le webview : un push d'état (transition de conv, tick quota)
@@ -384,6 +402,8 @@ function activate(context) {
     renameGroup: (msg) => renameGroup(msg && msg.id),
     dissolveGroup: (msg) => dissolveGroup(msg && msg.id),
     toggleGroupCollapse: (msg) => toggleGroupCollapse(msg && msg.id),
+    // Interrupteur manuel/auto porté par l'en-tête du lot (2026-08-26).
+    setGroupWaveMode: (msg) => setGroupWaveMode(msg && msg.id, msg && msg.mode),
     // Marque « à relire » (lot 1, plan marque-a-relire) : pose/retrait 100 %
     // manuels (décision 7 du plan) — seul écrivain de PINS_KEY.
     togglePinConv: (msg) => togglePinConv(msg && msg.id),
@@ -409,7 +429,7 @@ function activate(context) {
     unlinkGroupMaster: (msg) => unlinkGroupMaster(msg && msg.id),
     // Moteur de vagues (lot 4).
     launchWave: (msg) => handleLaunchWave(msg),
-    moveMemberWave: (msg) => moveMemberWave(msg && msg.id, msg && msg.key, Number(msg && msg.delta)),
+    setMemberWave: (msg) => setMemberWave(msg),
     // Ajout en file à un groupe existant (plan ajout-tache 2026-07-24) : « + »
     // par vague en file / ligne fantôme « nouvelle vague » du panneau.
     addTaskToGroup: (msg) => addTaskToGroup(msg),
@@ -488,6 +508,13 @@ function activate(context) {
   // jamais à l'aveugle, cf. focus.js `tryOfficialFocus`.
   const openSessionIds = createOpenSessionIds(stateDbPath);
   setOpenSessionIdsSource(() => openSessionIds.get());
+  // Vérité du RENDERER (refactor surlignage 2026-08-27, « le renderer est le
+  // juge ») : l'éditeur ACTIF de cette fenêtre par IDENTITÉ, écrit par le
+  // processus qui peint l'écran — la copie miroir tabGroups de l'hôte
+  // d'extension a prouvé qu'elle sait rester fausse indéfiniment (journal
+  // 2026-08-27). state.js s'en sert comme juge du surlignage : cf. l'arbitre
+  // de buildSnapshot. Même state.vscdb que les deux lecteurs ci-dessus.
+  const rendererActive = createRendererActive(stateDbPath);
 
   // Un seul lecteur pour les deux montants (ligne de conversation et ligne de
   // quota) : il porte l'octet où chaque transcript a été lu, et relire deux
@@ -523,6 +550,9 @@ function activate(context) {
     // identique par IDENTITÉ plutôt que par l'ordre de la cascade — cf.
     // state.js `buildSnapshot` et son commentaire sur `openIds`.
     openSessionIds: () => openSessionIds.get(),
+    // Le JUGE du surlignage (arbitre « le renderer est le juge », state.js) —
+    // cf. la création de rendererActive plus haut.
+    rendererActive: () => rendererActive.get(),
     sortOrder: () => getConfig().sortOrder,
     // Ce que les GROUPES affichent, ajouté à la clé de changement du moteur
     // (cf. state.js `extraKey`) : sans elle, une bascule de statut qui ne
@@ -539,6 +569,27 @@ function activate(context) {
     onChange: (snap) => { attachPendingMembers(); maybeAdvanceWaves(); pushPanelState(); maybeFetchOnTransition(snap); },
   });
   context.subscriptions.push({ dispose: () => stateEngine.dispose() });
+  // Le flush du state.vscdb est la SEULE horloge de la vérité renderer : le
+  // guetter rend la réconciliation du surlignage quasi immédiate (dès que le
+  // renderer écrit) au lieu d'attendre le tick 30 s du moteur. SQLite écrit
+  // par rafales (-wal/-shm) → debounce court ; toute erreur de watch = pas de
+  // watcher, la réconciliation retombe sur le tick, jamais une panne.
+  if (stateDbPath) {
+    try {
+      let truthDebounce = null;
+      const truthWatcher = fs.watch(path.dirname(stateDbPath), (_evt, filename) => {
+        if (!filename || !String(filename).startsWith('state.vscdb')) return;
+        rendererActive.bump();
+        clearTimeout(truthDebounce);
+        truthDebounce = setTimeout(() => { if (stateEngine) stateEngine.refresh(); }, 400);
+      });
+      context.subscriptions.push({
+        dispose: () => { clearTimeout(truthDebounce); try { truthWatcher.close(); } catch {} },
+      });
+    } catch (e) {
+      console.log('[QuotaBar] renderer-truth watch failed: %s', e && e.message);
+    }
+  }
   // Amorce lastConvStates avec le snapshot initial : createStateEngine le
   // construit à la construction SANS appeler onChange (celui-ci ne tire que
   // sur un recompute déclenché ensuite). Sans amorçage, une conv déjà `busy`
@@ -613,8 +664,8 @@ function activate(context) {
   // `focusConv` ci-dessus — c'est ICI, dans la fenêtre qui possède réellement
   // l'onglet, que l'acte doit être rapporté à SON tracker.
   context.subscriptions.push(createFocusRelay({
-    onActivated: (label) => {
-      if (tabTracker) tabTracker.reportActivation(label);
+    onActivated: (label, isTrusted) => {
+      if (tabTracker) tabTracker.reportActivation(label, { origin: 'relay', isTrusted: !!isTrusted });
       if (stateEngine) stateEngine.refresh();
     },
   }));
@@ -819,6 +870,7 @@ const DEMO_GROUPS = [{
   stamp: '14:07',
   hue: hueOf('Payment refactor'),
   collapsed: false,
+  waveMode: 'auto',
   // Moteur de vagues (lot 4) : vague 1 en cours (d1 busy, d3 done), vague 2
   // encore `queued` — le cas type de « unlocks when wave 1 is fully done ».
   launchedWave: 1,
@@ -841,6 +893,7 @@ const DEMO_GROUPS = [{
   stamp: '15:32',
   hue: hueOf('Billing rollout'),
   collapsed: false,
+  waveMode: 'manual',
   launchedWave: 1,
   nextWave: null,
   waveNotice: null,
@@ -934,10 +987,25 @@ function maybeFetchOnTransition(snapshot) {
       // identifie le tour, pas `since` (réarmé à chaque Stop, donc deux fois par
       // tour dès qu'un hook Stop à feedback relance Claude) — cf. sounds.js.
       if (soundPlayer) soundPlayer.onTransition(c.sessionId, c.state, c.since, c.busySince);
-      if (c.state === 'done' || c.state === 'waiting') transitioned = true;
+      if (c.state === 'done' || c.state === 'waiting') {
+        transitioned = true;
+        // 2026-08-27, lot A surlignage : corréler transitions ↔ bascules de
+        // surlignage sans avoir à recouper les deux journaux à la main.
+        logAckEvent('conv-transition', { sessionId: c.sessionId, to: c.state });
+        // Lot C anti-vol d'onglet (2026-08-27) : c'est ICI, et nulle part
+        // ailleurs, qu'on sait qu'une conversation vient de changer d'état
+        // par une source étrangère à la copie miroir des onglets. Le tracker
+        // en fait une quarantaine : l'activation fantôme qui suit le `done`
+        // d'une conv d'arrière-plan (mesurée à +117 ms) n'est plus une preuve.
+        if (tabTracker && tabTracker.noteConvTransition) tabTracker.noteConvTransition(c);
+      }
     }
   }
   lastConvStates = next;
+  // Hors de la boucle ET avant tout retour anticipé : le basculement de
+  // `activeSessionId` (dernier prompt utilisateur) est une porte de SORTIE de
+  // quarantaine, il n'a rien à voir avec le fetch de quota ci-dessous.
+  if (tabTracker && tabTracker.noteActiveSession) tabTracker.noteActiveSession(snapshot.activeSessionId);
   if (!transitioned) return;
   if (panelProvider && !panelProvider.isVisible()) return;
   const now = Date.now();
@@ -1031,7 +1099,17 @@ function conversationsState() {
     // VÉRITÉ AFFICHÉE = TRANSCRIPT (décision 6 du plan). `model`/`effort` sont
     // ce qui tourne réellement ; `asked`/`mismatch` ne sont qu'un commentaire
     // posé dessus quand on a lancé la conv nous-mêmes ET que le réel diffère.
-    const intent = intentStore ? intentStore.get(c.sessionId) : null;
+    let intent = intentStore ? intentStore.get(c.sessionId) : null;
+    const real = { modelId: c.modelId, effort: c.effort };
+    // L'intention n'a qu'un rôle : vérifier que le lancement a honoré ce qui
+    // était demandé. Une fois cette preuve obtenue, elle est oubliée — sinon
+    // un changement de réglage plus tard, DANS la conversation (sélecteur
+    // natif hors de portée de l'extension), continuerait à être accusé comme
+    // un écart alors qu'il n'en est plus un (cf. intentConfirmed, batch.js).
+    if (intentStore && intent && intentConfirmed(intent, real)) {
+      intentStore.forget(c.sessionId);
+      intent = null;
+    }
     return {
       id: c.sessionId,
       title: c.title,
@@ -1047,7 +1125,7 @@ function conversationsState() {
       acked: c.acked !== false,
       active: c.isActive,
       asked: intent ? { model: intent.model, effort: intent.effort } : null,
-      mismatch: mismatchOf(intent, { modelId: c.modelId, effort: c.effort }),
+      mismatch: mismatchOf(intent, real),
       // Membre d'un groupe (lot 2) : le webview la rend DANS la section du
       // groupe et la retire de la liste plate. `null` = conversation ordinaire.
       groupId: groupIdFor(c.sessionId),
@@ -1128,6 +1206,10 @@ function groupsState(convs, sources, superseded) {
       stamp: g.createdAt ? hhmm(new Date(g.createdAt)) : null,
       hue: hueOf(g.name),
       collapsed: !!g.collapsed,
+      // Interrupteur manuel/auto de l'en-tête (2026-08-26) : le mode vit PAR
+      // LOT, dans le store (donc persisté avec le groupe). Le webview ne le
+      // déduit de rien — il l'affiche et rend le clic.
+      waveMode: g.waveMode === 'manual' ? 'manual' : 'auto',
       // « Ce qui reste à faire » (étape 11) : groupe ENTIER terminé (membres
       // ET maîtresse, si désignée) → le webview ne le rend plus DU TOUT (rien
       // n'est muté ici, group-done.js ne fait que plier des statuts déjà
@@ -1152,6 +1234,14 @@ function groupsState(convs, sources, superseded) {
         // Redirigé (husk→successeur) : le chip de fermeture et le clic ciblent
         // la conversation VIVANTE, jamais le husk mort d'avant le reload.
         convId: rm[i].sessionId || null,
+        // Ce convId est-il celui que le STORE porte, ou celui d'une redirection
+        // husk→successeur (2026-08-27) ? Une redirection est une DÉDUCTION
+        // (supersede.js) ; le lien direct, lui, est un fait écrit. Quand deux
+        // membres de deux lots désignent la même conversation — ce qui ne peut
+        // arriver que par redirection, l'unicité d'un sessionId étant garantie
+        // dans le store (groups.js `attach`) — c'est le lien DIRECT qui doit
+        // garder la ligne, jamais l'ordre du store : cf. panel.js `rowOwner`.
+        redirected: !!(rm[i].sessionId && rm[i].sessionId !== m.sessionId),
         // Statut canonique (affichage) et sa projection sur le vocabulaire du
         // moteur de vagues (comptages, en-têtes) — cf. member-truth.js.
         status: truths[i].status,
@@ -1324,6 +1414,37 @@ function attachPendingMembers() {
     if (m) intentStore.record(p.sessionId, { model: m.model, effort: m.effort });
     console.log('[QuotaBar] group member %s/%s linked to session %s by prompt prefix (stage 2)', p.groupId, p.key, p.sessionId);
   }
+
+  // Étage 1bis (2026-08-26) : l'HÉRITIER du lien mort-né. L'étage 2 ci-dessus
+  // exige un transcript, donc une Entrée humaine — or l'héritier est déjà
+  // identifiable AVANT : la seule session du workspace vivante, sans
+  // transcript, rattachée à personne, née dans la fenêtre du lancement mort
+  // (cf. attach.js matchHeirs, qui refuse toute ambiguïté). Re-lié ici, le
+  // membre redevient « inserted » (« press Enter in its tab ») : le vrai état
+  // de l'onglet, au lieu d'un lien perdu qui suspend la vague derrière un
+  // remède — et l'Entrée reste le geste humain qui envoie, rien ne se soumet
+  // tout seul. Recalculé APRÈS l'étage 2 : un membre qu'il vient de re-lier a
+  // un transcript, donc n'est plus « unsent-lost », donc ne repasse pas ici.
+  const relost = pendingForRelink(groupStore.all(), (m2) => memberTruth(m2, src));
+  if (relost.length) {
+    let entries = [];
+    try { entries = liveSessionEntries() || []; } catch { entries = []; }
+    const taken2 = groupStore.attachedIds();
+    const orphans = entries
+      .filter((e) => e && e.sessionId
+        && (!workspacePath || (e.cwd && samePath(e.cwd, workspacePath)))
+        && !taken2.has(e.sessionId)
+        && !src.hasTranscript(e.sessionId))
+      .map((e) => ({ sessionId: e.sessionId, startedAt: e.startedAt }));
+    for (const p of matchHeirs(relost, orphans)) {
+      if (!groupStore.attach(p.groupId, p.key, p.sessionId)) continue;
+      changed = true;
+      const g2 = groupStore.get(p.groupId);
+      const m2 = g2 && g2.members.find((x) => x.key === p.key);
+      if (m2) intentStore.record(p.sessionId, { model: m2.model, effort: m2.effort });
+      console.log('[QuotaBar] group member %s/%s relinked to heir session %s (stage 1bis)', p.groupId, p.key, p.sessionId);
+    }
+  }
   return changed;
 }
 
@@ -1446,6 +1567,10 @@ function buildPanelState() {
       costThresholds: cfg.costThresholds,
       costTurnThresholds: cfg.costTurnThresholds,
     },
+    // Refactor surlignage 2026-08-27 : dernier épisode « le renderer a corrigé
+    // le surlignage » — bandeau warning du webview (cf. panel.js
+    // renderTruthBanner). Null hors épisode frais : le bandeau se cache.
+    highlightNotice: (stateEngine && stateEngine.getSnapshot().highlightReconcile) || null,
     // Lot 13 §1 : indicateur discret, jamais de popup — voir checkTabCanary().
     canary: canaryActive,
     // Plan gel-tabs (2026-08-17) : canal RPC des onglets mort pour CETTE
@@ -2132,26 +2257,21 @@ async function launchWaveForGroup(id, waveNumber, opts = {}) {
   pushPanelState();
 }
 
-// Le webview n'envoie `force: true` que pour le bouton atténué (mode auto,
-// vague pas encore bloquée) — chemin bloqué et mode manuel n'envoient jamais
-// `force`, donc jamais de modale ici.
+// En AUTO, plus AUCUN séparateur n'est cliquable côté webview (2026-08-27) :
+// le webview n'envoie donc plus jamais `launchWave` pour un lot en auto — la
+// seule porte vers un forçage est l'interrupteur manuel/auto lui-même, qui
+// bascule le waveMode du store, jamais une confirmation ponctuelle. Cette
+// fonction n'a donc plus qu'un seul appelant possible : le ▶ manuel, dont le
+// clic EST l'acte délibéré.
 async function handleLaunchWave(msg) {
   const waveNumber = Number(msg && msg.wave);
-  if (msg && msg.force) {
-    const forceLabel = vscode.l10n.t('Force');
-    const choice = await vscode.window.showWarningMessage(
-      vscode.l10n.t('Auto mode will open wave {0} by itself once the current wave finishes. Force it now?', waveNumber),
-      { modal: true },
-      forceLabel
-    );
-    if (choice !== forceLabel) return;
-  }
   await launchWaveForGroup(msg && msg.id, waveNumber, { auto: false });
 }
 
 // Appelé à chaque recompute de state.js (transitions busy→done incluses) :
-// pour chaque groupe dont la vague courante vient de se terminer ENTIÈREMENT,
-// ouvre la suivante — toujours automatique (pas de toggle manuel).
+// pour chaque groupe EN MODE AUTO dont la vague courante vient de se terminer
+// ENTIÈREMENT — et de façon PROUVÉE, cf. la garde plus bas — ouvre la suivante.
+// Un lot en mode manuel n'est jamais candidat : son ▶ est la seule porte.
 // `waveToAutoLaunch` (waves.js) garantit structurellement de ne jamais sauter
 // plus d'une vague d'avance.
 //
@@ -2163,8 +2283,27 @@ async function handleLaunchWave(msg) {
 // fonction quand l'armement le plus proche arrive à maturité.
 const waveGates = new Map(); // groupId → { wave, since }
 let waveGateTimer = null;
+// ── Grâce d'activation (2026-08-26, lien mort-né post-reload) ────────────────
+// Pendant la restauration d'une fenêtre, l'extension officielle respawne les
+// CLI des onglets restaurés — et peut REMPLACER, dans les secondes qui suivent,
+// celui qu'un lancement vient de créer (mesuré : lancement à activation+15 s,
+// CLI lié mort et remplacé ~3 s après ; membre « lien perdu avant envoi »,
+// vague suspendue). Un lancement est irréversible : aucune vague auto ne part
+// tant que la tempête n'est pas passée. Le ▶ manuel, acte délibéré, reste
+// immédiat. L'env var ne sert qu'aux bancs, comme CLAUDE_QUOTA_WAVE_STABLE_MS.
+const WAVE_ACTIVATION_GRACE_MS = Number(process.env.CLAUDE_QUOTA_ACTIVATION_GRACE_MS) > 0
+  ? Number(process.env.CLAUDE_QUOTA_ACTIVATION_GRACE_MS)
+  : 60000;
+const wavesActivatedAt = Date.now();
 function maybeAdvanceWaves() {
   if (!groupStore || !stateEngine) return;
+  const sinceActivation = Date.now() - wavesActivatedAt;
+  if (sinceActivation < WAVE_ACTIVATION_GRACE_MS) {
+    if (waveGateTimer) clearTimeout(waveGateTimer);
+    waveGateTimer = setTimeout(() => { waveGateTimer = null; maybeAdvanceWaves(); },
+      WAVE_ACTIVATION_GRACE_MS - sinceActivation + 100);
+    return;
+  }
   const snap = stateEngine.getSnapshot();
   const convs = snap.conversations;
   const superseded = snap.supersededBy || {};
@@ -2175,15 +2314,28 @@ function maybeAdvanceWaves() {
   for (const g of groupStore.all()) {
     // Membres redirigés (husk→successeur) : une vague ne se déclare pas
     // « terminée » sur un husk mort alors que la conv a repris et travaille.
-    const members = g.members.map((m) => ({ wave: m.wave, status: memberTruth(redirectMember(m, superseded), sources).waveStatus }));
-    // AUCUNE OUVERTURE AUTOMATIQUE (decision user 2026-08-26). L'enchainement
-    // automatique des vagues ouvrait des onglets que l'user venait de fermer :
-    // un membre dont la ligne a disparu n'a plus d'etat, member-truth le compte
-    // `done` (state == null), la vague passe pour terminee et la suivante part.
-    // Resultat mesure chez l'user : 7 onglets pour 5 conversations, des doublons
-    // par tache, et des fermetures annulees en boucle. Le bouton play reste la
-    // seule porte : il ouvre une vague quand l'user le decide, jamais avant.
-    const gate = advanceGate(waveGates.get(g.id), null, now);
+    const truths = g.members.map((m) => memberTruth(redirectMember(m, superseded), sources));
+    const members = g.members.map((m, i) => ({ wave: m.wave, status: truths[i].waveStatus }));
+    // ── La garde qui manquait (2026-08-26) ────────────────────────────────
+    // L'enchaînement automatique ouvrait des onglets que l'user venait de
+    // fermer : un membre dont la ligne a disparu n'a plus d'état, `member-truth`
+    // conclut « terminée » sur ce SILENCE (délibéré côté affichage, cf. son
+    // en-tête), la vague passait pour finie et la suivante partait. Mesuré chez
+    // l'user : 7 onglets pour 5 conversations, des doublons par tâche, des
+    // fermetures annulées en boucle.
+    // Le remède n'est pas de changer ce que l'affichage conclut — c'est
+    // d'exiger PLUS pour OUVRIR que pour afficher : un `done` prouvé (écrit par
+    // une source), jamais présumé. Un membre « terminé » non prouvé retombe ici
+    // sur `launched` : la vague reste incomplète pour le moteur, donc rien ne
+    // s'ouvre, et le ▶ manuel — lui, un acte délibéré — reste la porte.
+    const forAuto = g.members.map((m, i) => ({
+      wave: m.wave,
+      status: (truths[i].waveStatus === 'done' && !truths[i].doneProven) ? 'launched' : truths[i].waveStatus,
+    }));
+    // Mode du lot (2026-08-26) : en MANUEL, aucune vague n'est jamais candidate
+    // — `null` traverse advanceGate, qui désarme le verrou de ce groupe.
+    const wave = g.waveMode === 'manual' ? null : waveToAutoLaunch(forAuto);
+    const gate = advanceGate(waveGates.get(g.id), wave, now);
     if (gate.pending) {
       waveGates.set(g.id, gate.pending);
       const due = gate.pending.since + WAVE_STABLE_MS - now;
@@ -2201,9 +2353,18 @@ function maybeAdvanceWaves() {
   }
 }
 
-function moveMemberWave(id, key, delta) {
-  if (!groupStore || (delta !== 1 && delta !== -1)) return;
-  if (groupStore.moveQueuedMember(id, key, delta)) pushPanelState();
+// Menu « vague n ▾ » d'une tâche EN FILE : le SEUL geste de déplacement offert
+// par le panneau depuis 2026-08-27, où il a remplacé les flèches ◂/▸ (un CRAN,
+// dont aucun nombre de clics ne pouvait exprimer une destination — cf. groups.js
+// setMemberWave). `wave` absent/null = « nouvelle vague à la fin ». Ce geste ne
+// lance rien et ne peut pas vider une vague déjà ouverte (seuls les membres en
+// file bougent) : pas de maybeAdvanceWaves, un simple push suffit.
+function setMemberWave(msg) {
+  if (!groupStore) return;
+  const raw = msg && msg.wave;
+  const wave = raw == null ? null : Number(raw);
+  if (wave != null && !Number.isInteger(wave)) return;
+  if (groupStore.setMemberWave(msg && msg.id, msg && msg.key, wave)) pushPanelState();
 }
 
 // ── Actions de groupe (lot 2) ───────────────────────────────────────────────
@@ -2240,6 +2401,19 @@ function toggleGroupCollapse(id) {
   const g = groupStore && groupStore.get(id);
   if (!g) return;
   if (groupStore.setCollapsed(id, !g.collapsed)) pushPanelState();
+}
+
+// Bascule manuel ↔ auto d'un lot (2026-08-26). Le mode est persisté par le
+// store ; passer en AUTO peut rendre une vague immédiatement éligible (la
+// courante était déjà terminée pendant qu'on était en manuel) — d'où le
+// maybeAdvanceWaves() qui suit, qui ARME le verrou de stabilisation sans rien
+// ouvrir sur-le-champ. Repasser en MANUEL désarme ce même verrou (le groupe
+// n'a plus de vague auto à ouvrir, advanceGate rend `pending: null`).
+function setGroupWaveMode(id, mode) {
+  if (!groupStore) return;
+  if (!groupStore.setWaveMode(id, mode === 'manual' ? 'manual' : 'auto')) return;
+  maybeAdvanceWaves();
+  pushPanelState();
 }
 
 // Bascule la marque « à relire » d'une conversation (lot 1, plan
@@ -2566,6 +2740,49 @@ function resolveMasterCandidate(paste, token) {
   const conv = stateEngine.getSnapshot().conversations.find((c) => c.sessionId === res.sessionId);
   console.log('[QuotaBar] master conversation candidate = %s (via %s)', res.sessionId, res.via);
   return { sessionId: res.sessionId, title: (conv && conv.title) || '', via: res.via };
+}
+
+// Même recherche, déclenchée par le COLLAGE au lieu du « Create » (plan agrafe
+// 2026-08-27). Deux différences avec resolveMasterCandidate ci-dessus, et deux
+// seulement :
+//
+//  1. ÉCHOUER SE DIT. `resolveMasterCandidate` rend `null` pour toute
+//     conclusion incertaine — parfait pour décider s'il faut créer un groupe,
+//     inutilisable pour l'affichage : « 0 candidate » et « 2 candidates » sont
+//     deux situations que l'utilisateur doit pouvoir distinguer (bloc écrit à
+//     la main, conversation maîtresse fermée, jeton périmé). On rend donc
+//     `reason` et `matches` tels quels, et le formulaire en fait une phrase.
+//  2. LA RÉPONSE EST DATÉE DU COLLAGE. `seq` est recopié tel quel dans la
+//     réponse : le webview jette tout ce qui ne porte pas le numéro de SON
+//     dernier collage. Sans lui, une recherche lente sur un gros transcript
+//     pourrait peindre une filiation périmée par-dessus un collage plus récent.
+//
+// Aucun effet de bord : ni groupe, ni setMaster, ni journal — une lecture.
+function resolveMasterPaste(msg) {
+  const seq = msg && typeof msg.seq === 'number' ? msg.seq : null;
+  if (!panelProvider || seq === null) return;
+  const reply = (r) => panelProvider.post(Object.assign({ type: 'masterResolved', seq }, r));
+  if (!stateEngine || !msg.paste) { reply({ sessionId: null, title: '', matches: 0, reason: 'not-found' }); return; }
+  let res;
+  try { res = resolveMaster({ pasted: msg.paste, token: msg.session, candidates: masterCandidates() }); }
+  catch (e) {
+    // Lecture de transcripts : un fichier verrouillé ou tronqué ne doit pas
+    // laisser le formulaire muet — on répond « pas trouvée », qui est ce que
+    // l'utilisateur constate de toute façon.
+    console.log('[QuotaBar] master search on paste failed: %s', e && e.message);
+    reply({ sessionId: null, title: '', matches: 0, reason: 'not-found' });
+    return;
+  }
+  const conv = res.sessionId
+    ? stateEngine.getSnapshot().conversations.find((c) => c.sessionId === res.sessionId)
+    : null;
+  reply({
+    sessionId: res.sessionId,
+    title: (conv && conv.title) || '',
+    matches: res.matches,
+    reason: res.reason,
+    via: res.via,
+  });
 }
 
 // Le réglage OFFICIEL `claudeCode.environmentVariables` est appliqué APRÈS

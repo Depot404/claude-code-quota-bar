@@ -143,6 +143,18 @@ function sanitizeGroup(g) {
     name: typeof g.name === 'string' && g.name.trim() ? g.name.trim() : 'Batch',
     createdAt,
     collapsed: !!g.collapsed,
+    // Mode d'enchaînement des vagues, PAR LOT (2026-08-26, décision user) :
+    //   'auto'   — la vague suivante s'ouvre d'elle-même quand la courante est
+    //              terminée (avec la garde « explicitement terminée », cf.
+    //              extension.js maybeAdvanceWaves) ;
+    //   'manual' — RIEN ne s'ouvre jamais tout seul ; le bouton ▶ de la vague
+    //              suivante apparaît quand la courante est finie, et le clic
+    //              EST l'acte délibéré (aucune confirmation).
+    // Défaut AUTO pour un lot neuf comme pour tout stockage antérieur à ce
+    // lot : le comportement historique, aucune migration. Seule la valeur
+    // exacte 'manual' bascule — n'importe quoi d'autre retombe sur 'auto'
+    // (une valeur illisible ne doit pas figer un lot en attente d'un clic).
+    waveMode: g.waveMode === 'manual' ? 'manual' : 'auto',
     // Conv maîtresse (lot 11) — absente de tout stockage écrit avant ce lot :
     // `null`, comportement d'avant, aucune migration.
     masterSessionId: typeof g.masterSessionId === 'string' && g.masterSessionId ? g.masterSessionId : null,
@@ -253,6 +265,7 @@ function createGroupStore(deps = {}) {
           || `Batch ${new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`,
         createdAt: at,
         collapsed: false,
+        waveMode: 'auto',
         masterSessionId: null,
         masterTitle: '',
         masterLinkedAt: 0,        // aucun lien encore : setMaster le stampe
@@ -391,6 +404,55 @@ function createGroupStore(deps = {}) {
       return true;
     },
 
+    // DESTINATION ABSOLUE — l'opération du menu « vague n ▾ » (2026-08-26),
+    // volontairement DISTINCTE de moveQueuedMember juste au-dessus : celui-ci
+    // raisonne en CRANS (un membre seul FUSIONNE, un membre accompagné SE
+    // DÉTACHE), si bien qu'il n'existe aucun nombre de clics ◂/▸ qui signifie
+    // « va en vague 4 » — le même clic ne fait pas la même chose selon qui
+    // partage la vague de départ. Le menu, lui, DÉSIGNE une vague : c'est un
+    // autre geste, il lui faut sa propre porte.
+    //
+    // `wave` = numéro d'une vague EXISTANTE encore en file, ou `null` =
+    // « nouvelle vague à la fin » (max + 1, calculé ICI : le store est seul à
+    // jour, le webview a pu recevoir un état périmé entre son rendu et le clic).
+    // Le numéro reçu est celui d'AVANT compactage — on le pose tel quel, puis
+    // compactWaves rétablit la contiguïté. Une vague d'origine vidée disparaît
+    // donc et tout se resserre : la destination reste le même GROUPE DE
+    // MEMBRES, même si son numéro affiché descend d'un cran ensuite (invariant
+    // « une vague est une position, jamais un numéro figé »).
+    //
+    // Quatre refus, chacun le miroir d'une règle déjà tenue ailleurs :
+    //   · membre déjà lancé (comme moveQueuedMember) — il est parti ;
+    //   · vague <= launchedWave (même seuil qu'addTask) — y arriver reviendrait
+    //     à être lancé aussitôt, la surprise que le design interdit ;
+    //   · vague inexistante (> max) — ce serait fabriquer un trou depuis un
+    //     état périmé ; « nouvelle vague » a sa propre valeur, `null` ;
+    //   · tout ce qui ne changerait RIEN : la vague courante, et « nouvelle
+    //     vague » demandée par un membre déjà seul en dernière position (même
+    //     refus que le ▸ de moveQueuedMember, qui ne ferait que renuméroter).
+    setMemberWave(id, key, wave) {
+      const g = find(id);
+      if (!g) return false;
+      const m = g.members.find((x) => x.key === key);
+      if (!m || m.launchedAt != null) return false;
+      const maxWave = g.members.reduce((max, x) => Math.max(max, x.wave), 0);
+      let target;
+      if (wave == null) {
+        const alone = g.members.filter((x) => x.wave === m.wave).length === 1;
+        if (alone && m.wave === maxWave) return false;
+        target = maxWave + 1;
+      } else {
+        const n = Number(wave);
+        if (!Number.isInteger(n) || n <= launchedWaveOf(g) || n > maxWave) return false;
+        if (n === m.wave) return false;
+        target = n;
+      }
+      m.wave = target;
+      compactWaves(g);
+      persist();
+      return true;
+    },
+
     rename(id, name) {
       const g = find(id);
       const clean = typeof name === 'string' ? name.trim() : '';
@@ -404,6 +466,20 @@ function createGroupStore(deps = {}) {
       const g = find(id);
       if (!g) return false;
       g.collapsed = !!collapsed;
+      persist();
+      return true;
+    },
+
+    // Interrupteur manuel/auto de l'en-tête du lot (2026-08-26). Écrit la même
+    // valeur assainie que sanitizeGroup : tout ce qui n'est pas exactement
+    // 'manual' vaut 'auto'. Rend false quand rien ne change, pour que
+    // l'appelant n'ait pas à re-pousser l'état du panneau pour rien.
+    setWaveMode(id, mode) {
+      const g = find(id);
+      if (!g) return false;
+      const clean = mode === 'manual' ? 'manual' : 'auto';
+      if (g.waveMode === clean) return false;
+      g.waveMode = clean;
       persist();
       return true;
     },

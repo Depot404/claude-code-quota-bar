@@ -209,7 +209,7 @@ function createFocusRelay(handlers = {}) {
       else {
         await focusTab(match);
         raiseWindow(match.label);
-        try { onActivated(match.label); } catch {}
+        try { onActivated(match.label, !!req.isTrusted); } catch {}
       }
     } catch (e) {
       log('relay %s failed: %s', req.action || 'focus', e && e.message);
@@ -265,6 +265,10 @@ async function focusConversation(msg) {
     session_id: (msg && msg.id) || null,
     ts: Date.now(),
     origin_pid: process.pid,
+    // 2026-08-27, lot A/B surlignage : relayé jusqu'à la fenêtre qui possède
+    // réellement l'onglet, pour qu'elle sache si l'acte qu'elle va poser sur
+    // SON tracker vient d'un vrai geste humain (cf. tabs.js reportActivation).
+    isTrusted: !!(msg && msg.isTrusted),
   });
   return null;
 }

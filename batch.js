@@ -420,6 +420,31 @@ function mismatchOf(intent, real) {
   return out.model || out.effort ? out : null;
 }
 
+// L'intention n'a qu'un rôle : vérifier que le LANCEMENT a bien honoré ce qui
+// était demandé. Une fois cette preuve obtenue (chaque champ demandé retrouvé
+// à l'identique dans le réel), elle a servi — la garder revient à comparer
+// indéfiniment le réel courant à un instantané du lancement, alors que rien
+// n'empêche l'user de changer le réglage DANS la conversation ensuite (le
+// sélecteur natif, hors de portée de l'extension) : ce choix plus tardif n'est
+// pas un écart, c'est la nouvelle volonté, honorée immédiatement (constat du
+// 2026-08-26, PLAN_surlignage_et_effort_2026-08-26.md §2 — 162 tours en
+// `low`, un tour après le changement de sélecteur déjà en `xhigh`). Sans ce
+// retrait, le badge accuserait pour toujours un « écart » qui n'est que la
+// trace de ce choix, plus tard, délibéré. `mismatchOf` reste la seule
+// écriture de la comparaison ; cette fonction ne fait que dire QUAND l'intention
+// est devenue inutile — appelée par extension.js juste après mismatchOf.
+function intentConfirmed(intent, real) {
+  if (!intent || !(intent.model || intent.effort)) return false;
+  if (intent.model) {
+    const p = real && real.modelId ? parseModelId(real.modelId) : null;
+    if (!p || !p.family || p.family !== intent.model) return false;
+  }
+  if (intent.effort) {
+    if (!real || !real.effort || String(real.effort).toLowerCase() !== intent.effort) return false;
+  }
+  return true;
+}
+
 // ── Résolution du défaut (lot 12, rebaptisé lot 14) ────────────────────────
 // Un bouton « inherit » seul ne disait pas sur quel modèle/effort une
 // conversation allait réellement démarrer — objection user au cadrage
@@ -454,6 +479,6 @@ module.exports = {
   findClaudeConvsBlock, parseClaudeConvsBlock,
   appendTasksAfterWave,
   envForTask, applyEnv, conflictingEnvVars,
-  createIntentStore, mismatchOf,
+  createIntentStore, mismatchOf, intentConfirmed,
   SETTINGS_PATH, readInheritSettings,
 };

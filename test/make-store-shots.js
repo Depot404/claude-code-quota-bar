@@ -190,6 +190,10 @@ const GROUPS = [{
   stamp: '14:12',
   hue: 262,
   collapsed: false,
+  // Wave chaining mode, shown by the manual/auto switch on the batch header
+  // (2.73.0). `auto` is what a brand-new batch gets, so that is what the
+  // listing shows.
+  waveMode: 'auto',
   launchedWave: 1,
   nextWave: 2,
   waveNotice: null,

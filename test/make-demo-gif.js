@@ -154,15 +154,22 @@ const THEME_LIGHT = Object.assign({}, FONTS, {
 const BG = { dark: '#1f1f1f', light: '#ffffff' };
 
 // ── Fictional data (English, invented — see ground rules above) ───────────
-const QUOTA = {
-  windows: [
-    { label: '5h window', pct: 21, cost: 6.1, resetsAt: null, resetLabel: '19:00', windowMs: 5 * 3600e3, pace: 'green', elapsedPct: 30 },
-    { label: '7d window', pct: 47, cost: 512, resetsAt: null, resetLabel: 'Wed 13:00', windowMs: 7 * 86400e3, pace: 'green', elapsedPct: 44 },
-  ],
-  burnRate: { greenMax: 0.85, yellowMax: 1.0 },
-  ageMin: 1,
-  source: 'cookie',
-};
+// Quota is a function of the beat, not a constant: the two windows climb and
+// change pace color across the sequence — the biggest single fix for "the
+// top of the panel never moves" (2026-08-26 user report). resetsAt stays
+// null throughout (same as before), so panel.js's retick() leaves w.pace and
+// w.pct exactly as given here instead of recomputing them.
+function quota(w1pct, w1pace, w1cost, w2pct, w2pace, w2cost, ageMin) {
+  return {
+    windows: [
+      { label: '5h window', pct: w1pct, cost: w1cost, resetsAt: null, resetLabel: '19:00', windowMs: 5 * 3600e3, pace: w1pace, elapsedPct: w1pct },
+      { label: '7d window', pct: w2pct, cost: w2cost, resetsAt: null, resetLabel: 'Wed 13:00', windowMs: 7 * 86400e3, pace: w2pace, elapsedPct: w2pct },
+    ],
+    burnRate: { greenMax: 0.85, yellowMax: 1.0 },
+    ageMin,
+    source: 'cookie',
+  };
+}
 const BATCH = {
   envConflict: [], busy: false, notice: null, noticeHint: null,
   inherit: { model: 'sonnet', effort: 'medium' },
@@ -173,8 +180,11 @@ const UI_OPEN = { collapsedConversations: false, collapsedQuota: false, collapse
 // enough that the GIF canvas isn't mostly dead background on the early beats.
 const UI_COLLAPSED = Object.assign({}, UI_OPEN, { collapsedNewConversation: true });
 
-const cost = (total) => ({
-  total,
+// `turns`/`lastTurn` drive the per-row cost pace color (panel.js
+// turnPaceColor: >=0.5 yellow, >=2 red) — the row is a plain amount with no
+// turns/lastTurn passed, matching the master's static "already settled" cost.
+const cost = (total, turns, lastTurn) => ({
+  total, turns, lastTurn,
   input: +(total * 0.06).toFixed(4),
   cacheRead: +(total * 0.4).toFixed(4),
   cacheWrite: +(total * 0.15).toFixed(4),
@@ -187,9 +197,20 @@ const MASTER = { id: 'm0', title: 'Plan the notifications revamp', model: 'Opus 
 const T1_TITLE = 'Move toast rendering into a shared component';
 const T2_TITLE = 'Add a mute-hours setting to the notification panel';
 const T3_TITLE = 'Wire the shared component into the mobile webview';
-const T1 = (state) => ({ id: 'g1a', title: T1_TITLE, model: 'Sonnet 5', effort: 'medium', ctx: { pct: 18, tokens: 36000, denom: 200000 }, cost: cost(0.31), state, acked: state !== 'done', active: false, tabOpen: true });
-const T2 = (state) => ({ id: 'g1b', title: T2_TITLE, model: 'Haiku 4.5', effort: null, ctx: { pct: 9, tokens: 18000, denom: 200000 }, cost: cost(0.07), state, acked: state !== 'done', active: false, tabOpen: true });
-const T3 = (state) => ({ id: 'g2a', title: T3_TITLE, model: 'Opus 4.8', effort: 'high', ctx: { pct: 24, tokens: 240000, denom: 1000000 }, cost: cost(0.88), state, acked: state !== 'done', active: false, tabOpen: true });
+// state + a climbing (total, turns, lastTurn) triple + an optional acked
+// override — the same task function now plays every beat of a task's life:
+// cheap first turn (no pace color) → an expensive turn (yellow, then red) →
+// a cheap wrap-up turn once done (acked defaults to "fresh, unread"), and a
+// later beat can re-call with acked=true to show the checkmark settling.
+function T1(state, total, turns, lastTurn, acked) {
+  return { id: 'g1a', title: T1_TITLE, model: 'Sonnet 5', effort: 'medium', ctx: { pct: 18, tokens: 36000, denom: 200000 }, cost: cost(total, turns, lastTurn), state, acked: acked !== undefined ? acked : state !== 'done', active: false, tabOpen: true };
+}
+function T2(state, total, turns, lastTurn, acked) {
+  return { id: 'g1b', title: T2_TITLE, model: 'Haiku 4.5', effort: null, ctx: { pct: 9, tokens: 18000, denom: 200000 }, cost: cost(total, turns, lastTurn), state, acked: acked !== undefined ? acked : state !== 'done', active: false, tabOpen: true };
+}
+function T3(state, total, turns, lastTurn, acked) {
+  return { id: 'g2a', title: T3_TITLE, model: 'Opus 4.8', effort: 'high', ctx: { pct: 24, tokens: 240000, denom: 1000000 }, cost: cost(total, turns, lastTurn), state, acked: acked !== undefined ? acked : state !== 'done', active: false, tabOpen: true };
+}
 
 function member(key, prompt, wave, asked, convId, status) {
   return {
@@ -230,21 +251,86 @@ const CONVS_BLOCK = [
 
 function state(ui, overrides) {
   return Object.assign({
-    conversations: [], groups: [], quota: QUOTA, sounds: { enabled: false },
+    conversations: [], groups: [], quota: quota(12, 'green', 2.1, 38, 'green', 410, 1), sounds: { enabled: false },
     ui, canary: false, batch: BATCH,
   }, overrides);
 }
 
-// Six beats: idle composer → pasted block → wave 1 launches (composer tucks
-// away) → wave 1 progresses → wave 2 launches → group complete (held for the
-// loop's breath).
+// Nine beats — every one changes something ABOVE the group too (quota pace/
+// pct/age), not just inside it, per the 2026-08-26 complaint that only a
+// small zone ever moved:
+//   0 idle composer
+//   1 block pasted
+//   2 wave 1 launches (composer tucks away), first turns cheap
+//   3 wave 1 mid-flight: T1's last turn goes yellow, quota ticks up
+//   4 T1 flips to "waiting for you" (the "?") on an expensive turn (red)
+//   5 wave 1 fully done, both checks fresh/vivid — wave 2 still QUEUED,
+//     showing its separator + the manual ▶ launch button
+//   6 wave 2 launches (T3 busy) — T1's check has been read, fades to dim;
+//     T2's stays vivid (unread) — the fade happens per-item, not in lockstep
+//   7 T3's last turn goes yellow then red; T2's check fades too
+//   8 group complete, T3 fresh/vivid, quota deep into yellow/red — held for
+//     the loop's breath
 const FRAMES = [
-  { state: state(UI_OPEN, {}), delayMs: 1100 },
-  { state: state(UI_OPEN, {}), paste: CONVS_BLOCK, delayMs: 1700 },
-  { reload: true, state: state(UI_COLLAPSED, { conversations: [MASTER, T1('busy'), T2('busy')], groups: group(1, 2, 'busy', 'busy', 'queued') }), delayMs: 1100 },
-  { state: state(UI_COLLAPSED, { conversations: [MASTER, T1('done'), T2('busy')], groups: group(1, 2, 'done', 'busy', 'queued') }), delayMs: 1000 },
-  { state: state(UI_COLLAPSED, { conversations: [MASTER, T1('done'), T2('done'), T3('busy')], groups: group(2, null, 'done', 'done', 'busy') }), delayMs: 1100 },
-  { state: state(UI_COLLAPSED, { conversations: [MASTER, T1('done'), T2('done'), T3('done')], groups: group(2, null, 'done', 'done', 'done') }), delayMs: 2600 },
+  { state: state(UI_OPEN, {}), delayMs: 900 },
+  { state: state(UI_OPEN, {}), paste: CONVS_BLOCK, delayMs: 1400 },
+  {
+    reload: true,
+    state: state(UI_COLLAPSED, {
+      conversations: [MASTER, T1('busy', 0.05, 1, 0.05), T2('busy', 0.02, 1, 0.02)],
+      groups: group(1, 2, 'busy', 'busy', 'queued'),
+      quota: quota(21, 'green', 6.1, 44, 'green', 460, 1),
+    }),
+    delayMs: 900,
+  },
+  {
+    state: state(UI_COLLAPSED, {
+      conversations: [MASTER, T1('busy', 0.31, 2, 0.58), T2('busy', 0.04, 2, 0.03)],
+      groups: group(1, 2, 'busy', 'busy', 'queued'),
+      quota: quota(38, 'yellow', 11.4, 51, 'green', 498, 2),
+    }),
+    delayMs: 900,
+  },
+  {
+    state: state(UI_COLLAPSED, {
+      conversations: [MASTER, T1('waiting', 0.85, 3, 2.35), T2('busy', 0.05, 2, 0.03)],
+      groups: group(1, 2, 'waiting', 'busy', 'queued'),
+      quota: quota(55, 'yellow', 17.8, 58, 'yellow', 531, 2),
+    }),
+    delayMs: 1300,
+  },
+  {
+    state: state(UI_COLLAPSED, {
+      conversations: [MASTER, T1('done', 0.95, 4, 0.10, false), T2('done', 0.07, 3, 0.02, false)],
+      groups: group(1, 2, 'done', 'done', 'queued'),
+      quota: quota(63, 'yellow', 21.3, 61, 'yellow', 545, 3),
+    }),
+    delayMs: 1000,
+  },
+  {
+    state: state(UI_COLLAPSED, {
+      conversations: [MASTER, T1('done', 0.95, 4, 0.10, true), T2('done', 0.07, 3, 0.02, false), T3('busy', 0.12, 1, 0.60)],
+      groups: group(2, null, 'done', 'done', 'busy'),
+      quota: quota(71, 'yellow', 24.6, 64, 'yellow', 559, 3),
+    }),
+    delayMs: 1000,
+  },
+  {
+    state: state(UI_COLLAPSED, {
+      conversations: [MASTER, T1('done', 0.95, 4, 0.10, true), T2('done', 0.07, 3, 0.02, true), T3('busy', 0.55, 2, 2.10)],
+      groups: group(2, null, 'done', 'done', 'busy'),
+      quota: quota(86, 'red', 29.9, 68, 'yellow', 574, 4),
+    }),
+    delayMs: 1000,
+  },
+  {
+    state: state(UI_COLLAPSED, {
+      conversations: [MASTER, T1('done', 0.95, 4, 0.10, true), T2('done', 0.07, 3, 0.02, true), T3('done', 0.88, 3, 0.15, false)],
+      groups: group(2, null, 'done', 'done', 'done'),
+      quota: quota(91, 'red', 31.7, 70, 'yellow', 581, 4),
+    }),
+    delayMs: 2000,
+  },
 ];
 
 class Cdp {
@@ -305,11 +391,17 @@ async function captureTheme(cdp, fileUrl, themeName, themeVars) {
       await sleep(220);
     }
 
+    // From the very top of the panel down through the bottom of the Quota
+    // section — NOT just #convBody. #convBody and Quota sit in two separate
+    // <section> siblings (panel.js), so a clip built from #convBody alone
+    // physically excludes the quota bars from every frame: that's the real
+    // cause of "the top of the panel never moves" (2026-08-26), not just
+    // static demo data.
     const clip = await cdp.evaluate(`(() => {
       const pad = 8;
-      const el = document.getElementById('convBody');
-      const r = el.getBoundingClientRect();
-      return { x: Math.max(0, r.x - pad), y: Math.max(0, r.y - 2), width: Math.min(document.body.clientWidth, r.width + 2 * pad), height: r.height + 2 + pad };
+      const bottom = document.getElementById('quotaBody');
+      const r = bottom.getBoundingClientRect();
+      return { x: 0, y: 0, width: document.body.clientWidth, height: r.bottom + pad };
     })()`);
     const shot = await cdp.send('Page.captureScreenshot', {
       format: 'png', fromSurface: true, captureBeyondViewport: true,
@@ -326,11 +418,13 @@ function bgRgb(hex) {
   return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
 }
 
-// The composer's post-paste height (frame 2) runs well past the group
-// frames' — capped here so the loop isn't mostly dead background for the
-// other five beats; the cut-off just hides the "+ Add task / Create" footer,
-// which isn't the point of that beat anyway.
-const MAX_CANVAS_H = 600;
+// The composer's post-paste height (frame 1) runs well past every other
+// beat's — now that the clip includes the Quota section too (see above),
+// group frames sit around ~950px, so the cap follows THAT instead of the
+// old 600. The one frame that still overflows is the paste beat: the
+// cut-off there just hides the "+ Add task / Create" footer, which isn't
+// the point of that beat anyway.
+const MAX_CANVAS_H = 960;
 
 function assembleGif(pngFrames, backgroundHex, outFile) {
   const maxW = Math.max(...pngFrames.map((f) => f.width));

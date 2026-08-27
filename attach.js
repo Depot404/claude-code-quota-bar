@@ -155,7 +155,58 @@ function pendingForRelink(groups, truthOf) {
   return out;
 }
 
+// ── Étage 1bis — l'HÉRITIER du lien mort-né (2026-08-26) ─────────────────────
+// L'incident du 2026-08-04 (ci-dessus) laisse un temps mort que l'étage 2 ne
+// couvre pas : tant que personne n'appuie sur Entrée dans l'onglet orphelin,
+// aucun transcript ne naît, et le membre reste « lien perdu avant envoi » —
+// vague suspendue derrière un remède humain, alors que l'héritier est là : le
+// CLI respawné SOUS LE MÊME ONGLET, vivant, sans transcript, né dans les
+// secondes qui suivent le lancement (mesuré 2026-08-26 pendant la tempête de
+// restauration post-reload : lancement 23:19:00.960, héritier enregistré
+// 23:19:04). Une session jamais envoyée n'a pas d'identité d'onglet : on ne
+// peut pas PROUVER l'onglet partagé. La preuve est donc TEMPORELLE et UNIQUE —
+// une seule session orpheline née dans la fenêtre d'un seul lancement mort-né.
+// Toute ambiguïté (deux membres, deux orphelines) ⇒ rien, principe du fichier.
+// Le tri des candidates est à l'APPELANT (extension.js) : vivantes, cwd du
+// workspace, sans transcript, rattachées à personne — ce module reste du Node
+// pur qui ne juge que le temps et l'unicité.
+const HEIR_WINDOW_MS = 60000;
+// Marge sous launchedAt : startedAt vient de l'horloge du CLI, launchedAt de
+// la nôtre — même machine, mais l'écriture du fichier peut précéder de peu.
+const HEIR_SLACK_MS = 5000;
+
+// members  : [{ groupId, key, launchedAt }]   (pendingForRelink)
+// sessions : [{ sessionId, startedAt }]
+// → [{ groupId, key, sessionId }] — uniquement les couples SANS ambiguïté.
+function matchHeirs(members, sessions) {
+  const mem = (Array.isArray(members) ? members : []).filter((m) => m && m.groupId && m.key && m.launchedAt != null);
+  const ses = (Array.isArray(sessions) ? sessions : []).filter((s) => s && s.sessionId && Number.isFinite(s.startedAt));
+  if (!mem.length || !ses.length) return [];
+  const pairs = [];
+  for (const m of mem) {
+    for (const s of ses) {
+      if (s.startedAt < m.launchedAt - HEIR_SLACK_MS) continue;
+      if (s.startedAt > m.launchedAt + HEIR_WINDOW_MS) continue;
+      pairs.push({ m, s });
+    }
+  }
+  const byMember = new Map();
+  const bySession = new Map();
+  for (const p of pairs) {
+    const mk = p.m.groupId + '/' + p.m.key;
+    byMember.set(mk, (byMember.get(mk) || 0) + 1);
+    bySession.set(p.s.sessionId, (bySession.get(p.s.sessionId) || 0) + 1);
+  }
+  const out = [];
+  for (const p of pairs) {
+    const mk = p.m.groupId + '/' + p.m.key;
+    if (byMember.get(mk) !== 1 || bySession.get(p.s.sessionId) !== 1) continue;
+    out.push({ groupId: p.m.groupId, key: p.m.key, sessionId: p.s.sessionId });
+  }
+  return out;
+}
+
 module.exports = {
-  matchPending, pendingForRelink, looksLikeSamePrompt, identifiesConversation,
+  matchPending, pendingForRelink, matchHeirs, HEIR_WINDOW_MS, looksLikeSamePrompt, identifiesConversation,
   normalizeForMatch, MIN_PREFIX, CMP_LEN,
 };

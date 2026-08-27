@@ -216,14 +216,28 @@ function memberTruth(member, sources) {
     }
   }
 
-  return build(status, { convId, conv, live, sent });
+  return build(status, { convId, conv, live, sent, state });
 }
 
 function build(status, ctx) {
   const listed = !!ctx.conv;
+  const waveStatus = WAVE_STATUS[status] || 'launched';
   return {
     status,
-    waveStatus: WAVE_STATUS[status] || 'launched',
+    waveStatus,
+    // « TERMINÉ, PROUVÉ » — à ne pas confondre avec `waveStatus === 'done'`
+    // (2026-08-26). L'affichage conclut « terminée » même quand PLUS AUCUNE
+    // source ne parle (`state == null`, `idle`) : c'est délibéré, un doute sur
+    // une conversation morte depuis longtemps ne doit pas laisser un ✗ à
+    // l'écran ni geler un compteur (cf. le bloc du dessus, incident
+    // 2026-07-24). Mais une PRÉSOMPTION ne doit jamais OUVRIR quelque chose :
+    // c'est exactement ce qui a ouvert sept onglets pour cinq conversations le
+    // 2026-08-26 — l'user fermait des onglets, les membres perdaient leur
+    // état, la vague passait pour finie et la suivante partait. Ce champ dit
+    // donc ce que l'affichage n'a pas le droit d'exiger et ce qu'une ouverture
+    // automatique, elle, doit exiger : un `done` ÉCRIT par une source (les
+    // hooks, ou l'état affiné de la vue), jamais déduit d'un silence.
+    doneProven: waveStatus === 'done' && ctx.state === 'done',
     convId: ctx.convId,
     linked: !!ctx.convId,
     listed,

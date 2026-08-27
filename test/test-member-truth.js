@@ -256,5 +256,26 @@ for (const st of ['busy', 'waiting', 'idle']) {
 t = memberTruth(emptyPromptMember, sources({ live: ['s1'], transcripts: ['s1'], view: { s1: { state: 'done', tabOpen: true } } }));
 check('prompt vide + lié + done → done, comme un membre normal', t.status === 'done', t.status);
 
+console.log('\n3. doneProven : ce qu\'il faut pour OUVRIR, pas pour afficher (2026-08-26)');
+// L'affichage conclut « terminée » sur un SILENCE (state absent, ou `idle`,
+// qui est le repli de state.js quand l'entrée n'existe pas) : délibéré, cf.
+// l'en-tête du module. Mais une présomption ne doit jamais ouvrir un onglet —
+// c'est ce silence qui a fait ouvrir sept onglets pour cinq conversations
+// pendant que l'user fermait les siens. `doneProven` sépare les deux.
+t = memberTruth(linked, sources({ transcripts: ['s1'], hooks: { s1: 'done' } }));
+check('hooks disent done → doneProven', t.doneProven === true, JSON.stringify(t));
+t = memberTruth(linked, sources({ transcripts: ['s1'], view: { s1: { state: 'done', tabOpen: true } } }));
+check('la vue dit done → doneProven', t.doneProven === true, JSON.stringify(t));
+t = memberTruth(linked, sources({ transcripts: ['s1'] }));
+check('AUCUNE source (state absent) → affiché terminé…', t.waveStatus === 'done', t.status);
+check('… mais PAS prouvé : ce silence n\'ouvrira rien', t.doneProven === false);
+t = memberTruth(linked, sources({ transcripts: ['s1'], view: { s1: { state: 'idle', tabOpen: true } } }));
+check('idle (le repli de state.js, jamais écrit par un hook) → affiché terminé…', t.waveStatus === 'done', t.status);
+check('… mais PAS prouvé non plus', t.doneProven === false);
+t = memberTruth(linked, sources({ transcripts: ['s1'], hooks: { s1: 'busy' } }));
+check('une tâche qui tourne : jamais prouvée terminée', t.doneProven === false);
+t = memberTruth({ sessionId: null, launchedAt: null }, sources());
+check('un membre en file non plus', t.doneProven === false);
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

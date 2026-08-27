@@ -190,16 +190,42 @@ function createSessionTitles(stateDbPath, options = {}) {
   };
 }
 
+// Un éditeur sérialisé du memento : est-ce un panneau Claude, et quel
+// sessionID porte-t-il. `{ claude:false, sessionId:null }` pour tout le reste
+// (fichier, diff, webview d'une autre extension, JSON malformé) — jamais
+// d'exception, un éditeur illisible n'est pas fatal pour les autres.
+function editorSessionInfo(editor) {
+  const none = { claude: false, sessionId: null };
+  if (!editor || typeof editor.value !== 'string') return none;
+  let outer;
+  try { outer = JSON.parse(editor.value); } catch { return none; }
+  if (!outer || outer.extensionId !== CLAUDE_EXTENSION_ID || typeof outer.state !== 'string') return none;
+  let inner;
+  try { inner = JSON.parse(outer.state); } catch { return { claude: true, sessionId: null }; }
+  const sid = inner && typeof inner.sessionID === 'string' && inner.sessionID ? inner.sessionID : null;
+  return { claude: true, sessionId: sid };
+}
+
 // Parcourt l'arbre `serializedGrid.root` (noeuds "branch"/"leaf", cf.
-// EDITOR_STATE_KEY ci-dessus) et rend l'ensemble des sessionId dont un onglet
-// webview Claude est ouvert ICI. Aucune exception ne doit remonter : un
-// noeud/éditeur malformé (schéma qui bouge, une extension tierce dont le JSON
-// diffère) est simplement ignoré, jamais fatal pour les autres.
-function sessionIdsFromEditorState(parsed) {
-  const ids = new Set();
-  const root = parsed && parsed['editorpart.state'] && parsed['editorpart.state'].serializedGrid
-    && parsed['editorpart.state'].serializedGrid.root;
-  if (!root) return ids;
+// EDITOR_STATE_KEY ci-dessus) et rend :
+//   ids    — l'ensemble des sessionId dont un onglet webview Claude est ouvert ICI ;
+//   active — l'éditeur ACTIF de la fenêtre (groupe `activeGroup`, puis tête de
+//            son `mru` — l'ordre most-recently-used que le renderer tient à
+//            jour), au format editorSessionInfo ; null si irrésolu (memento
+//            absent, groupe actif introuvable, mru vide/malformé).
+// C'est la moitié « active » qui fonde la doctrine « le renderer est le juge »
+// (refactor surlignage 2026-08-27) : ce memento est écrit par le PROCESSUS QUI
+// PEINT L'ÉCRAN — vérifié sur l'incident du 2026-08-27, où il disait vrai
+// (mru[0] = l'onglet réellement affiché) pendant que la copie miroir
+// tabGroups de l'hôte d'extension mentait depuis 14 minutes.
+// Aucune exception ne doit remonter : un noeud/éditeur malformé (schéma qui
+// bouge, une extension tierce dont le JSON diffère) est simplement ignoré.
+function analyzeEditorState(parsed) {
+  const out = { ids: new Set(), active: null };
+  const state = parsed && parsed['editorpart.state'];
+  const root = state && state.serializedGrid && state.serializedGrid.root;
+  if (!root) return out;
+  const activeGroupId = state.activeGroup;
   const stack = [root];
   while (stack.length) {
     const node = stack.pop();
@@ -210,16 +236,21 @@ function sessionIdsFromEditorState(parsed) {
     }
     if (node.type !== 'leaf' || !node.data || !Array.isArray(node.data.editors)) continue;
     for (const editor of node.data.editors) {
-      if (!editor || typeof editor.value !== 'string') continue;
-      let outer;
-      try { outer = JSON.parse(editor.value); } catch { continue; }
-      if (!outer || outer.extensionId !== CLAUDE_EXTENSION_ID || typeof outer.state !== 'string') continue;
-      let inner;
-      try { inner = JSON.parse(outer.state); } catch { continue; }
-      if (inner && typeof inner.sessionID === 'string' && inner.sessionID) ids.add(inner.sessionID);
+      const info = editorSessionInfo(editor);
+      if (info.sessionId) out.ids.add(info.sessionId);
+    }
+    if (activeGroupId != null && node.data.id === activeGroupId
+        && Array.isArray(node.data.mru) && node.data.mru.length) {
+      const activeEditor = node.data.editors[node.data.mru[0]];
+      if (activeEditor) out.active = editorSessionInfo(activeEditor);
     }
   }
-  return ids;
+  return out;
+}
+
+// Compatibilité : l'ensemble seul, pour createOpenSessionIds ci-dessous.
+function sessionIdsFromEditorState(parsed) {
+  return analyzeEditorState(parsed).ids;
 }
 
 // createOpenSessionIds(path) → { get(): Set<sessionId> } — les sessions dont
@@ -266,7 +297,74 @@ function createOpenSessionIds(stateDbPath, options = {}) {
   };
 }
 
+// createRendererActive(path) → { get(): { sessionId, claude, flushedAt }, bump() }
+// — la session Claude dont l'onglet est ACTIF dans cette fenêtre, au sens du
+// memento sur disque (cf. analyzeEditorState), datée du flush qui l'a écrite.
+//
+// C'est la SEULE source d'onglet actif étrangère à la copie miroir tabGroups
+// de l'hôte d'extension — celle-ci a prouvé qu'elle sait mentir des minutes
+// durant, fenêtre focusée, sans qu'aucun événement ne vienne jamais la
+// corriger (journal 2026-08-27, fenêtre « 142 modifications »). state.js s'en
+// sert comme JUGE du surlignage : une divergence n'est tranchée par ce lecteur
+// que si son flush est POSTÉRIEUR au dernier changement adopté par le tracker
+// d'onglets (l'arbitrage vit dans buildSnapshot, pas ici).
+//
+// `flushedAt` = mtime le plus récent du couple state.vscdb / state.vscdb-wal :
+// SQLite en mode WAL écrit d'abord dans le -wal, le fichier principal ne bouge
+// qu'au checkpoint — dater le seul principal, c'est se croire plus vieux qu'on
+// est, donc perdre des arbitrages légitimes. La clé de relecture couvre les
+// deux fichiers pour la même raison.
+//
+// `bump()` : force la prochaine lecture à re-stater tout de suite (appelé par
+// le fs.watch d'extension.js sur le state.vscdb — le flush du renderer est la
+// seule horloge de cette vérité, le guetter rend la réconciliation quasi
+// immédiate au lieu d'attendre le tick 30 s du moteur).
+//
+// Sens de l'échec, comme partout dans ce module : toute lecture ratée garde le
+// dernier état connu ; un memento illisible/absent rend { sessionId:null,
+// claude:false } — l'arbitre ne fait alors RIEN, comportement d'avant ce lot.
+const RENDERER_ACTIVE_STAT_MS = 1000;
+function createRendererActive(stateDbPath, options = {}) {
+  const minStatIntervalMs = options.minStatIntervalMs != null
+    ? options.minStatIntervalMs : RENDERER_ACTIVE_STAT_MS;
+  let current = { sessionId: null, claude: false, flushedAt: null };
+  let key = null;
+  let lastStatAt = 0;
+  let warned = false;
+
+  return {
+    bump() { lastStatAt = 0; },
+    get() {
+      if (!stateDbPath) return current;
+      const now = Date.now();
+      if (lastStatAt && now - lastStatAt < minStatIntervalMs) return current;
+      lastStatAt = now;
+      let main;
+      try { main = fs.statSync(stateDbPath); } catch { return current; }
+      let wal = null;
+      try { wal = fs.statSync(stateDbPath + '-wal'); } catch {}
+      const k = `${main.mtimeMs}:${main.size}:${wal ? wal.mtimeMs : 0}:${wal ? wal.size : 0}`;
+      if (k === key) return current;
+      const res = readVscdbKey(stateDbPath, EDITOR_STATE_KEY);
+      if (!res.ok) {
+        if (res.error && !warned) { warned = true; log('renderer-active read failed: %s', res.error.message); }
+        return current;
+      }
+      key = k;
+      warned = false;
+      const active = analyzeEditorState(res.value).active;
+      current = {
+        sessionId: (active && active.claude && active.sessionId) || null,
+        claude: !!(active && active.claude),
+        flushedAt: Math.max(main.mtimeMs, wal ? wal.mtimeMs : 0),
+      };
+      return current;
+    },
+  };
+}
+
 module.exports = {
   createSessionTitles, cleanLabel, MIN_STAT_INTERVAL_MS, CACHE_KEY,
   createOpenSessionIds, EDITOR_STATE_KEY,
+  analyzeEditorState, createRendererActive, RENDERER_ACTIVE_STAT_MS,
 };

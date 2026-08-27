@@ -23,12 +23,20 @@
 //   engine.markClosed([ids]);    // onglets fermés → retrait immédiat
 //   engine.dispose();
 //   tabs: () => ({ known: boolean, labels: string[], activeLabel: string|null,
-//                   activeIndex: number|null })
+//                   activeIndex: number|null, labelChangedAt: number })
 //         — union de toutes les fenêtres ; activeLabel = onglet Claude
 //           sélectionné dans CETTE fenêtre (surlignage par fenêtre) ;
 //           activeIndex = sa POSITION dans `labels` (lot 2 du plan
 //           d'appariement, 2026-08-21) — départage deux onglets au libellé
-//           identique, ce que le libellé seul ne peut plus faire
+//           identique, ce que le libellé seul ne peut plus faire ;
+//           labelChangedAt = dernier changement de valeur d'activeLabel
+//           (référence temporelle de l'arbitre renderer, 2026-08-27)
+//   rendererActive: () => ({ sessionId, claude, flushedAt })
+//         — l'éditeur ACTIF au sens du memento du renderer (session-titles.js
+//           createRendererActive) : le JUGE du surlignage, cf. l'arbitre
+//           « le renderer est le juge » dans buildSnapshot (2026-08-27).
+//           Absent (bancs, base illisible) ⇒ arbitre inactif, verdict par
+//           libellés inchangé.
 //   liveSessions: () => Set<sessionId>   — sessions CLI vivantes
 //         (live-sessions.js ; défaut = le vrai registre ~/.claude/sessions)
 //   sessionTitles: () => Map<sessionId, label>  — titres d'onglet RÉELS
@@ -67,6 +75,55 @@ const { logEvent, createVerdictFilter } = require('./ack-journal.js');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SESSIONS_STATE_PATH = path.join(CLAUDE_DIR, 'sessions-state.json');
 const ACTIVE_SESSION_PATH = path.join(CLAUDE_DIR, 'active-session.json');
+
+// ── « Le renderer est le juge » (refactor surlignage, 2026-08-27) ───────────
+// Marge de l'arbitre : la vérité renderer (memento du state.vscdb, cf.
+// session-titles.js createRendererActive) ne corrige le surlignage que si son
+// flush est postérieur d'au moins cette marge au dernier changement adopté par
+// le tracker d'onglets. Elle couvre l'asynchronisme flush/horloge : un état
+// capturé à T peut être écrit à T+ε — sans marge, un geste tombé dans cet ε
+// serait « jugé » par un memento qui ne l'a pas vu. Override de banc, même
+// motif que FLIP_QUARANTINE_MS (tabs.js).
+// ⚠️ MESURÉ le 2026-08-27 au soir (dépouillement du journal + échantillonnage
+// direct du state.vscdb) : `flushedAt` est le mtime du FICHIER, il ne date PAS
+// la clé qu'on y lit. Le fichier est réécrit toutes les 30-60 s pour d'autres
+// clés (3 flushs sur 7 observés sans le moindre changement de
+// `workbench.parts.editor`), et la clé de l'éditeur actif, elle, met jusqu'à
+// **27 s** à porter une bascule (mesure directe : clic panneau 18:15:26,4 →
+// valeur écrite 18:15:53,7). Avec 3 s de marge, l'arbitre se croyait donc
+// « plus récent » en lisant un état vieux d'une demi-minute : les 4 seules
+// vraies corrections du journal (14:33:36, 14:36:53, 14:50:49, 18:02:23) ont
+// TOUTES rétrogradé un clic panneau `isTrusted` vieux de 4 à 7 s — l'invariant
+// « un memento en retard ne rétrograde pas un clic frais » énoncé au-dessus
+// était écrit, mais pas tenu. La marge couvre maintenant la latence mesurée
+// (27 s) plus une réserve : en dessous, le juge ne peut que fabriquer du faux.
+const RENDERER_TRUTH_MARGIN_MS = Number(process.env.QUOTABAR_TRUTH_MARGIN_MS) || 45000;
+// Sauf quand il n'y a RIEN à rétrograder : verdict par libellés muet (onglet en
+// cours de renommage, « Claude Code » sans titre), le juge ne remplace aucun
+// choix, il comble un vide. Aucun clic ne peut être écrasé par ce chemin, donc
+// la marge courte d'origine y reste — c'est le service rendu par les deux
+// premiers épisodes du journal (wasVia:none, 14:23:37 et 14:25:51).
+const RENDERER_TRUTH_FILL_MARGIN_MS = Number(process.env.QUOTABAR_TRUTH_FILL_MARGIN_MS) || 3000;
+// Durée d'exposition du bandeau « surlignage corrigé » côté panneau : passée
+// elle, le snapshot cesse de publier l'épisode (le webview borne aussi de son
+// côté, il n'attend pas un push d'expiration).
+const RECONCILE_NOTICE_MS = 10 * 60 * 1000;
+// Grâce AVANT le bandeau (demande user, 2026-08-27 après le premier reload) :
+// la correction du surlignage reste immédiate, mais l'ÉPISODE ne devient une
+// alerte visible que si la divergence persiste au-delà de cette fenêtre. Les
+// deux premiers bandeaux réels étaient des transitoires de renommage d'onglet
+// (« Claude Code » → titre, verdict par libellés vide 3-6 s, wasSessionId
+// null au journal) : un vide comblé ou une divergence que le tracker résorbe
+// en quelques secondes est le système qui FONCTIONNE, pas une erreur à
+// montrer. 5 s, tranché par l'user (2026-08-27, « 15 c'est trop long ») : les
+// transitoires de renommage mesurés durent 0,4-2 s (et les vides sont déjà
+// filtrés par wasSessionId), le vrai bug fondateur durait 14 minutes — 5 s
+// sépare encore largement les deux. Lue à chaque évaluation (pas figée au
+// require) : le banc joue plusieurs valeurs dans le même process.
+const reconcileGraceMs = () => {
+  const v = Number(process.env.QUOTABAR_RECONCILE_GRACE_MS);
+  return Number.isFinite(v) ? v : 5000;
+};
 
 // Une conv `busy` dont le transcript n'a rien écrit depuis 5 min ET dont le
 // process CLI est MORT est un zombie (process tué, crash, VS Code fermé sans
@@ -1209,6 +1266,131 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     for (const c of conversations) c.isActive = c.sessionId === activeSessionId;
     if (activeSessionId) { highlightVia = 'active-session'; highlightSessionId = activeSessionId; }
   }
+
+  // ── LE RENDERER EST LE JUGE (refactor surlignage, 2026-08-27) ─────────────
+  // Tout le verdict ci-dessus descend d'UNE source : la copie miroir tabGroups
+  // de l'hôte d'extension (via tabs.js). Or elle a prouvé qu'elle sait rester
+  // FAUSSE indéfiniment — bascule fantôme adoptée fenêtre sans focus, puis plus
+  // AUCUN événement ni relecture pour la corriger (14 min mesurées le
+  // 2026-08-27, fenêtre « 142 modifications », pendant que l'écran affichait
+  // un autre onglet). Aucune parade interne ne peut fermer ce cas : toute
+  // relecture relit le même mensonge (cf. tabs.js, doctrine « une bascule ne
+  // s'adopte que prouvée » — nécessaire pour la réactivité, insuffisante pour
+  // la vérité).
+  //
+  // Le juge est donc une source ÉTRANGÈRE au miroir : le memento
+  // `workbench.parts.editor` du state.vscdb, écrit par le RENDERER — le
+  // processus qui peint l'écran, c'est-à-dire la vérité que l'utilisateur a
+  // sous les yeux — et qui porte l'IDENTITÉ exacte (sessionID) de l'éditeur
+  // actif, pas un libellé tronqué à apparier (cf. session-titles.js
+  // createRendererActive, et l'incident : mru[0] disait vrai sur le disque
+  // pendant tout le mensonge du miroir).
+  //
+  // Règle d'arbitrage, dans les deux sens du temps :
+  //  - le memento ne juge que s'il est PLUS RÉCENT que le dernier avis du
+  //    tracker (flushedAt - marge > labelChangedAt) : un flush paresseux ne
+  //    rétrograde jamais un clic tout frais. ⚠️ La MARGE fait tout le travail
+  //    ici, et 3 s ne suffisaient pas : le mtime date le FICHIER, pas la clé
+  //    lue (mesures dans la déclaration de RENDERER_TRUTH_MARGIN_MS — jusqu'à
+  //    27 s de retard, et des flushs entiers sans le moindre changement de la
+  //    clé). Les 4 corrections « réelles » du premier jour ont toutes écrasé un
+  //    clic panneau de 4 à 7 s : c'était le juge qui fabriquait le faux
+  //    surlignage de quelques secondes, pas un fantôme qui survivait. Ce que la
+  //    marge retient est journalisé (highlight-truth-deferred) ;
+  //  - dès qu'il est plus récent et qu'il désigne une conversation LISTÉE
+  //    différente, il GAGNE — quelle que soit la porte par laquelle le
+  //    mensonge est entré (fantôme adopté, souvenir invalide, gel du canal…).
+  //    C'est le filet UNIVERSEL : plus aucune désynchronisation ne peut durer
+  //    au-delà du prochain flush du renderer.
+  //  - il ne dit rien quand l'actif n'est pas un panneau Claude (claude:false,
+  //    l'utilisateur est sur un fichier) : le repli-souvenir garde la main —
+  //    basculer sur un fichier n'éteint toujours pas le surlignage.
+  //  - il ne surligne jamais une conversation hors liste : se taire vaut
+  //    mieux qu'un surlignage sur de l'invisible.
+  // L'épisode est journalisé (highlight-reconciled) dès la première
+  // application ; le BANDEAU du panneau, lui, attend deux conditions (demande
+  // user après le premier reload, 2026-08-27 — « vraie erreur ou timing trop
+  // juste ») :
+  //  - un vrai « avant » : wasSessionId non nul. Combler un surlignage VIDE
+  //    (onglet en cours de renommage, « Claude Code » sans titre — verdict par
+  //    libellés muet quelques secondes) est un service, pas une erreur ; les
+  //    deux premiers bandeaux réels étaient exactement ça.
+  //  - la persistance : la même divergence doit tenir reconcileGraceMs()
+  //    (~15 s). Un transitoire que le tracker résorbe seul s'éteint sans
+  //    bruit ; le mensonge durable (14 min sur l'incident fondateur) est
+  //    promu bandeau à +15 s. La CORRECTION du surlignage reste immédiate
+  //    dans les deux cas — seule l'ALERTE attend.
+  // `reconcileMemory` (propriété du moteur, comme tabOpenMisses) porte les
+  // deux étages : `pending` (épisode en observation) puis `last` (épisode
+  // promu, publié au panneau) — l'arbitrage se RÉAPPLIQUE à chaque recompute,
+  // une seule ligne de journal et un seul bandeau par épisode.
+  const rendererTruth = (typeof opts.rendererActive === 'function' && opts.rendererActive()) || null;
+  const reconcileMemory = opts.reconcileMemory || {};
+  let reconciledKey = null;
+  const truthDiverges = !!(rendererTruth && rendererTruth.claude && rendererTruth.sessionId
+      && typeof rendererTruth.flushedAt === 'number'
+      && tabs && typeof tabs.labelChangedAt === 'number' && tabs.labelChangedAt > 0
+      && rendererTruth.sessionId !== highlightSessionId);
+  // Deux marges, une par ENJEU (2026-08-27 soir, cf. leur déclaration) :
+  // écraser un choix existant exige de couvrir la latence réelle du memento ;
+  // combler un vide ne peut rien écraser.
+  const truthMargin = highlightSessionId ? RENDERER_TRUTH_MARGIN_MS : RENDERER_TRUTH_FILL_MARGIN_MS;
+  const truthFresh = truthDiverges && rendererTruth.flushedAt - truthMargin > tabs.labelChangedAt;
+  if (truthDiverges && !truthFresh) {
+    // Le juge a quelque chose à dire mais rien qui prouve qu'il l'a appris
+    // APRÈS le dernier avis du tracker : on se tait, et on le DIT au journal —
+    // une ligne par épisode retenu, pour que le prochain chapitre sache ce que
+    // cette garde coûte (correction légitime retardée) au lieu de le deviner.
+    const deferredKey = `${highlightSessionId || ''}>${rendererTruth.sessionId}@${tabs.labelChangedAt}`;
+    if (reconcileMemory.deferredKey !== deferredKey) {
+      reconcileMemory.deferredKey = deferredKey;
+      logEvent('highlight-truth-deferred', {
+        wasSessionId: highlightSessionId || null, nowSessionId: rendererTruth.sessionId,
+        flushedAt: rendererTruth.flushedAt, labelChangedAt: tabs.labelChangedAt,
+        marginMs: truthMargin, sinceLabelChangeMs: now - tabs.labelChangedAt,
+      });
+    }
+  } else if (reconcileMemory.deferredKey) {
+    reconcileMemory.deferredKey = null;
+  }
+  if (truthFresh) {
+    const target = conversations.find((c) => c.sessionId === rendererTruth.sessionId);
+    if (target) {
+      const episodeKey = `${highlightSessionId || ''}>${rendererTruth.sessionId}@${tabs.labelChangedAt}`;
+      reconciledKey = episodeKey;
+      if (reconcileMemory.lastKey !== episodeKey) {
+        if (!reconcileMemory.pending || reconcileMemory.pending.key !== episodeKey) {
+          const was = highlightSessionId
+            ? conversations.find((c) => c.sessionId === highlightSessionId) : null;
+          const detail = {
+            at: now,
+            wasSessionId: highlightSessionId, wasTitle: (was && was.title) || null, wasVia: highlightVia,
+            nowSessionId: rendererTruth.sessionId, nowTitle: target.title || null,
+            flushedAt: rendererTruth.flushedAt, labelChangedAt: tabs.labelChangedAt,
+          };
+          reconcileMemory.pending = { key: episodeKey, firstAt: now, detail };
+          logEvent('highlight-reconciled', detail);
+        } else if (reconcileMemory.pending.detail.wasSessionId
+                   && now - reconcileMemory.pending.firstAt >= reconcileGraceMs()) {
+          reconcileMemory.lastKey = episodeKey;
+          reconcileMemory.last = { ...reconcileMemory.pending.detail, at: reconcileMemory.pending.firstAt };
+          logEvent('highlight-banner', { key: episodeKey, heldForMs: now - reconcileMemory.pending.firstAt });
+          reconcileMemory.pending = null;
+        }
+      }
+      for (const c of conversations) c.isActive = false;
+      target.isActive = true;
+      highlightSessionId = rendererTruth.sessionId;
+      highlightVia = 'renderer-truth';
+    }
+  }
+  // Divergence disparue (tracker réaligné, vérité changée, fraîcheur cassée
+  // par un nouveau geste) avant la promotion : l'épisode en observation était
+  // un transitoire — il s'éteint sans bandeau. Un épisode déjà PROMU, lui,
+  // reste publié (l'utilisateur doit voir qu'il y a eu une vraie correction).
+  if (reconcileMemory.pending && reconcileMemory.pending.key !== reconciledKey) {
+    reconcileMemory.pending = null;
+  }
   // Journal du lot 0 (préalable au fix d'appariement) — un OBSERVATEUR : aucune
   // décision ci-dessus n'en dépend, l'absence de journal ne change rien au
   // rendu. Ne trace qu'un CHANGEMENT de verdict (verdictFilter), sinon le
@@ -1252,7 +1434,14 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // `supersededBy` (husk→successeur) : la redirection d'identité que les
   // consommateurs de sessionId (membres de groupe, master, moteur de vagues)
   // appliquent au rendu — cf. supersede.js. Vide dans le cas nominal.
-  return { conversations, activeSessionId, generatedAt: now, supersededBy, tabGoneIds };
+  // `highlightReconcile` : le dernier épisode « le renderer a corrigé le
+  // surlignage » tant qu'il est frais (bandeau warning du panneau, cf.
+  // l'arbitre ci-dessus) — null sinon.
+  return {
+    conversations, activeSessionId, generatedAt: now, supersededBy, tabGoneIds,
+    highlightReconcile: (reconcileMemory.last && now - reconcileMemory.last.at < RECONCILE_NOTICE_MS)
+      ? reconcileMemory.last : null,
+  };
 }
 
 // Ce que le webview AFFICHE, et rien d'autre. Le snapshot porte aussi des champs
@@ -1295,6 +1484,11 @@ function createStateEngine(options = {}) {
   // d'affichage vs la présence même de la ligne) et ne doivent pas se remettre
   // à zéro l'une l'autre.
   const presenceMisses = new Map();
+  // Mémoire de l'arbitre « le renderer est le juge » (cf. buildSnapshot) :
+  // même besoin de survie d'un recompute à l'autre que les deux Maps ci-dessus
+  // — l'arbitrage se réapplique à chaque recompute, l'épisode ne se journalise
+  // et ne se (re)date qu'une fois.
+  const reconcileMemory = {};
   // `liveSessions` a un défaut RÉEL : le registre est du Node pur, lisible d'ici
   // (contrairement au state.vscdb, dont seul l'hôte d'extension connaît le
   // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
@@ -1308,7 +1502,7 @@ function createStateEngine(options = {}) {
     // Défaut RÉEL, même registre que liveSessions ci-dessus (live-sessions.js) :
     // cf. `startedAt` sur effectiveState.
     liveSessionStarts: () => new Map(liveSessionEntries().map((e) => [e.sessionId, e.startedAt || null])),
-    ...DEFAULTS, ...options, closedAt, tabOpenMisses, presenceMisses, readCost,
+    ...DEFAULTS, ...options, closedAt, tabOpenMisses, presenceMisses, readCost, reconcileMemory,
   };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
   // Part de la clé de rendu qui N'EST PAS dans les conversations (2026-08-06).

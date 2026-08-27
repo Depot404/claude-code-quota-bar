@@ -19,7 +19,8 @@ function check(name, cond, detail) {
 }
 function skip(name, why) { skipped++; console.log(`  skip ${name} (${why})`); }
 
-const { createSessionTitles, cleanLabel, CACHE_KEY, createOpenSessionIds, EDITOR_STATE_KEY } =
+const { createSessionTitles, cleanLabel, CACHE_KEY, createOpenSessionIds, EDITOR_STATE_KEY,
+  analyzeEditorState, createRendererActive } =
   require(path.join(__dirname, '..', 'session-titles.js'));
 const { liveSessionIds, foreignSessionIds, isForeignEntrypoint, pidAlive } =
   require(path.join(__dirname, '..', 'live-sessions.js'));
@@ -266,6 +267,88 @@ if (!sqlite) {
   fs.utimesSync(editorDbPath, futureE3, futureE3);
   check('noeud racine sans data.editors → Set vide, aucune exception',
     openIds.get().size === 0, String(openIds.get().size));
+
+  // ── 2ter. L'éditeur ACTIF du memento : « le renderer est le juge » ─────────
+  // (refactor surlignage 2026-08-27) Structure mesurée sur les deux fenêtres
+  // réelles de l'incident : editorpart.state porte activeGroup, chaque leaf
+  // porte data.id + data.mru (indices dans editors[], tête = actif). C'est la
+  // moitié « active » qu'analyzeEditorState ajoute au parcours du §2bis.
+  console.log('\n2ter. analyzeEditorState / createRendererActive : l\'éditeur ACTIF du memento');
+  const gridActive = (activeGroup, leafs) => ({
+    'editorpart.state': {
+      serializedGrid: { root: { type: 'branch', data: leafs } },
+      activeGroup,
+      mostRecentActiveGroups: [activeGroup],
+    },
+  });
+  const leafOf = (id, editors, mru) => ({ type: 'leaf', data: { id, editors, mru } });
+
+  {
+    const parsed = gridActive(1, [
+      leafOf(0, [claudeEditor('sess-a')], [0]),
+      leafOf(1, [claudeEditor('sess-b'), fileEditor(), claudeEditor('sess-c')], [2, 0, 1]),
+    ]);
+    const a = analyzeEditorState(parsed);
+    check('l\'actif est mru[0] du groupe activeGroup, par identité',
+      a.active && a.active.claude === true && a.active.sessionId === 'sess-c', JSON.stringify(a.active));
+    check('… et l\'ensemble des ouverts reste complet (§2bis intact)',
+      a.ids.size === 3 && a.ids.has('sess-a') && a.ids.has('sess-b') && a.ids.has('sess-c'),
+      [...a.ids].join(','));
+  }
+  {
+    const parsed = gridActive(1, [leafOf(1, [claudeEditor('sess-b'), fileEditor()], [1, 0])]);
+    const a = analyzeEditorState(parsed);
+    check('actif = un FICHIER → claude:false, jamais un sessionId deviné',
+      a.active && a.active.claude === false && a.active.sessionId === null, JSON.stringify(a.active));
+  }
+  {
+    const noMru = gridActive(0, [{ type: 'leaf', data: { id: 0, editors: [claudeEditor('sess-a')] } }]);
+    check('mru absent → active null, aucune exception', analyzeEditorState(noMru).active === null);
+    const wrongGroup = gridActive(7, [leafOf(0, [claudeEditor('sess-a')], [0])]);
+    check('activeGroup introuvable → active null', analyzeEditorState(wrongGroup).active === null);
+  }
+
+  // createRendererActive : lecture datée du flush, bump(), dégradations.
+  const rendererDbPath = path.join(SANDBOX, 'state-renderer.vscdb');
+  const writeRenderer = (value) => {
+    const db = new sqlite.DatabaseSync(rendererDbPath);
+    db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)');
+    db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(EDITOR_STATE_KEY, value);
+    db.close();
+  };
+  check('chemin null → { sessionId:null }, aucun accès disque',
+    createRendererActive(null).get().sessionId === null);
+  writeRenderer(JSON.stringify(gridActive(0, [leafOf(0, [claudeEditor('sess-truth')], [0])])));
+  const flushSec = Math.floor(Date.now() / 1000) - 30;
+  fs.utimesSync(rendererDbPath, flushSec, flushSec);
+  const truth = createRendererActive(rendererDbPath, { minStatIntervalMs: 0 });
+  let cur = truth.get();
+  check('actif Claude lu par identité', cur.claude === true && cur.sessionId === 'sess-truth',
+    JSON.stringify(cur));
+  check('flushedAt = mtime du vscdb (à la seconde près)',
+    typeof cur.flushedAt === 'number' && Math.abs(cur.flushedAt - flushSec * 1000) < 1500,
+    `${cur.flushedAt} vs ${flushSec * 1000}`);
+  // Réécriture avec un actif différent + mtime plus frais → la lecture suit,
+  // flushedAt avance.
+  writeRenderer(JSON.stringify(gridActive(0, [leafOf(0, [claudeEditor('sess-truth-2')], [0])])));
+  const flushSec2 = flushSec + 10;
+  fs.utimesSync(rendererDbPath, flushSec2, flushSec2);
+  cur = truth.get();
+  check('réécriture + mtime frais → nouvel actif, flushedAt avancé',
+    cur.sessionId === 'sess-truth-2' && Math.abs(cur.flushedAt - flushSec2 * 1000) < 1500,
+    JSON.stringify(cur));
+  // bump() force le re-stat malgré le throttle : même mécanique que le
+  // fs.watch d'extension.js (le flush du renderer est la seule horloge).
+  const throttledTruth = createRendererActive(rendererDbPath, { minStatIntervalMs: 60 * 1000 });
+  throttledTruth.get();
+  writeRenderer(JSON.stringify(gridActive(0, [leafOf(0, [claudeEditor('sess-truth-3')], [0])])));
+  const flushSec3 = flushSec2 + 10;
+  fs.utimesSync(rendererDbPath, flushSec3, flushSec3);
+  check('throttle actif → l\'écriture n\'est pas encore vue',
+    throttledTruth.get().sessionId !== 'sess-truth-3', JSON.stringify(throttledTruth.get().sessionId));
+  throttledTruth.bump();
+  check('bump() → relecture immédiate malgré le throttle',
+    throttledTruth.get().sessionId === 'sess-truth-3', JSON.stringify(throttledTruth.get().sessionId));
 }
 
 console.log('\n3. cleanLabel (affichage seulement)');

@@ -71,6 +71,7 @@ const vscode = require('vscode');
 //                               // waveNotice, member.status) — toujours
 //                               // automatique, pas de toggle manuel.
 //       id, name, hue: number, collapsed: boolean,
+//       waveMode: 'auto' | 'manual',   // interrupteur de l'en-tête du lot
 //       launchedWave: number,   // vague la plus avancée déjà ouverte
 //       nextWave: number|null,  // vague à proposer au ▶ manuel, null = aucune
 //       waveNotice: string|null,// annonce transitoire (ouverture auto, échec)
@@ -185,6 +186,19 @@ class ClaudePanelProvider {
     if (this._view) this._view.webview.postMessage({ type: 'state', state });
   }
 
+  // RÉPONSE PONCTUELLE à une question du webview (plan agrafe 2026-08-27) —
+  // seul chemin extension → webview qui ne soit PAS un push d'état complet.
+  // Il en fallait un : la résolution de la conversation maîtresse au collage
+  // est un aller-retour (le webview demande, l'extension lit les transcripts,
+  // le webview affiche), et la faire voyager dans `state` obligerait à
+  // mémoriser côté extension quelque chose qui n'appartient qu'au formulaire
+  // — très exactement ce que le contrat d'état interdit (cf. en-tête).
+  // Sans vue résolue, le message est perdu sans bruit : le webview n'existe
+  // pas, il n'y a personne pour l'afficher.
+  post(msg) {
+    if (this._view) this._view.webview.postMessage(msg);
+  }
+
   // Lot 9 : pas de fetch quota événementiel quand le panneau n'est pas à
   // l'écran (onglet sidebar non actif) — même logique que le tick lot 7, côté
   // extension host cette fois (webviewView.visible, pas document.hidden).
@@ -232,6 +246,9 @@ function renderHtml(webview) {
 <style>
   :root {
     --busy: var(--vscode-charts-blue, #03a9f4);
+    /* Le serpentin (arc mobile) lit ce jeton à part de la piste : en ligne
+       plate les deux valent --busy, identique à avant. */
+    --busy-arc: var(--busy);
     --busy-width: 3.5px;
     --busy-alpha: 30%;
     --busy-outset: 2.5px;
@@ -294,6 +311,29 @@ function renderHtml(webview) {
        maîtresse, un membre et une ligne plate tient par construction. */
     --master-ring-w: 4.25px;
     --master-ring-d: 24px;
+    /* DÉSIGNATION DE LA MAÎTRESSE AU COLLAGE (plan agrafe 2026-08-27) — les
+       quatre réglages réglés par l'user sur maquette jouable
+       (MOCKUP_master_agrafe / MOCKUP_apercu_futures_convs, curseurs en
+       direct). Ce sont des CHOIX, pas des mesures : un banc ne les redérive
+       pas, il constate qu'elles sont toujours celles-là.
+         --master-cue-hue    : orange brûlé, MÉLANGÉ de deux jetons du thème et
+           jamais un littéral. VS Code n'expose aucun charts.orange (absent du
+           bundle du workbench, vérifié) et le jaune brut est déjà pris quatre
+           fois dans ce panneau (état « en attente », marque « à relire »,
+           modèle haiku, seuils ctx/coût) — d'où le mélange. Le bleu a été
+           écarté : il se lisait comme la sélection. Contraste du titre sur le
+           fond AU PIC, mesuré par test/audit-contraste.js : 6,09:1 en clair,
+           4,86:1 en sombre (seuil 4,5) ; le jaune vif testé en témoin tombait
+           à 3,07:1 en sombre.
+         --master-cue-amp    : part de teinte dans le fond au sommet de la
+           respiration.
+         --master-cue-period : cadence de la respiration ET du défilement des
+           tirets de l'agrafe (ceux-ci à la moitié : deux tirets par cycle).
+         --master-cue-thick  : épaisseur du trait de l'agrafe. */
+    --master-cue-hue: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 40%, var(--vscode-charts-red, #f85149));
+    --master-cue-amp: 48%;
+    --master-cue-period: 1.2s;
+    --master-cue-thick: 5px;
     /* Anneau d'un MEMBRE (2026-08-22) — sorti des littéraux le jour où la
        tête d'un sous-lot a porté les DEUX canons sur la même bulle : sa
        moitié gauche EST cet anneau-là (même diamètre, même épaisseur), et
@@ -317,6 +357,18 @@ function renderHtml(webview) {
     syntax: '<angle>';
     inherits: true;
     initial-value: 90deg;
+  }
+  /* Même raison, pour la respiration de la ligne maîtresse : une custom
+     property NON enregistrée saute d'un mot-clé à l'autre à 50% du cycle au
+     lieu d'être interpolée — la « respiration » deviendrait un clignotement.
+     Enregistrée et HÉRITÉE, elle descend jusqu'au disque qui troue le rail
+     (.grp-body .conv.master-target .ico::after) : la ligne et son disque
+     tiennent alors la même couleur à chaque image, sans que la formule soit
+     écrite deux fois. */
+  @property --master-cue-bg {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: transparent;
   }
   body {
     padding: var(--sp-sep) 8px var(--sp-block);
@@ -461,6 +513,17 @@ function renderHtml(webview) {
     /* La piste du spinner est un disque translucide : sur le fond du panneau
        30% suffisent, sur un fond saturé elle disparaît. */
     --busy-alpha: 78%;
+    /* Signalé 2026-08-27 : la piste remontée à 78% (ligne au-dessus) a rendu
+       le SERPENTIN (l'arc mobile) illisible — les deux se lisaient dans le
+       même --busy pâle (30% bleu / 70% texte), donc quasi identiques, alors
+       qu'en ligne plate l'écart piste/arc est franc (30% d'alpha vs couleur
+       thème brute). L'audit de contraste ne l'a jamais vu : il ne mesure que
+       le fond (la piste, posée en background-color), jamais le dégradé
+       conique de l'arc. Le serpentin reprend donc --sel-fg, le seul jeton
+       dont ce fond garantit la lisibilité PAR CONSTRUCTION (même contrat que
+       le texte de la ligne) — juste teinté de bleu pour garder l'identité
+       « busy ». */
+    --busy-arc: color-mix(in srgb, var(--sel-fg) 85%, var(--vscode-charts-blue, #03a9f4));
   }
   /* Ce que les jetons ci-dessus ne couvrent pas — chaque cas est un endroit qui
      lisait une couleur BRUTE du thème ou s'atténuait par transparence, deux
@@ -488,6 +551,184 @@ function renderHtml(webview) {
   .conv.active .mk-pin, .conv.active.mk-pinned .mk-set {
     color: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 40%, var(--sel-fg));
   }
+
+  /* ── LIGNE MAÎTRESSE DÉSIGNÉE AU COLLAGE (plan agrafe 2026-08-27) ─────────
+     Elle RESPIRE tant que le bloc est collé et pas lancé — pas trois
+     battements : la respiration dit un état en cours (« c'est à CELLE-CI que
+     ce lot va se rattacher »), et un état ne bat pas trois fois puis se tait.
+     Elle s'éteint au « Create » et au « Cancel », parce que le formulaire est
+     alors remis à zéro et que la classe tombe avec lui.
+
+     APRÈS .conv.active dans la feuille, et c'est structurel : les deux règles
+     ont la même spécificité (deux classes), donc l'ordre tranche. Le fond de
+     la respiration ne REMPLACE pas celui de la sélection, il se COMPOSE
+     par-dessus — background-color reprend --row-bg (le fond réel de la ligne,
+     panneau ou sélection) et l'orange arrive en calque translucide au-dessus.
+     Une maîtresse qui se trouve être aussi la conversation sélectionnée garde
+     donc ses deux informations, au lieu d'en perdre une.
+
+     PAS de @media (prefers-reduced-motion: reduce) ici — même raison qu'au
+     spinner busy plus haut : ce poste a les animations Windows sur OFF, donc
+     Chromium y répond « reduce » en permanence ; la règle serait TOUJOURS
+     active et figerait la seule chose qui porte l'information. */
+  .conv.master-target {
+    position: relative; z-index: 1; border-radius: 4px;
+    background-color: var(--row-bg, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+    background-image: linear-gradient(var(--master-cue-bg), var(--master-cue-bg));
+    animation: master-breathe var(--master-cue-period) ease-in-out infinite;
+  }
+  @keyframes master-breathe {
+    0%, 100% {
+      --master-cue-bg: color-mix(in srgb, var(--master-cue-hue) calc(var(--master-cue-amp) * .35), transparent);
+      box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--master-cue-hue) 55%, transparent);
+    }
+    50% {
+      --master-cue-bg: color-mix(in srgb, var(--master-cue-hue) var(--master-cue-amp), transparent);
+      box-shadow: inset 0 0 0 2px var(--master-cue-hue);
+    }
+  }
+  /* Ce fond est saturé : les jetons de couleur sont donc redéfinis ICI, à la
+     racine de la règle, exactement comme .conv.active le fait pour le sien
+     (dosages RÉGLÉS PAR MESURE, node test/audit-contraste.js, cas « maitresse
+     au pic »). Deux variantes, parce que la ligne maîtresse peut être aussi
+     la ligne sélectionnée et que les deux fonds n'ont RIEN à voir :
+       — non sélectionnée, le fond au pic est l'orange composé sur le panneau :
+         CLAIR en thème clair (#edb297), SOMBRE en thème sombre (#7b4422). Il
+         n'existe donc aucune direction de mélange unique vers du blanc ou du
+         noir — on mixe vers --vscode-foreground, la couleur de texte du thème,
+         qui va dans le bon sens des deux côtés ;
+       — sélectionnée, le fond reste sombre dans les deux thèmes (l'accent
+         assombri de .conv.active), et on reste sur --sel-fg comme elle.
+     Mesuré au pic : le titre tient 6,11:1 en clair et 4,89:1 en sombre.
+
+     UN ÉCART SUBSISTE, mesuré et assumé : en thème SOMBRE, le %ctx rouge d'une
+     maîtresse non sélectionnée plafonne à 4,21:1 (seuil 4,5 ; il valait 2,34
+     avant ce redosage, et 4,95 sans teinte). Le fond au pic EST à 60% le rouge
+     du thème — un rouge d'alerte ne peut donc pas s'en détacher tout en
+     restant rouge : à 8% de rouge il passerait le seuil, mais ce serait un
+     gris rosé, et « un rouge reste rouge » (règle du dossier). Le seul remède
+     sans délavage est l'intensité elle-même, qui est une décision de l'user :
+     à --master-cue-amp 44% tout passe (titre 5,26 · ctx rouge 4,56 en sombre).
+     Ne pas « corriger » en baissant encore le dosage du rouge. */
+  .conv.master-target:not(.active) {
+    --muted: color-mix(in srgb, var(--vscode-descriptionForeground, #999) 12%, var(--vscode-foreground));
+    --done: color-mix(in srgb, var(--vscode-charts-green, #89d185) 28%, var(--vscode-foreground));
+    --waiting: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 16%, var(--vscode-foreground));
+    --pace-green: color-mix(in srgb, var(--vscode-charts-green, #89d185) 28%, var(--vscode-foreground));
+    --pace-yellow: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 16%, var(--vscode-foreground));
+    --pace-red: color-mix(in srgb, var(--vscode-charts-red, #f14c4c) 16%, var(--vscode-foreground));
+  }
+  .conv.master-target.active {
+    --done: color-mix(in srgb, var(--vscode-charts-green, #89d185) 16%, var(--sel-fg));
+    --waiting: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 14%, var(--sel-fg));
+    --pace-green: color-mix(in srgb, var(--vscode-charts-green, #89d185) 26%, var(--sel-fg));
+    --pace-yellow: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 14%, var(--sel-fg));
+    --pace-red: color-mix(in srgb, var(--vscode-charts-red, #f14c4c) 14%, var(--sel-fg));
+  }
+  /* Anneau d'un membre / d'une tête de lot : --grp-hue est libre (une teinte
+     par lot), donc parfois très proche de l'orange. Même parade que sur la
+     ligne sélectionnée, et pour la même raison qu'elle : on ne redéfinit pas
+     --grp-hue (une custom property qui se cite dans sa propre valeur est un
+     cycle), on remonte la seule bordure. */
+  .grp-body .conv.master-target:not(.active) .ico::after {
+    border-color: color-mix(in srgb, var(--grp-hue, var(--muted)) 38%, var(--vscode-foreground));
+  }
+  .grp-body .conv.master-target.active .ico::after {
+    border-color: color-mix(in srgb, var(--grp-hue, var(--muted)) 30%, var(--sel-fg));
+  }
+  /* Le disque qui troue le rail derrière un anneau doit peindre EXACTEMENT ce
+     que la ligne peint sous lui (cf. --row-bg plus bas) : sur une maîtresse
+     qui respire, cela veut dire --row-bg ET la teinte, composées dans le même
+     ordre. Sans cette règle, une maîtresse qui est en tête d'un lot ou membre
+     d'un autre lot (filiation) montre une pastille pâle au milieu de l'orange.
+     La couleur vient de la même custom property animée que la ligne — donc de
+     la même image, jamais d'une seconde animation à resynchroniser. */
+  .grp-body .conv.master-target .ico::after {
+    background-color: var(--row-bg, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+    background-image: linear-gradient(var(--master-cue-bg), var(--master-cue-bg));
+  }
+
+  /* ── L'AGRAFE ────────────────────────────────────────────────────────────
+     Crochet à droite en bas au départ de « New conversation », montée le long
+     de la gouttière en TIRETS QUI REMONTENT (le sens de la filiation se lit
+     même sur une image figée, sans quoi il fallait attendre l'animation),
+     crochet à droite en haut, pointe centrée sur l'épaisseur du trait.
+     Positionnée en coordonnées de DOCUMENT par panel.js (drawMasterCue) : le
+     conteneur est absolu au coin (0,0), donc l'agrafe suit le défilement sans
+     un seul recalcul, et une maîtresse sortie par le haut voit simplement son
+     agrafe filer hors écran — décidé tel quel, sans ancre de bord. */
+  .mcue { position: absolute; top: 0; left: 0; width: 100%; height: 0; pointer-events: none; }
+  .mcue-v, .mcue-h {
+    position: absolute; z-index: 50; pointer-events: none;
+    background: var(--master-cue-hue);
+    /* Halo d'1px de la couleur du fond : sans lui le trait se confond avec la
+       bordure de la barre latérale. */
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--vscode-sideBar-background, var(--vscode-editor-background)) 75%, transparent);
+  }
+  .mcue-v {
+    width: var(--master-cue-thick); border-radius: 2px;
+    background: repeating-linear-gradient(to bottom, var(--master-cue-hue) 0 7px, transparent 7px 14px);
+    animation: mcue-flow calc(var(--master-cue-period) * .5) linear infinite;
+  }
+  @keyframes mcue-flow { from { background-position-y: 0; } to { background-position-y: -14px; } }
+  .mcue-h { height: var(--master-cue-thick); border-radius: 2px; }
+  /* Pointe orientée vers la DROITE, centrée sur l'épaisseur du crochet. Elle
+     s'arrête AVANT la pastille d'état de la ligne : cette pastille porte une
+     information, la masquer serait un recul. */
+  .mcue-tip {
+    position: absolute; z-index: 51; pointer-events: none; width: 0; height: 0;
+    border-top: var(--mcue-tip-h, 8px) solid transparent;
+    border-bottom: var(--mcue-tip-h, 8px) solid transparent;
+    border-left: var(--mcue-tip-w, 9px) solid var(--master-cue-hue);
+    filter: drop-shadow(0 0 1px color-mix(in srgb, var(--vscode-sideBar-background, var(--vscode-editor-background)) 75%, transparent));
+    animation: mcue-pulse var(--master-cue-period) ease-in-out infinite;
+  }
+  @keyframes mcue-pulse { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
+  .mcue-lbl {
+    position: absolute; z-index: 52; pointer-events: none;
+    font-size: 10px; padding: 0 5px; border-radius: 3px; white-space: nowrap;
+    color: var(--vscode-editor-background, #1f1f1f); background: var(--master-cue-hue);
+  }
+
+  /* ── APERÇU DES FUTURES CONVERSATIONS, à leur place définitive (P2) ───────
+     AUCUN rendu neuf : ce sont les classes que le panneau donne déjà à une
+     tâche pas encore lancée (.m-pending / .m-prompt / .m-intent). Seuls
+     l'atténuation et le liseré en pointillés disent « ça n'existe pas
+     encore ». Le décalage de 14px est celui d'une gouttière d'anneau, comme
+     partout ailleurs dans ce panneau. */
+  .master-preview {
+    position: relative; opacity: .62;
+    margin: 1px 0 4px 14px; padding-left: 6px;
+    border-left: 2px dashed color-mix(in srgb, var(--master-cue-hue) 70%, transparent);
+  }
+  .master-preview-wave {
+    font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted); opacity: .8; margin: 3px 0 1px 6px;
+  }
+  /* L'aperçu peut se poser SOUS une maîtresse qui vit dans un lot : ses lignes
+     hériteraient alors de l'anneau et du disque des membres de CE lot, dont
+     elles ne font pas partie. On les coupe — l'aperçu doit avoir la même tête
+     que la maîtresse soit dans un lot ou non. */
+  .master-preview .ico-pending::after { display: none; }
+
+  /* ── Échec de la recherche : le formulaire le DIT ─────────────────────────
+     « 0 candidate » et « 2 candidates » sont fréquents (bloc écrit à la main,
+     conversation maîtresse fermée, jeton périmé) : un panneau muet se lirait
+     comme une panne. Variante E de MOCKUP_master_cible_collage. Le cas TROUVÉ
+     n'a pas de pastille — l'agrafe le dit déjà, et mieux. */
+  .master-chip {
+    display: flex; align-items: center; gap: 6px; margin: 0 0 6px;
+    padding: 4px 7px; border-radius: 4px; font-size: 12px;
+    background: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 14%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 55%, transparent);
+  }
+  .master-chip .who {
+    flex: 1 1 auto; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; font-weight: 600;
+  }
+  .master-chip .tail { flex: none; opacity: .8; font-size: 11px; }
+  .master-chip .sign { flex: none; opacity: .85; }
+
   .conv .body { min-width: 0; }
   /* Coût estimé ($) — variante B de la maquette 2026-08-17, choisie par
      l'user : le montant vit sur la ligne du TITRE, à droite, et la ligne méta
@@ -619,7 +860,7 @@ function renderHtml(webview) {
     content: ''; position: absolute; inset: calc(-1 * var(--busy-outset));
     border-radius: 50%;
     background:
-      conic-gradient(from 0deg, var(--busy) 0deg, var(--busy) var(--busy-length), transparent var(--busy-length) 360deg),
+      conic-gradient(from 0deg, var(--busy-arc) 0deg, var(--busy-arc) var(--busy-length), transparent var(--busy-length) 360deg),
       color-mix(in srgb, var(--busy) var(--busy-alpha), transparent);
     -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--busy-width)), #000 calc(100% - var(--busy-width)));
             mask: radial-gradient(farthest-side, transparent calc(100% - var(--busy-width)), #000 calc(100% - var(--busy-width)));
@@ -676,6 +917,17 @@ function renderHtml(webview) {
     border-left: 4px solid transparent; border-right: 4px solid transparent;
     border-bottom: 5px solid var(--muted);
     transform: translateX(-50%);
+  }
+
+  /* Traits de segmentation : collés au bord bas de la barre (rail propre,
+     zéro marge avec .bar-q, avant l'arrow-track) — jamais dans .bar-q, dont
+     l'overflow:hidden les couperait, et jamais dans .arrow-track pour ne
+     jamais chevaucher le triangle de burn-rate. Gris léger et neutre : ne
+     doit jamais rivaliser avec le remplissage coloré de la barre. */
+  .ticks { position: relative; height: 3px; }
+  .ticks > i {
+    position: absolute; top: 0; width: 1px; height: 100%;
+    background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
   }
 
   /* ── Quota ── */
@@ -767,14 +1019,6 @@ function renderHtml(webview) {
   }
   .btn.pri:hover { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
   .btn[disabled] { opacity: .45; cursor: default; }
-  /* ▶ atténué en mode auto (lot allègement 2026-07-24) : reste cliquable
-     (force + confirmation côté extension), jamais désactivé — disabled
-     serait le seul chemin à nouveau court-circuité en mode manuel/bloqué. */
-  .btn.pri.dim {
-    background: var(--vscode-button-secondaryBackground, transparent);
-    color: var(--muted); border-color: var(--vscode-panel-border, rgba(128,128,128,.35));
-  }
-  .btn.pri.dim:hover { background: var(--vscode-list-hoverBackground); }
   .notice {
     display: none;
     margin: var(--sp-sep) 0; padding: 3px 6px; border-radius: 4px; font-size: 11px;
@@ -844,7 +1088,78 @@ function renderHtml(webview) {
     background: var(--vscode-button-background); color: var(--vscode-button-foreground);
     border-color: var(--vscode-button-background);
   }
+  /* HALO (maquette R2, 2026-08-26) : en mode manuel le bouton est la SEULE
+     porte, et il n'apparaît qu'au moment où la vague suivante devient
+     ouvrable — il doit se voir comme un événement, pas comme un séparateur de
+     plus. Deux anneaux : 1px du fond du panneau (qui détache la pastille du
+     texte voisin), puis 3px de la couleur d'action très diluée. Aucune emprise
+     sur le flux : box-shadow ne prend pas de place. */
+  .wave-hdr.launch.pri {
+    box-shadow: 0 0 0 1px var(--vscode-sideBar-background, var(--vscode-editor-background)),
+                0 0 0 3px color-mix(in srgb, var(--vscode-button-background) 45%, transparent);
+  }
   .wave-hdr.launch.pri:hover { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
+
+  /* ══ Interrupteur MANUEL / AUTO de l'en-tête d'un lot ════════════════════
+     Porté VERBATIM de la maquette validée par l'user (variante R2 de
+     MOCKUP_toggle_vague_auto_2026-08-26.html) : proportions, durées et
+     géométrie inchangées, seules les couleurs passent des littéraux de la
+     maquette aux jetons du thème (règle du dossier : une couleur se lit, elle
+     ne se suppose pas). Correspondances : --btn-bg → button.background (le
+     seul jeton dont la vivacité est garantie par tous les thèmes),
+     --knob-off → --muted, --track → panel.border, --shadow → widget.shadow.
+
+     Centrage vertical GÉOMÉTRIQUE : la pastille est ancrée à 50 % de la piste
+     et remontée de sa propre moitié (translateY). Plus aucun décalage en dur —
+     changer l'épaisseur de la piste ou le diamètre de la pastille ne peut plus
+     désaligner quoi que ce soit. Le glissement passe par transform, JAMAIS par
+     left : c'est ce que le compositeur sait animer sans repeindre.
+
+     HAUTEUR DE L'EN-TÊTE INCHANGÉE : la boîte du .tg fait 9px (line-height 1
+     sur des mots de 9px, la piste ne fait que 2px et la pastille est hors
+     flux) — moins que le libellé et le compteur qui l'entourent, donc la grip
+     ne grandit pas d'un pixel par rapport à un lot sans interrupteur.
+
+     data-mode est posé sur .grp-head et non sur .grp : un sous-lot imbriqué
+     sort sa grip du DOM de .grp (renderGroups), et un sélecteur ancré sur
+     l'ancêtre y perdrait la couleur du mot actif. */
+  .tg {
+    flex: none; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    font-size: 9px; letter-spacing: .07em; text-transform: uppercase;
+    line-height: 1;
+    /* L'ÉTEINT NE PEUT PAS ÊTRE --muted (mesuré 2026-08-26) : Light Modern met
+       descriptionForeground à #3B3B3B, la couleur du texte NORMAL — le mot
+       inactif et la pastille éteinte y seraient aussi noirs que l'actif, et
+       « le mot actif en couleur pleine » ne voudrait plus rien dire. On dérive
+       donc l'éteint du texte lui-même, dans une proportion qui rend les deux
+       thèmes d'accord : 62 % du foreground reproduit à l'œil le gris de la
+       maquette (#8a8a8a en sombre, #6d6d6d en clair). Une seule variable, lue
+       par le mot ET par la pastille : elles ne peuvent pas diverger.
+       Même raison pour la piste, dérivée à 22 % : panel.border vaut #E5E5E5 en
+       clair, invisible sur le fond du panneau. */
+    --tg-off: color-mix(in srgb, var(--vscode-foreground) 62%, transparent);
+    color: var(--tg-off);
+  }
+  .tg .side { transition: color .12s; }
+  .grp-head[data-mode="manual"] .tg .l { color: var(--vscode-foreground); font-weight: 600; }
+  .grp-head[data-mode="auto"]   .tg .r { color: var(--vscode-foreground); font-weight: 600; }
+  .tg .rail {
+    position: relative; display: block; flex: none;
+    background: color-mix(in srgb, var(--vscode-foreground) 22%, transparent);
+    width: 26px; height: 2px; border-radius: 1px;
+  }
+  .tg .knob {
+    position: absolute; top: 50%; left: 0; border-radius: 50%;
+    width: 12px; height: 12px; background: var(--tg-off); border: 0;
+    box-shadow: 0 1px 2px var(--vscode-widget-shadow, rgba(0,0,0,.35));
+    transform: translate(0, -50%);
+    transition: transform .16s cubic-bezier(.4, 0, .2, 1),
+                background .16s, border-color .16s;
+  }
+  .grp-head[data-mode="auto"] .tg .knob {
+    transform: translate(14px, -50%); background: var(--vscode-button-background);
+  }
+  .tg:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; border-radius: 3px; }
   /* Ligne fantôme « + nouvelle vague » : toujours présente en fin de groupe. */
   .wave-ghost {
     display: flex; align-items: center; justify-content: center;
@@ -854,6 +1169,25 @@ function renderHtml(webview) {
     overflow: hidden; white-space: nowrap;
   }
   .wave-ghost:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+  /* ARMÉE : un prompt est tapé, ces lignes sont les endroits où il peut tomber
+     (2026-08-27). Elles existaient déjà — c'est leur DISCRÉTION qui coûtait
+     quatre gestes : ne s'allumant qu'au survol, elles se découvraient par
+     hasard, et « + new wave » finissait par servir de porte unique, la tâche
+     tombant en dernière vague avant d'être remontée à la main. Elles prennent
+     donc la couleur d'action du thème dès qu'il y a quelque chose à déposer,
+     avec le halo des contrôles primaires : le trait pointillé devient plein,
+     la cible se lit d'un coup d'œil au lieu de se chercher. Rien d'autre ne
+     change — mêmes nœuds, mêmes clics, mêmes garde-fous. Le survol reste, en
+     plus appuyé, pour dire laquelle des deux on vise. */
+  .wave-ghost.armed {
+    color: var(--vscode-button-foreground); background: var(--vscode-button-background);
+    border-top: 1px solid var(--vscode-button-background);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder) 45%, transparent);
+  }
+  .wave-ghost.armed:hover {
+    color: var(--vscode-button-foreground);
+    background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+  }
   /* Ligne fantôme FINALE : UNE ligne, DEUX cibles (lot B densité, 2026-08-09).
      Un groupe se terminait par deux lignes pleine largeur empilées — « + add to
      this wave » (la dernière vague en file) puis « + new wave » — soit ~52 px
@@ -926,7 +1260,7 @@ function renderHtml(webview) {
      action (la correction se fait par /model dans la conversation). */
   .mismatch { color: var(--vscode-errorForeground, #f14c4c); font-size: 10px; }
   .conv .mismatch { display: none; }
-  .conv .mismatch.show { display: block; }
+  .conv .mismatch.show { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Ambiguïté d'appariement onglet (lot 3 du plan d'appariement, 2026-08-21) :
      signe DISCRET, inline sur la ligne de titre — jamais une ligne de plus
      comme .mismatch, l'ambiguïté n'est pas une action à corriger dans la conv
@@ -1114,19 +1448,25 @@ function renderHtml(webview) {
     /* Même cap que .grp.has-master > .grp-head (bas ouvert, coin bas-droit
        carré) : c'est la ligne du parent, juste en dessous, qui referme le
        cadre — un seul cadre continu, jamais deux bordures qui se touchent.
-       Marge à 4 valeurs (haut/droite/bas/gauche) : le décalage à
-       --nest-indent (28px) ET l'annulation du bleed s'écrivent en UNE
-       déclaration, jamais deux règles qui pourraient diverger. Bleed annulé
-       des DEUX côtés (pas seulement à gauche) : la capsule de la ligne de
-       tête ci-dessous n'a elle-même jamais bledé (right:0, jamais un lot
-       racine avec master), un bleed résiduel à droite désalignerait les deux
-       bords du cadre — constat visé par le banc « bords gauche/droite
-       alignés au pixel entre les deux ». */
-    margin: 2px 0 0 var(--nest-indent);
-    /* 7,5px comme .grp-head : les 1,5px de l'ancienne bordure sont passés dans
-       le padding le jour où elle a disparu (2026-08-17) — ici sans le bleed,
-       qu'une grip de sous-lot n'a jamais eu. */
-    padding-left: 7.5px; padding-right: 7.5px;
+       RÉVISÉ 2026-08-27 (capture réelle de l'user, panneau étroit) : la
+       version précédente décalait toute la BOÎTE de --nest-indent (marge-
+       gauche), si bien que son fond démarrait 28px plus à droite que celui de
+       la ligne d'accueil juste en dessous (pleine largeur, jamais indentée —
+       invariant plus fort, cf. .member.nest-host plus bas) — la couture entre
+       poignée et ligne cassait à l'œil au lieu de refermer proprement.
+       Boîte désormais PLEINE LARGEUR, comme la ligne d'accueil (aucune marge
+       gauche) : seul le CONTENU (chevron, libellé) est repoussé par le
+       padding gauche — le fond des deux lignes démarre au même x, sans
+       qu'aucune des deux n'ait à toucher sa propre boîte. Comparé sur
+       maquette jouable à deux autres pistes (rien à cet endroit ; tout le
+       CONTENU de la ligne d'accueil indenté à l'identique) — celle-ci gagne :
+       aucun invariant de pixel touché, contrairement aux deux autres. */
+    margin: 2px 0 0 0;
+    /* --nest-indent pousse le CONTENU (cf. ci-dessus), pas la boîte ; + 7,5px
+       comme .grp-head, où les 1,5px de l'ancienne bordure sont passés dans le
+       padding le jour où elle a disparu (2026-08-17). Droite inchangée : sans
+       bleed ici, comme la ligne d'accueil. */
+    padding-left: calc(var(--nest-indent) + 7.5px); padding-right: 7.5px;
     border-bottom-right-radius: 0;
   }
   /* Corps du sous-lot : même décalage que sa grip, COLLÉ sous la capsule de
@@ -1152,6 +1492,35 @@ function renderHtml(webview) {
      l'enfant, à sa couleur. La couleur de l'enfant n'est donc plus portée par
      la ligne elle-même — écarté sur maquette (option « liseré extérieur
      autour de la bulle », laissée à « rien » par l'user). */
+  /* Capsule de la ligne de tête (2026-08-27, constat user sur capture) —
+     REVIENT sur un point de la note ci-dessus : un lot RACINE avec master
+     forme une capsule continue (grip + .grp-master-head, même fond --grp-tint,
+     cf. plus haut) ; un sous-lot n'avait que sa grip teintée, « bas ouvert »
+     sur le fond nu du panneau, parce que le cadre retiré le 2026-08-17 n'a
+     jamais été remplacé par un fond ici quand la grip, elle, en a reçu un au
+     chantier de contraste 2.70.x. Même vocabulaire que .grp-master-head :
+     fond de l'ENFANT (--nest-tint, posée par renderGroups à côté de
+     --nest-hue, même formule que --grp-tint du lot imbriqué) et coins BAS
+     arrondis pour refermer le bas ouvert de sa .nest-grip juste au-dessus —
+     coins HAUT carrés (défaut), pour une couture plate entre les deux, comme
+     .grp-master-head sous sa propre grip.
+     Posée sur .m-head (pas .member, qui n'a pas de boîte propre ; pas .conv,
+     que rowFor() remet à nu à chaque rendu — cf. setSplitRing) : la classe
+     nest-host, elle, est réappliquée à chaque rendu par renderGroups, même
+     mécanique d'idempotence.
+     AUCUN bleed ici, contrairement à .grp-master-head : cette ligne reste un
+     membre normal du PARENT, aligné au pixel sur ses sœurs (invariant du
+     dossier). Les deux bords, GAUCHE et DROIT, sont ALIGNÉS au pixel avec
+     .nest-grip juste au-dessus (2026-08-27, variante retenue sur capture
+     après qu'un premier essai laissait la grip décalée de --nest-indent EN
+     BOÎTE, désaccordée avec cette ligne pleine largeur — cf. .grp-head.nest-
+     grip plus haut) : la grip a perdu sa marge-gauche et pousse désormais son
+     CONTENU par un padding, donc les deux fonds démarrent au même x sans
+     qu'aucune des deux lignes n'ait à déplacer la sienne. */
+  .member.nest-host > .m-head {
+    background: var(--nest-tint, transparent);
+    border-radius: 0 0 6px 6px;
+  }
 
   /* Rail P1 (« nœuds sur l'axe ») : trait vertical teinté du groupe, centré
      au pixel sur l'axe de la colonne des symboles d'état — le MÊME axe que
@@ -1434,6 +1803,45 @@ function renderHtml(webview) {
     opacity: 0; pointer-events: none; transition: opacity .1s;
   }
   .member:hover .m-move, .m-move:focus-within { opacity: 1; pointer-events: auto; }
+  /* Menu ouvert : l'overlay ne peut plus dépendre du survol — le pointeur
+     descend DANS le menu, qui déborde de la ligne, et la reperdrait aussitôt.
+     La classe est posée sur .member par panel.js, seul endroit qui sait quel
+     menu est ouvert. */
+  .member.menu-open .m-move { opacity: 1; pointer-events: auto; }
+  /* « vague n ▾ » (2026-08-26, porté verbatim de
+     MOCKUP_insertion_lot_2026-08-26.html : .jump et .menu). Sur une tâche EN
+     FILE, son numéro de vague devient le bouton qui liste toutes les
+     destinations, la courante marquée « ici » et morte. Il REMPLACE les ◂/▸
+     qui vivaient ici : celles-là déplaçaient d'un CRAN — un membre seul
+     fusionnait avec la voisine, un membre accompagné se détachait — geste
+     juste mais indirect, qui demandait autant de clics que de vagues à
+     franchir et dont le résultat dépendait de qui partageait la vague de
+     départ. Une destination se DÉSIGNE. */
+  .m-jump {
+    position: relative; flex: none; font: inherit; font-size: 10px; letter-spacing: .04em;
+    color: var(--muted); background: var(--vscode-editor-background, var(--vscode-sideBar-background));
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
+    border-radius: 9px; padding: 1px 7px; cursor: pointer; white-space: nowrap;
+  }
+  .m-jump:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
+  .m-jump:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  .m-menu {
+    position: absolute; right: 0; top: 100%; margin-top: 3px; z-index: 20;
+    background: var(--vscode-menu-background, var(--vscode-editor-background));
+    border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border, rgba(128,128,128,.35)));
+    border-radius: 4px; box-shadow: 0 3px 10px rgba(0,0,0,.35); padding: 3px; min-width: 118px;
+  }
+  .m-menu button {
+    display: block; width: 100%; text-align: left; font: inherit; font-size: 11px;
+    padding: 3px 8px; border: 0; border-radius: 3px; background: none;
+    color: var(--vscode-menu-foreground, var(--vscode-foreground)); cursor: pointer; white-space: nowrap;
+  }
+  .m-menu button:hover { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  /* La vague COURANTE est listée — c'est le repère qui rend le menu lisible —
+     mais elle n'est pas une destination : le store la refuserait, autant que
+     l'œil le sache avant le clic. */
+  .m-menu button.cur { color: var(--muted); cursor: default; }
+  .m-menu button.cur:hover { background: none; color: var(--muted); }
   .m-note { font-size: 10px; color: var(--muted); }
   /* Le bouton de retrait est un OVERLAY (cf. .m-out) : le pointeur qui le vise
      SORT de .conv — il n'en est pas un enfant — et éteindrait son fond de
@@ -1469,11 +1877,11 @@ function renderHtml(webview) {
      l'overlay ne pousse rien, la géométrie est la même dans les deux états.
      Le fond opaque masque la fin du titre qu'il recouvre au survol ; il est
      calé sur le fond de la ligne survolée, jamais sur celui du panneau. */
-  /* Gabarit commun des pastilles d'action au survol d'une ligne (⤴ sortie, ◂/▸
-     déplacement de vague) : un seul disque, une seule taille — deux gabarits
-     voisins se verraient. Le positionnement, lui, reste propre à chacun (.m-out
-     s'ancre à droite de .m-head, .m-mv vit dans le flex de .m-move). */
-  .m-out, .m-mv {
+  /* Pastille d'action au survol d'une ligne (⤴ sortie). Elle partageait ce
+     gabarit avec les ◂/▸ de déplacement, retirés le 2026-08-27 au profit du
+     pill « vague n ▾ » — qui a le sien (.m-jump), une pastille TEXTE et non
+     un disque à glyphe. */
+  .m-out {
     width: 15px; height: 15px; box-sizing: border-box; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
     border-radius: 50%; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
@@ -1498,7 +1906,7 @@ function renderHtml(webview) {
      membre, l'égalité même que ce lot doit tenir. */
   .grp-master-head .m-out { right: var(--grp-bleed); }
   .member:hover .m-out, .grp-master-head:hover .m-out, .m-out:focus-visible { opacity: 1; }
-  .m-out:hover, .m-mv:hover { color: var(--vscode-foreground); border-color: var(--muted); }
+  .m-out:hover { color: var(--vscode-foreground); border-color: var(--muted); }
   /* Ligne SÉLECTIONNÉE : son fond n'est pas celui du survol — le bouton suit,
      sinon il se détache en pastille sur la seule ligne active. :has() n'est
      pas indispensable (sans lui la règle saute et le repli reste correct). */
@@ -1590,6 +1998,16 @@ function renderHtml(webview) {
         <span class="txt" id="hooksBannerText"></span>
         <button class="btn pri" id="hooksBannerInstall" type="button">${vscode.l10n.t('Install hooks')}</button>
       </div>
+      <!-- Bandeau « surlignage corrigé » (refactor 2026-08-27, « le renderer
+           est le juge », cf. state.js) : une réconciliation n'est JAMAIS
+           silencieuse — l'utilisateur voit qu'il y a eu désynchronisation, et
+           le journal porte le détail. Même style warning que le bandeau hooks
+           (réutilisation stricte, aucun style nouveau) ; texte rempli par
+           renderTruthBanner, fermeture par épisode. -->
+      <div class="hooks-banner" id="truthBanner">
+        <span class="txt" id="truthBannerText"></span>
+        <button class="btn" id="truthBannerClose" type="button">${vscode.l10n.t('Dismiss')}</button>
+      </div>
       <div class="canary" id="canary">${vscode.l10n.t('⚠ Claude tabs not detected — viewType changed?')}</div>
       <div class="canary" id="tabsFrozenNotice">${vscode.l10n.t('VS Code stopped reporting tab changes — highlight may lag. Reloading the window fixes it.')}</div>
       <div class="canary" id="dataStaleNotice">${vscode.l10n.t('The panel stopped receiving updates — statuses shown may be stale. Reloading the window fixes it.')}</div>
@@ -1645,6 +2063,40 @@ function renderHtml(webview) {
   const hooksBannerEl = document.getElementById('hooksBanner');
   const hooksBannerTextEl = document.getElementById('hooksBannerText');
   const hooksBannerInstallEl = document.getElementById('hooksBannerInstall');
+  // Bandeau « surlignage corrigé » (refactor 2026-08-27) — cf. le HTML plus
+  // haut. Un épisode est identifié par son champ at : la croix ne ferme que
+  // l'épisode affiché, un épisode PLUS RÉCENT rouvre le bandeau ; et le
+  // bandeau s'éteint seul à l'échéance du TTL sans attendre un push.
+  // (Aucun backtick dans ce bloc : tout le script webview vit DANS le template
+  // literal de renderHtml — un backtick de commentaire le fermerait.)
+  const truthBannerEl = document.getElementById('truthBanner');
+  const truthBannerTextEl = document.getElementById('truthBannerText');
+  const truthBannerCloseEl = document.getElementById('truthBannerClose');
+  const TRUTH_NOTICE_TTL_MS = 10 * 60 * 1000;
+  var truthShownAt = 0;
+  var truthDismissedAt = 0;
+  var truthHideTimer = null;
+  truthBannerCloseEl.addEventListener('click', function () {
+    truthDismissedAt = truthShownAt;
+    clearTimeout(truthHideTimer);
+    truthBannerEl.classList.remove('show');
+  });
+  function renderTruthBanner(n) {
+    clearTimeout(truthHideTimer);
+    const at = (n && n.at) || 0;
+    const left = at ? TRUTH_NOTICE_TTL_MS - (Date.now() - at) : 0;
+    if (!at || at <= truthDismissedAt || left <= 0) {
+      truthBannerEl.classList.remove('show');
+      return;
+    }
+    truthShownAt = at;
+    const when = new Date(at).toLocaleTimeString(LOCALE);
+    truthBannerTextEl.textContent = t(
+      '⚠ {0} — highlight was out of sync and has been corrected: the active tab is “{1}”, the panel was showing “{2}”.',
+      when, n.nowTitle || '?', n.wasTitle || t('nothing'));
+    truthBannerEl.classList.add('show');
+    truthHideTimer = setTimeout(function () { truthBannerEl.classList.remove('show'); }, Math.max(1000, left));
+  }
   const convHeadEl = document.getElementById('convHead');
   const convChevronEl = document.getElementById('convChevron');
   const convBodyEl = document.getElementById('convBody');
@@ -1933,14 +2385,22 @@ function renderHtml(webview) {
     titleRow.appendChild(cost);
     const meta = el('div', 'meta');
     const model = el('span', 'model');
+    // Constat du dernier tour JOUÉ, pas le réglage courant (plan
+    // PLAN_surlignage_et_effort_2026-08-26.md §2) : le sélecteur natif de la
+    // conversation peut déjà annoncer autre chose pour le prochain tour tant
+    // qu'aucun message n'a été renvoyé — même distinction « photo vs
+    // intégrale » que ctx face à cost, mais rien ne la disait à l'écran.
+    model.title = t('Model and effort of the last turn actually played — the conversation’s own selector may already show a different setting for the next turn.');
     const ctx = el('span', 'ctx');
     const mismatch = el('div', 'mismatch');
     const ctxBar = bar('bar-ctx', 0);
     meta.appendChild(model);
+    // Badge d'écart SUR la ligne méta, à droite du modèle (décision user
+    // 2026-08-27) : une ligne dédiée gaspillait de la hauteur pour un constat.
+    meta.appendChild(mismatch);
     meta.appendChild(ctx);
     body.appendChild(titleRow);
     body.appendChild(meta);
-    body.appendChild(mismatch);
     body.appendChild(ctxBar);
     root.appendChild(ico);
     root.appendChild(body);
@@ -1978,11 +2438,14 @@ function renderHtml(webview) {
     mkSet.title = t('Pin “to review” — stays until you unpin it, even after the tab closes');
     root.appendChild(mkSet);
     const row = { root, ico, title, amb, cost, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, mkSet, mkPin, data: null };
-    root.addEventListener('click', function () {
+    root.addEventListener('click', function (ev) {
       if (!row.data) return;
       // tabTitle : titre RÉEL de l'onglet quand il diverge de celui du
       // transcript — sans lui, focus.js ne retrouve pas un onglet renommé.
-      vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, tabTitle: row.data.tabTitle || null });
+      // isTrusted (2026-08-27, lot A surlignage) : distingue un vrai clic
+      // humain d'un événement synthétique (dispatchEvent) — le journal doit
+      // pouvoir le dire, cf. extension.js focus-click.
+      vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, tabTitle: row.data.tabTitle || null, isTrusted: !!(ev && ev.isTrusted) });
     });
     linkMaster.addEventListener('click', function (e) {
       e.stopPropagation();
@@ -2001,7 +2464,15 @@ function renderHtml(webview) {
     row.data = c;
     // Marque « à relire » (lot 2) : une seule classe pilote tout le rendu
     // (.mk-pin visible, .mk-set teinté) — cf. règles CSS .conv.mk-pinned.
-    setClass(row.root, 'conv' + (c.active ? ' active' : '') + (c.pinned ? ' mk-pinned' : ''));
+    // master-target : la respiration de la conversation maîtresse désignée par
+    // le dernier collage (plan agrafe 2026-08-27). Elle est CALCULÉE ici, dans
+    // la seule fabrique de lignes, à partir de l'état local du formulaire —
+    // pas posée après coup sur le DOM : setClass réécrit la chaîne entière à
+    // chaque rendu, une classe ajoutée de l'extérieur serait effacée au
+    // prochain push d'état (30 s au pire). renderMasterCue() la repose entre
+    // deux rendus, en lisant la MÊME source (masterTargetId).
+    setClass(row.root, 'conv' + (c.active ? ' active' : '') + (c.pinned ? ' mk-pinned' : '')
+      + (masterTargetId() === c.id ? ' master-target' : ''));
     // Détail tarifaire ATTEIGNABLE au survol (2026-08-24, variante C choisie par
     // l'user sur maquette) : la boîte du montant est précisément celle que
     // recouvrent les overlays hover-only ⌂ et « marque à relire », et le montant
@@ -2156,6 +2627,208 @@ function renderHtml(webview) {
     });
   }
 
+  // ── Désignation de la conversation MAÎTRESSE au collage ───────────────────
+  //
+  // Trois décors, UNE source : l'état local du formulaire (form.masterPaste +
+  // form.master, ci-dessous dans la section « lot »). Rien n'en descend de
+  // l'extension et rien n'y remonte tant que « Create » n'est pas cliqué —
+  // c'est un état du webview, comme la saisie elle-même.
+  //
+  // LE PIÈGE, et la raison de la forme de ce bloc : le flux est reconstruit à
+  // chaque push d'état (30 s au minimum, bien plus souvent pendant qu'une
+  // conversation travaille). Un aperçu INJECTÉ après coup dans le DOM aurait
+  // donc disparu au premier battement suivant. Il est PRODUIT par le rendu du
+  // flux — renderMasterCue() est appelée à la fin de chaque rendu et se
+  // reconstruit entièrement depuis le formulaire, exactement comme les lignes
+  // de conversation se reconstruisent depuis le snapshot.
+  //
+  // Géométrie de l'agrafe : réglée par l'user sur maquette jouable. Le trait
+  // est à x = 1px parce que la gouttière du panneau ne fait que 8px avant le
+  // padding des lignes ; le crochet de 10px + l'épaisseur amènent la pointe à
+  // 16px, soit juste AVANT la pastille d'état — qui porte une information et
+  // ne doit pas être masquée.
+  const MCUE_X = 1;
+  const MCUE_HOOK = 10;
+  // Miroir de --master-cue-thick (CSS) : la géométrie JS a besoin du nombre,
+  // le CSS de la longueur. Même couple que HOOK_W et --hook-w pour le rail.
+  const MCUE_THICK = 5;
+  // En deçà, il n'y a pas la place de tracer une agrafe qui se lise : la
+  // maîtresse est alors collée à « New conversation », ou en dessous (elle
+  // peut être n'importe où dans le flux selon le tri) — on ne dessine rien
+  // plutôt qu'un moignon.
+  const MCUE_MIN_SPAN = 24;
+
+  let mcueHost = null;
+  let masterPreviewEl = null;
+  // Groupes du dernier état poussé — gardés parce que le décor de la maîtresse
+  // se reconstruit AUSSI hors d'un push (au collage, à la réponse de
+  // l'extension, à chaque renderForm) et qu'il doit alors répondre à la même
+  // question : cette maîtresse est-elle déjà la tête d'un lot vivant ? La
+  // question se pose au moment du décor, la réponse ne peut donc pas être
+  // figée au moment du push (au collage, il n'y a pas encore de maîtresse).
+  let lastGroups = [];
+  function masterGroupNode() {
+    const id = masterTargetId();
+    if (!id) return null;
+    const g = lastGroups.find(function (x) { return x && !x.done && x.master && x.master.convId === id; });
+    return (g && groupNodes.has(g.id)) ? groupNodes.get(g.id) : null;
+  }
+
+  // Identifiant de la conversation à mettre en évidence, ou null. Lue par
+  // updateRow (au rendu) ET par renderMasterCue (entre deux rendus) : une
+  // seule fonction, donc aucun moyen que les deux divergent.
+  function masterTargetId() {
+    return (form && form.masterPaste && form.master && form.master.sessionId) ? form.master.sessionId : null;
+  }
+
+  // La LIGNE de cette conversation, si elle est réellement à l'écran. Une
+  // maîtresse résolue mais absente du panneau (conversation trop ancienne pour
+  // la fenêtre affichée) n'a pas de place à désigner : on ne dessine alors ni
+  // agrafe ni aperçu, plutôt que de les accrocher à un endroit arbitraire.
+  function masterTargetRow() {
+    const id = masterTargetId();
+    if (!id) return null;
+    const row = rows.get(id);
+    return row && row.root.isConnected ? row.root : null;
+  }
+
+  // L'aperçu est retiré AVANT le rendu du flux : layoutFlow place les blocs et
+  // les lignes par INDEX dans #flow, un enfant de plus l'obligerait à jouer
+  // aux chaises musicales à chaque push.
+  function detachMasterPreview() {
+    if (masterPreviewEl) { masterPreviewEl.remove(); masterPreviewEl = null; }
+  }
+
+  // Les futures conversations, telles que le panneau les rendra une fois le
+  // lot créé : aucun rendu neuf, c'est pendingLine() — celle des tâches en
+  // file — nourrie du formulaire au lieu du store. Les titres n'existent pas
+  // encore au collage, l'aperçu montre donc le début du prompt, comme le
+  // panneau le fait déjà pour une tâche pas encore lancée.
+  function buildMasterPreview() {
+    // La variable de boucle s'appelle tk et non t : dans ce webview, t est la
+    // fonction de traduction — la masquer avec une tâche casserait les
+    // libellés de vague juste dessous.
+    // (Pas de backtick dans ce commentaire : on est DANS le template literal
+    // du webview — cf. CLAUDE.md du dossier.)
+    const tasks = form.tasks.filter(function (tk) { return tk.prompt.trim(); });
+    if (!tasks.length) return null;
+    const box = el('div', 'master-preview');
+    let wave = null;
+    tasks.slice().sort(function (a, b) { return a.wave - b.wave; }).forEach(function (tk) {
+      if (tk.wave !== wave) {
+        wave = tk.wave;
+        // Même vocabulaire que les séparateurs de vague d'un lot réel : une
+        // vague au-delà de la première naît « queued » (seule la vague 1 part
+        // à la création), et l'aperçu ne peut pas dire autre chose que ce que
+        // le lot dira dans dix secondes.
+        box.appendChild(el('div', 'master-preview-wave', wave > 1 ? t('wave {0} — queued', wave) : t('wave {0}', wave)));
+      }
+      box.appendChild(pendingLine({
+        status: 'queued',
+        prompt: tk.prompt.trim(),
+        asked: { model: effectiveModel(tk), effort: effectiveEffort(tk) },
+        hint: '',
+      }));
+    });
+    return box;
+  }
+
+  // L'AGRAFE, en coordonnées de DOCUMENT (getBoundingClientRect + scrollTop) :
+  // le conteneur est absolu au coin (0,0) de la page, donc le tracé suit le
+  // défilement sans être redessiné, et une maîtresse sortie par le haut voit
+  // son agrafe filer hors écran sans pointe visible — c'est suffisant, l'ancre
+  // de bord a été explicitement écartée.
+  function drawMasterCue(row) {
+    if (!mcueHost) { mcueHost = el('div', 'mcue'); document.body.appendChild(mcueHost); }
+    mcueHost.replaceChildren();
+    if (!row || !form.masterPaste) return;
+    const a = row.getBoundingClientRect();
+    const b = newConvHeadEl.getBoundingClientRect();
+    const sy = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+    const yTop = a.top + sy + a.height / 2;    // axe de la ligne maîtresse
+    const yBot = b.top + sy + b.height / 2;    // axe de « New conversation »
+    if (yBot - yTop < MCUE_MIN_SPAN) return;
+
+    const v = el('div', 'mcue-v');
+    v.style.left = MCUE_X + 'px';
+    v.style.top = yTop + 'px';
+    v.style.height = (yBot - yTop) + 'px';
+    mcueHost.appendChild(v);
+
+    // Les deux crochets, identiques, centrés sur leur axe respectif.
+    [yTop, yBot].forEach(function (y) {
+      const h = el('div', 'mcue-h');
+      h.style.left = MCUE_X + 'px';
+      h.style.top = (y - MCUE_THICK / 2) + 'px';
+      h.style.width = (MCUE_HOOK + MCUE_THICK) + 'px';
+      mcueHost.appendChild(h);
+    });
+
+    // Pointe : sa hauteur totale vaut 2 x tipH, d'où le décalage vertical qui
+    // la centre EXACTEMENT sur l'épaisseur du crochet.
+    //
+    // Horizontalement, elle se termine AU BOUT du crochet au lieu de le
+    // prolonger — mesuré en CDP le 2026-08-27 : prolongée, elle finissait à
+    // 24,9px alors que la boîte d'icône de la ligne commence à 17px, et la
+    // pastille d'état ✓/⏺ de la maîtresse DISPARAISSAIT dessous. Le plan fige
+    // les deux choses (crochet de 10px, et « la pointe s'arrête avant la
+    // pastille d'état : elle porte une information, la masquer serait un
+    // recul ») : elles ne tiennent ensemble qu'en posant le triangle SUR la
+    // fin du crochet. Le dessin ne change pas pour autant — même couleur,
+    // triangle plus haut que le trait : c'est une flèche, et elle s'arrête
+    // à 16px, juste avant la pastille.
+    const tipH = Math.round(MCUE_THICK * 1.5);
+    const tipW = Math.round(MCUE_THICK * 1.8);
+    const tip = el('div', 'mcue-tip');
+    tip.style.setProperty('--mcue-tip-h', tipH + 'px');
+    tip.style.setProperty('--mcue-tip-w', tipW + 'px');
+    tip.style.left = (MCUE_X + MCUE_HOOK + MCUE_THICK - tipW) + 'px';
+    tip.style.top = (yTop - tipH) + 'px';
+    mcueHost.appendChild(tip);
+
+    const n = form.tasks.filter(function (tk) { return tk.prompt.trim(); }).length;
+    const lbl = el('div', 'mcue-lbl', t('{0} prompts', n));
+    lbl.style.right = '10px';
+    lbl.style.top = (yBot - 8) + 'px';
+    mcueHost.appendChild(lbl);
+  }
+
+  // Le rendu complet du décor, reconstruit depuis le formulaire. Idempotent :
+  // l'appeler deux fois de suite ne produit rien de différent.
+  function renderMasterCue() {
+    const id = masterTargetId();
+    rows.forEach(function (row, rid) { row.root.classList.toggle('master-target', rid === id); });
+    detachMasterPreview();
+    const row = masterTargetRow();
+    if (row && form.masterPaste) {
+      masterPreviewEl = buildMasterPreview();
+      // « À LEUR PLACE DÉFINITIVE » se prend au mot, et cette place n'est pas
+      // toujours la ligne d'en dessous : quand la maîtresse est DÉJÀ la tête
+      // d'un lot vivant, « Create » ne fonde pas un second lot — il enchaîne
+      // les tâches À LA SUITE de celui-là (createBatch, findChainTarget +
+      // appendTasksAfterWave). Les poser sous la ligne de tête les montrerait
+      // au-dessus de vagues qui partiront pourtant AVANT elles. L'aperçu va
+      // donc au bas du corps du lot, là où elles apparaîtront vraiment.
+      const grp = masterGroupNode();
+      // Sinon : juste après la ligne. L'aperçu POUSSE la liste vers le bas
+      // pendant la composition — c'est le coût de P2, connu et assumé.
+      if (masterPreviewEl) { if (grp) grp.body.appendChild(masterPreviewEl); else row.after(masterPreviewEl); }
+    }
+    // Après l'insertion de l'aperçu, jamais avant : il déplace « New
+    // conversation » vers le bas, donc le pied de l'agrafe.
+    drawMasterCue(row);
+  }
+
+  // Défilement et redimensionnement ne changent que la GÉOMÉTRIE : inutile de
+  // reconstruire l'aperçu, une image suffit (rAF, jamais un tir par événement
+  // de scroll).
+  let mcueRaf = 0;
+  function scheduleMasterCue() {
+    if (mcueRaf) return;
+    mcueRaf = requestAnimationFrame(function () { mcueRaf = 0; drawMasterCue(masterTargetRow()); });
+  }
+  window.addEventListener('scroll', scheduleMasterCue, { passive: true });
+
   // ── Groupes (lot 2, capsule v2 — plan repli-auto étape 9) ─────────────────
   // Nœuds conservés d'un rendu à l'autre, même raison que les lignes de conv :
   // un push d'état arrive toutes les 30 s au minimum, et bien plus souvent
@@ -2233,6 +2906,10 @@ function renderHtml(webview) {
       if (k.classList.contains('wave-hdr') || k.classList.contains('wave-ctrl')) continue;
       if (k.classList.contains('grp-head')) continue;         // grip d'un sous-lot
       if (k.classList.contains('grp-master-head')) continue;  // la tête n'est pas une fin
+      // Aperçu des futures conversations (plan agrafe 2026-08-27) : il est
+      // POSÉ dans le corps du lot mais n'en fait pas partie — le crochet de
+      // fin doit fermer le lot RÉEL, pas descendre jusqu'à un brouillon.
+      if (k.classList.contains('master-preview')) continue;
       return k;
     }
     return null;
@@ -2298,6 +2975,11 @@ function renderHtml(webview) {
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(function () {
       groupNodes.forEach(measureRail);
+      // Même raison que pour les rails : une largeur qui change (restauration
+      // au reload, redimensionnement de la barre latérale) rejoue les retours
+      // à la ligne des titres, donc déplace verticalement la ligne maîtresse
+      // ET « New conversation » — l'agrafe doit suivre sans attendre un push.
+      scheduleMasterCue();
     }).observe(document.body);
   }
 
@@ -2329,8 +3011,8 @@ function renderHtml(webview) {
     root.appendChild(ico);
     root.appendChild(title);
     const node = { root, ico, title, data: null };
-    root.addEventListener('click', function () {
-      if (node.data) vscode.postMessage({ type: 'focusConv', id: node.data.id, title: node.data.title, tabTitle: node.data.tabTitle || null });
+    root.addEventListener('click', function (ev) {
+      if (node.data) vscode.postMessage({ type: 'focusConv', id: node.data.id, title: node.data.title, tabTitle: node.data.tabTitle || null, isTrusted: !!(ev && ev.isTrusted) });
     });
     return node;
   }
@@ -2348,6 +3030,26 @@ function renderHtml(webview) {
     const label = el('span', 'grp-label');
     const count = el('span', 'grp-count');
     const spacer = el('span', 'spacer');
+    // Interrupteur MANUEL / AUTO du lot (2026-08-26, variante R2 de la maquette
+    // validée). Il vit ICI, sur l'en-tête, parce que le mode appartient au LOT
+    // et à rien d'autre : deux lots ouverts en même temps peuvent vouloir des
+    // régimes différents (un chantier qu'on surveille pas à pas, un autre qu'on
+    // laisse dérouler). Centré entre DEUX spacers : la grip garde son libellé à
+    // gauche et son compteur à droite, l'interrupteur ne mange ni l'un ni
+    // l'autre. role=switch + tabIndex : accessible au clavier comme les autres
+    // contrôles du panneau (Espace/Entrée, cf. le handler plus bas).
+    const spacer2 = el('span', 'spacer');
+    const tg = el('span', 'tg');
+    tg.setAttribute('role', 'switch');
+    tg.tabIndex = 0;
+    const tgL = el('span', 'side l', t('manual'));
+    const tgRail = el('span', 'rail');
+    const tgKnob = el('span', 'knob');
+    const tgR = el('span', 'side r', t('auto'));
+    tgRail.appendChild(tgKnob);
+    tg.appendChild(tgL);
+    tg.appendChild(tgRail);
+    tg.appendChild(tgR);
     // ⌂-focus (plan repli-auto étape 9) : visible UNIQUEMENT sans master
     // désignée (toggle en JS, renderGroups) — un clic lie directement
     // l'onglet VS Code actif, plus de QuickPick set/change/unlink.
@@ -2375,6 +3077,8 @@ function renderHtml(webview) {
     head.appendChild(chev);
     head.appendChild(label);
     head.appendChild(spacer);
+    head.appendChild(tg);
+    head.appendChild(spacer2);
     head.appendChild(count);
     head.appendChild(mas);
     head.appendChild(kill);
@@ -2435,7 +3139,7 @@ function renderHtml(webview) {
     ghostNew.style.display = 'none';
     ghostRow.appendChild(ghostNew);
     const node = {
-      root, head, chev, label, count, body, members: new Map(), id: g.id,
+      root, head, chev, label, count, tg, body, members: new Map(), id: g.id,
       mas, kill, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
       rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow, ghostNew,
       masterHead, masterSlot, masterOut, masterFallback: null,
@@ -2443,6 +3147,23 @@ function renderHtml(webview) {
     head.addEventListener('click', function (e) {
       if (e.target !== head && head.contains(e.target) && e.target.classList.contains('gbtn')) return;
       vscode.postMessage({ type: 'toggleGroupCollapse', id: node.id });
+    });
+    // Bascule du mode : stopPropagation, sinon le clic replierait le lot (le
+    // handler de la grip, juste au-dessus, ne laisse passer que les .gbtn).
+    // Le mode COURANT est lu sur le DOM (data-mode, posé par renderGroups à
+    // partir de l'état reçu) plutôt que gardé dans une variable locale : une
+    // seule source, celle que l'user voit — un état parallèle finirait par
+    // diverger d'un push d'état à l'autre.
+    function toggleWaveMode(e) {
+      e.stopPropagation();
+      var next = node.head.getAttribute('data-mode') === 'manual' ? 'auto' : 'manual';
+      vscode.postMessage({ type: 'setGroupWaveMode', id: node.id, mode: next });
+    }
+    tg.addEventListener('click', toggleWaveMode);
+    tg.addEventListener('keydown', function (e) {
+      if (e.key !== ' ' && e.key !== 'Enter') return;
+      e.preventDefault();
+      toggleWaveMode(e);
     });
     mas.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'setGroupMaster', id: node.id }); });
     kill.addEventListener('click', function (e) {
@@ -2491,25 +3212,33 @@ function renderHtml(webview) {
     const outChip = el('button', 'm-out', '⤴');
     outChip.type = 'button';
     outChip.title = t('Remove from this group (the conversation and its tab are kept)');
-    // Édition en cours de route (lot 4, décision 5) : déplacer une tâche PAS
-    // ENCORE LANCÉE vers la vague voisine — une fois lancée, elle ne bouge
-    // plus (groups.js moveQueuedMember refuse déjà le cas, ceci n'est que
-    // l'affordance ; visible seulement pour status === 'queued'.
-    // ◂/▸ vivent SUR la ligne, en overlay au survol (2026-08-09), plus dans le
-    // pied : dans le flux ils réservaient 15 px de hauteur sous CHAQUE tâche en
-    // file — les seules à les afficher —, d'où des lignes en file visiblement
-    // plus épaisses que les lignes lancées. Même leçon que la croix des membres
-    // et le chip « délier » de la master, appliquée cette fois à la hauteur.
-    // Glyphe seul : l'infobulle porte le sens, la place manque à côté du ⤴.
+    // Édition en cours de route (lot 4, décision 5) : envoyer une tâche PAS
+    // ENCORE LANCÉE dans une autre vague — une fois lancée, elle ne bouge plus
+    // (le store refuse déjà, ceci n'est que l'affordance ; visible seulement
+    // pour status === 'queued').
+    //
+    // Le contrôle vit SUR la ligne, en overlay au survol (2026-08-09), pas dans
+    // le pied : dans le flux il réserverait 15 px de hauteur sous CHAQUE tâche
+    // en file — les seules à l'afficher —, d'où des lignes en file plus
+    // épaisses que les lignes lancées. Même leçon que la croix des membres et
+    // le chip « délier » de la master, appliquée à la hauteur.
+    //
+    // 2026-08-27 : c'étaient deux flèches ◂/▸, remplacées par le NUMÉRO DE
+    // VAGUE devenu menu. Les flèches déplaçaient d'un CRAN (un membre seul
+    // fusionne avec la voisine, un membre accompagné se détache) : juste, mais
+    // indirect — il fallait autant de clics que de vagues à franchir, et le
+    // même clic ne faisait pas la même chose selon qui partageait la vague de
+    // départ, si bien qu'aucun nombre de clics ne voulait dire « va en
+    // vague 4 ». Une destination se DÉSIGNE : groups.js setMemberWave.
     const move = el('div', 'm-move');
-    const moveBack = el('button', 'm-mv', '◂');
-    moveBack.type = 'button';
-    moveBack.title = t('Move to the previous wave');
-    const moveFwd = el('button', 'm-mv', '▸');
-    moveFwd.type = 'button';
-    moveFwd.title = t('Move to the next wave');
-    move.appendChild(moveBack);
-    move.appendChild(moveFwd);
+    const jump = el('button', 'm-jump');
+    jump.type = 'button';
+    // Le libellé a son propre nœud : le menu est un ENFANT du pill (c'est lui
+    // le repère de position absolue), un setText sur le pill l'effacerait au
+    // premier rendu qui suit son ouverture.
+    const jumpLbl = el('span', '');
+    jump.appendChild(jumpLbl);
+    move.appendChild(jump);
     foot.appendChild(note);
     foot.appendChild(linkChip);
     foot.appendChild(relaunchChip);
@@ -2519,9 +3248,15 @@ function renderHtml(webview) {
     root.appendChild(head);
     root.appendChild(foot);
 
-    const node = { root, slot, foot, note, linkChip, relaunchChip, outChip, move, moveBack, moveFwd, conv: null };
-    moveBack.addEventListener('click', function () { vscode.postMessage({ type: 'moveMemberWave', id: gid, key: key, delta: -1 }); });
-    moveFwd.addEventListener('click', function () { vscode.postMessage({ type: 'moveMemberWave', id: gid, key: key, delta: 1 }); });
+    const node = {
+      root, slot, foot, note, linkChip, relaunchChip, outChip, move, conv: null,
+      jump, jumpLbl, gid, key, menu: null, wave: null, aloneInWave: false, queuedWaves: [],
+    };
+    jump.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (node.menu) { closeJumpMenu(); return; }
+      openJumpMenu(node);
+    });
     linkChip.addEventListener('click', function () { vscode.postMessage({ type: 'linkMember', id: gid, key: key }); });
     relaunchChip.addEventListener('click', function () { vscode.postMessage({ type: 'relaunchMember', id: gid, key: key }); });
     outChip.addEventListener('click', function () {
@@ -2529,6 +3264,75 @@ function renderHtml(webview) {
     });
     return node;
   }
+
+  // ── Menu « vague n ▾ » d'une tâche en file ────────────────────────────────
+  //
+  // UN seul menu ouvert à la fois, tenu ici et non sur le nœud : deux menus
+  // ouverts, ce serait deux réponses possibles à « où va cette tâche ». Il ne
+  // se ferme PAS à chaque rendu — un lot vivant pousse son état toutes les
+  // 30 s et à chaque transition, le menu se refermerait sous les doigts. Il
+  // est REPEINT à la place (paintJumpMenu, appelé par le rendu du membre) :
+  // ce qu'il propose suit l'état, sans jamais faire disparaître ce que l'user
+  // vise. Il ne se ferme que sur un choix, un clic ailleurs, ou Échap.
+  let openJump = null;
+
+  function closeJumpMenu() {
+    if (!openJump) return;
+    if (openJump.menu) openJump.menu.remove();
+    openJump.menu = null;
+    openJump.root.classList.remove('menu-open');
+    openJump = null;
+  }
+
+  function openJumpMenu(mn) {
+    closeJumpMenu();
+    mn.menu = el('div', 'm-menu');
+    mn.jump.appendChild(mn.menu);
+    mn.root.classList.add('menu-open');
+    openJump = mn;
+    paintJumpMenu(mn);
+  }
+
+  // Les destinations sont exactement celles que le store accepterait : les
+  // vagues encore EN FILE (une vague déjà partie n'en est pas une — y arriver
+  // reviendrait à être lancé aussitôt), plus « nouvelle vague à la fin ». La
+  // vague courante y figure quand même, marquée « ici » et morte : c'est le
+  // repère qui rend la liste lisible, pas une porte.
+  function paintJumpMenu(mn) {
+    if (!mn.menu) return;
+    mn.menu.replaceChildren();
+    const gid = mn.gid, key = mn.key;
+    mn.queuedWaves.forEach(function (w) {
+      const cur = w === mn.wave;
+      const b = el('button', cur ? 'cur' : '', cur ? t('Wave {0} (here)', w) : t('Wave {0}', w));
+      b.type = 'button';
+      if (cur) { b.disabled = true; mn.menu.appendChild(b); return; }
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        closeJumpMenu();
+        vscode.postMessage({ type: 'setMemberWave', id: gid, key: key, wave: w });
+      });
+      mn.menu.appendChild(b);
+    });
+    // Toujours proposée, SAUF quand elle ne changerait rien : une tâche déjà
+    // seule au bout de la file y est déjà (le store refuse, cf. setMemberWave).
+    const alone = mn.queuedWaves.length
+      && mn.wave === mn.queuedWaves[mn.queuedWaves.length - 1]
+      && mn.aloneInWave;
+    if (!alone) {
+      const bn = el('button', '', t('New wave at the end'));
+      bn.type = 'button';
+      bn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        closeJumpMenu();
+        vscode.postMessage({ type: 'setMemberWave', id: gid, key: key, wave: null });
+      });
+      mn.menu.appendChild(bn);
+    }
+  }
+
+  document.addEventListener('click', function () { closeJumpMenu(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeJumpMenu(); });
 
   // Ligne d'un membre sans conversation rendue : le prompt tel qu'il a été
   // inséré, et rien d'emprunté. Le POURQUOI (jamais lancée, onglet ouvert sans
@@ -2574,16 +3378,26 @@ function renderHtml(webview) {
   // l'incident a rendu mensonger.
   // (Pas de backtick dans ce commentaire : on est DANS le template literal du
   // webview — cf. CLAUDE.md du dossier.)
-  function renderWaveCtrl(node, g, blocked, hardBlocked) {
+  function renderWaveCtrl(node, g, blocked, hardBlocked, manual) {
     node.waveCtrl.replaceChildren();
     if (g.waveNotice) node.waveCtrl.appendChild(el('div', 'banner info', g.waveNotice));
     if (g.nextWave == null) return;
     if (!blocked) return;
-    node.waveCtrl.appendChild(hardBlocked
-      ? el('div', 'banner err',
-        t('A task in wave {0} will not finish on its own (interrupted) — auto advance is suspended. Use ▶ to force wave {1}.', g.launchedWave, g.nextWave))
-      : el('div', 'banner info',
-        t('A task in wave {0} lost its link before sending — press Enter in its tab to relink it, or use “Relaunch”. Auto advance is suspended; ▶ forces wave {1}.', g.launchedWave, g.nextWave)));
+    // Le texte suit le MODE du lot (2026-08-26, resserré 2026-08-27) : en AUTO
+    // il n'existe plus AUCUN ▶ à mentionner (plus aucun élément cliquable sur
+    // les séparateurs) — la bannière ne dit donc que le remède, jamais le
+    // mécanisme d'enchaînement (ni « suspendu », ni la vague suivante qui
+    // partira seule, évidence). En manuel, le ▶ reste la seule porte, la
+    // phrase le dit toujours.
+    if (hardBlocked) {
+      node.waveCtrl.appendChild(el('div', 'banner err', manual
+        ? t('A task in wave {0} will not finish on its own (interrupted). Use ▶ to open wave {1} anyway.', g.launchedWave, g.nextWave)
+        : t('A task in wave {0} will not finish on its own (interrupted).', g.launchedWave)));
+      return;
+    }
+    node.waveCtrl.appendChild(el('div', 'banner info', manual
+      ? t('A task in wave {0} lost its link before sending — press Enter in its tab to relink it, or use “Relaunch”. ▶ opens wave {1} anyway.', g.launchedWave, g.nextWave)
+      : t('A task in wave {0} lost its link before sending — press Enter in its tab to relink it, or use “Relaunch”.', g.launchedWave)));
   }
 
   // « Ce qui reste à faire » (étape 11) : un lot dont TOUS les membres sont
@@ -2718,6 +3532,29 @@ function renderHtml(webview) {
       if (!kidsOf.has(k)) kidsOf.set(k, []);
       kidsOf.get(k).push(g);
     });
+    // QUI REND QUELLE CONVERSATION (2026-08-27). Invariant du panneau : UN nœud
+    // de conversation, UN endroit du DOM. Deux membres qui désignent la même
+    // conv se la disputaient en silence — le dernier rendu prenait le nœud
+    // (place() le déplace), le premier gardait un emplacement VIDE, donc une
+    // ligne de hauteur nulle : un lot réduit à sa poignée, sans rien dessous et
+    // sans aucun geste pour le retirer (constaté le 2026-08-27, cf. le veto de
+    // supersede.js qui en supprime la cause connue). Le doublon ne peut naître
+    // que d'une redirection husk→successeur (un sessionId n'appartient qu'à un
+    // membre dans le store) : le lien DIRECT gagne donc la ligne, et le membre
+    // redirigé retombe sur sa ligne « en attente » — visible, avec son prompt,
+    // au lieu de rien. À égalité (deux redirigés), l'ordre du store tranche.
+    // Résolu AVANT la boucle de rendu : un arbitrage qui se déciderait au fil
+    // des groupes dépendrait de leur ordre, très exactement ce qu'on répare.
+    const rowOwner = new Map();        // convId → { key, redirected }
+    rendered.forEach(function (g) {
+      (g.members || []).forEach(function (m) {
+        if (!m.convId || m.status === 'done-closed') return;
+        const key = g.id + '\\u0000' + m.key;
+        const cur = rowOwner.get(m.convId);
+        if (!cur) { rowOwner.set(m.convId, { key: key, redirected: !!m.redirected }); return; }
+        if (cur.redirected && !m.redirected) rowOwner.set(m.convId, { key: key, redirected: false });
+      });
+    });
     const convIdsOf = new Map();       // groupId → convIds affichés par CE lot
     rendered.forEach(function (g) {
       live.add(g.id);
@@ -2786,6 +3623,15 @@ function renderHtml(webview) {
       node.label.style.display = g.stamp ? '' : 'none';
       setText(node.chev, g.collapsed ? '▸' : '▾');
       node.body.classList.toggle('collapsed', !!g.collapsed);
+      // Mode d'enchaînement du lot (2026-08-26) : data-mode porte TOUT le
+      // rendu de l'interrupteur (position de la pastille, mot en couleur
+      // pleine) — la feuille de style fait le reste, aucune classe à basculer.
+      const manual = g.waveMode === 'manual';
+      node.head.setAttribute('data-mode', manual ? 'manual' : 'auto');
+      node.tg.setAttribute('aria-checked', manual ? 'false' : 'true');
+      node.tg.title = manual
+        ? t('Manual: nothing opens on its own — the ▶ button appears when the current wave is done. Click to switch to auto.')
+        : t('Auto: the next wave opens by itself once every task of the current one has finished. Click to switch to manual.');
 
       // Ligne master (plan repli-auto étape 9) : conversation STANDARD (même
       // fabrique rowFor() que la liste plate) quand elle est listée, fallback
@@ -2818,7 +3664,13 @@ function renderHtml(webview) {
         node.masterTitle = ms.title || t('Master conversation');
         node.masterTabTitle = ms.tabTitle || null;
         place(node.body, 0, node.masterHead);
-        const conv = (ms.listed && ms.convId) ? convById[ms.convId] : null;
+        // …et jamais la conv qu'un MEMBRE encore rendu tient déjà (même
+        // invariant que rowOwner ci-dessus) : la tête retombe alors sur son
+        // repli dégradé — titre persisté, tooltip — au lieu d'une capsule vide.
+        // Le cas nominal « la maîtresse est membre d'un autre lot » est déjà
+        // absorbé en amont par la filiation (nesting.js) ; ce garde ne couvre
+        // que ce qu'elle a refusé de nester.
+        const conv = (ms.listed && ms.convId && !rowOwner.has(ms.convId)) ? convById[ms.convId] : null;
         if (conv) {
           seen.add(conv.id);
           convIds.push(conv.id);
@@ -2872,12 +3724,23 @@ function renderHtml(webview) {
       const curMembers = g.members.filter(function (m) { return m.wave === g.launchedWave; });
       const blockers = curMembers.filter(function (m) { return m.waveStatus === 'stale'; });
       const blocked = blockers.length > 0;
+      // Mode du lot (2026-08-26) : en MANUEL, le bouton ▶ de la vague suivante
+      // n'apparaît QU'UNE FOIS la vague courante terminée — avant, il n'y a
+      // rien à décider et la vague en file garde son séparateur inerte
+      // (« wave n — queued »). Deux nuances, chacune pour ne pas enfermer :
+      //  · une vague BLOQUÉE (une tâche interrompue qui ne finira jamais seule)
+      //    ouvre quand même le bouton : en manuel il est la SEULE porte, la
+      //    cacher laisserait le lot sans issue ;
+      //  · une vague courante VIDE (tous ses membres retirés) compte comme
+      //    faite, pour la même raison.
+      const curDone = curMembers.length === 0
+        || curMembers.every(function (m) { return m.waveStatus === 'done'; });
+      const manualReady = curDone || blocked;
       // Le statut CANONIQUE, pas sa projection : stale et unsent-lost
       // suspendent tous deux l'auto (même waveStatus), mais un seul des deux
       // est une mauvaise nouvelle. Un mélange des deux dans la même vague →
       // rouge, la conv interrompue prime.
       const hardBlocked = blockers.some(function (m) { return m.status === 'stale'; });
-      const dim = !blocked;
 
       const keys = new Set();
       // La ligne master (si présente) occupe déjà l'index 0 (placée plus
@@ -2896,25 +3759,24 @@ function renderHtml(webview) {
             node.waveHeaders.set(w, h);
             return h;
           })();
-          // Séparateur devenu bouton de lancement (lot 4 §2) : seule la
-          // PROCHAINE vague à ouvrir (g.nextWave) porte le style cliquable —
-          // vagues déjà lancées ou plus loin en file restent inertes, style
-          // actuel. Fond bleu (primary) = le moteur attend l'humain (manuel,
-          // ou bloqué — chemin de secours) ; transparent = pas le moment
-          // (auto, non bloqué) mais cliquable = forcer, avec la même
-          // confirmation modale que l'ancien bouton.
-          const isLaunch = w === g.nextWave;
+          // Séparateur devenu bouton de lancement (lot 4 §2, resserré
+          // 2026-08-27) : en AUTO, plus RIEN de cliquable sur un séparateur,
+          // jamais — la seule porte vers un forçage est l'interrupteur
+          // manuel/auto de l'en-tête. Le style « cliquable » n'existe donc
+          // plus qu'en manuel, et seulement une fois la vague courante prête
+          // (manualReady) : avant, comme après en auto, le séparateur reste
+          // inerte (« wave n — queued »).
+          const isLaunch = manual && w === g.nextWave && manualReady;
           setText(hdr._label, isLaunch ? t('▶ wave {0}', w) : (w > g.launchedWave ? t('wave {0} — queued', w) : t('wave {0}', w)));
           hdr.classList.toggle('launch', isLaunch);
-          hdr.classList.toggle('pri', isLaunch && !dim);
-          hdr.classList.toggle('dim', isLaunch && dim);
-          hdr.title = (isLaunch && dim) ? t('Auto mode will open this wave by itself — click to force it now.') : '';
-          hdr.onclick = isLaunch ? (function (wv, force) {
+          hdr.classList.toggle('pri', isLaunch);
+          hdr.title = '';
+          hdr.onclick = isLaunch ? (function (wv) {
             return function (e) {
               e.stopPropagation();
-              vscode.postMessage({ type: 'launchWave', id: node.id, wave: wv, force: force || undefined });
+              vscode.postMessage({ type: 'launchWave', id: node.id, wave: wv });
             };
-          })(w, dim) : null;
+          })(w) : null;
           place(node.body, idx++, hdr);
         }
         // « + ajouter à cette vague » JAMAIS sur une vague déjà lancée ni la
@@ -2942,7 +3804,12 @@ function renderHtml(webview) {
           keys.add(m.key);
           let mn = node.members.get(m.key);
           if (!mn) { mn = createMemberNode(g.id, m.key); node.members.set(m.key, mn); }
-          const c = m.convId ? convById[m.convId] : null;
+          // Ligne de conv seulement si CE membre est celui qui la porte
+          // (rowOwner, plus haut) : le perdant d'une double revendication
+          // affiche sa ligne « en attente », jamais un emplacement vide.
+          const owner = m.convId ? rowOwner.get(m.convId) : null;
+          const mine = !owner || owner.key === g.id + '\\u0000' + m.key;
+          const c = (m.convId && mine) ? convById[m.convId] : null;
           mn.conv = c || null;
           let rw = null;
           if (c) {
@@ -2966,8 +3833,16 @@ function renderHtml(webview) {
           // couleur, juste au-dessus/en-dessous d'elle.
           const kids = kidsOf.get(g.id + '\\u0000' + m.key) || null;
           mn.root.classList.toggle('nest-host', !!kids);
-          if (kids) mn.root.style.setProperty('--nest-hue', 'hsl(' + kids[0].hue + ', 45%, 55%)');
-          else mn.root.style.removeProperty('--nest-hue');
+          if (kids) {
+            mn.root.style.setProperty('--nest-hue', 'hsl(' + kids[0].hue + ', 45%, 55%)');
+            // Fond de la capsule (2026-08-27) : même formule que --grp-tint,
+            // à la couleur de l'ENFANT — jamais celle du parent qui possède
+            // déjà la sienne sur node.body.
+            mn.root.style.setProperty('--nest-tint', 'hsla(' + kids[0].hue + ', 45%, 55%, .08)');
+          } else {
+            mn.root.style.removeProperty('--nest-hue');
+            mn.root.style.removeProperty('--nest-tint');
+          }
           // La bulle scindée suit exactement la même condition que la classe :
           // deux façons de dire « tête de sous-lot » ne pourraient pas rester
           // d'accord bien longtemps.
@@ -2987,23 +3862,21 @@ function renderHtml(webview) {
           const noteText = m.note || '';
           setText(mn.note, noteText);
           mn.note.style.display = noteText ? '' : 'none';
-          // Un bouton qui ne fait rien ment (cf. lot 1) — et depuis que la
-          // vague est une POSITION (groups.js moveQueuedMember, 2026-08-22),
-          // ce que peut un membre dépend d'abord de s'il est SEUL dans sa
-          // vague. Ces deux conditions sont le MIROIR exact des deux refus du
-          // store, jamais une règle de plus :
-          //   · SEUL → il ne sait que FUSIONNER avec une vague voisine, donc
-          //     seulement si elle existe (▸) et n'est pas déjà partie (◂) ;
-          //   · ACCOMPAGNÉ → il SE DÉTACHE dans une vague neuve, toujours
-          //     possible des deux côtés. C'est ce cas qui crée une vague au
-          //     bout de la file : le ▸ ne doit donc PLUS être masqué sur la
-          //     dernière vague, ce qu'il était depuis le lot 4 — la moitié
-          //     visible du bug du 2026-08-22 (l'autre étant le ◂ affiché mais
-          //     refusé en silence dès qu'une vague s'était vidée).
+          // « vague n ▾ » sur une tâche EN FILE, et sur elle seule : une tâche
+          // lancée n'a plus de destination, le store la refuserait. Ce que le
+          // menu proposera est rafraîchi ICI, à chaque rendu, y compris
+          // pendant qu'il est ouvert — ses destinations suivent l'état du lot
+          // sans que le menu se dérobe sous les doigts.
           const canMove = m.waveStatus === 'queued';
           const aloneInWave = waveCount.get(w) === 1;
-          mn.moveBack.style.display = canMove && (!aloneInWave || w - 1 > g.launchedWave) ? '' : 'none';
-          mn.moveFwd.style.display = canMove && (!aloneInWave || w < waveNums[waveNums.length - 1]) ? '' : 'none';
+          mn.wave = w;
+          mn.aloneInWave = aloneInWave;
+          mn.queuedWaves = waveNums.filter(function (n) { return n > g.launchedWave; });
+          mn.jump.style.display = canMove ? '' : 'none';
+          setText(mn.jumpLbl, t('wave {0} ▾', w));
+          mn.jump.title = t('Move this task to another wave');
+          if (!canMove && mn.menu) closeJumpMenu();
+          else if (mn.menu) paintJumpMenu(mn);
           // Le pied ne réserve de hauteur que s'il a vraiment quelque chose à
           // dire (2026-08-09) : ses trois enfants sont masqués un par un, donc
           // il n'est jamais :empty au sens CSS — c'est ici, où l'on SAIT ce qui
@@ -3040,7 +3913,7 @@ function renderHtml(webview) {
         const isLastWave = w === waveNums[waveNums.length - 1];
         if (queued && isLastWave) place(node.ghostRow, 0, addRow);
         else if (queued) place(node.body, idx++, addRow);
-        if (w === g.launchedWave) { renderWaveCtrl(node, g, blocked, hardBlocked); place(node.body, idx++, node.waveCtrl); ctrlPlaced = true; }
+        if (w === g.launchedWave) { renderWaveCtrl(node, g, blocked, hardBlocked, manual); place(node.body, idx++, node.waveCtrl); ctrlPlaced = true; }
       });
       // launchedWave absente des vagues RENDUES : soit défensif (ne devrait
       // pas arriver, waves.js la calcule à partir de ces mêmes membres), soit
@@ -3049,7 +3922,7 @@ function renderHtml(webview) {
       // Dans les deux cas, la zone de contrôle n'a nulle part où s'accrocher
       // au-dessus, elle vient en fin de corps plutôt que de disparaître
       // silencieusement.
-      if (!ctrlPlaced) { renderWaveCtrl(node, g, blocked, hardBlocked); place(node.body, idx++, node.waveCtrl); }
+      if (!ctrlPlaced) { renderWaveCtrl(node, g, blocked, hardBlocked, manual); place(node.body, idx++, node.waveCtrl); }
       // Ligne fantôme finale : TOUJOURS en fin de corps, y compris groupe fini
       // (décision 2 du design — en auto, la nouvelle vague part au prochain
       // battement du moteur, c'est assumé). Depuis le lot B densité elle porte
@@ -3165,6 +4038,24 @@ function renderHtml(webview) {
   let batchState = { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null }, lastModel: null, lastEffort: null };
   let form = { group: '', tasks: [blankTask(1)] };
   let createBtn = null;
+
+  // Numéro du dernier collage (plan agrafe 2026-08-27). La recherche de la
+  // conversation maîtresse est un aller-retour vers l'extension : ce compteur
+  // DATE la question, et la réponse qui ne porte pas le numéro courant est
+  // jetée. Un collage suivant annule donc le précédent, même si la réponse du
+  // premier arrive après — et une remise à zéro du formulaire (Create,
+  // Cancel) l'annule aussi, en incrémentant sans rien redemander. Il vit hors
+  // de l'objet form pour cette raison : il doit survivre à sa remise à zéro.
+  let masterSeq = 0;
+
+  // Remise à zéro du brouillon — un seul endroit, parce que « oublier le
+  // collage » a trois moitiés (les tâches, le texte gardé pour la recherche,
+  // et la question en vol) et qu'en oublier une laisserait une agrafe
+  // pointant vers un lot déjà lancé.
+  function resetForm() {
+    masterSeq++;
+    form = { group: '', tasks: [blankTask(1)] };
+  }
 
   // Lot 14 : le bouton « inherit » disparaît, remplacé par une PRÉ-SÉLECTION
   // concrète. task.model/task.effort valent null tant que l'utilisateur n'a
@@ -3434,12 +4325,44 @@ function renderHtml(webview) {
   // (activeTasks().length), pour rester cohérent avec ce qui serait réellement
   // envoyé. Appelée à chaque changement de saisie (refreshCreateBtn) et à
   // chaque (re)création de nœud de groupe, où les deux naissent masqués.
+  // Dernier état appliqué, pour ne compenser le scroll QUE sur la bascule
+  // (cf. plus bas) — un push d'état ordinaire ne doit pas déplacer la vue.
+  let ghostsShown = null;
+
   function refreshGhostVisibility() {
     const has = activeTasks().length > 0;
+    const flipped = has !== ghostsShown;
+    // Le formulaire est SOUS les lots : faire apparaître une ligne d'ajout dans
+    // chacun d'eux pousse tout ce qui suit, donc la zone de saisie elle-même —
+    // elle fuyait sous le curseur à la première frappe, et le panneau entier
+    // semblait défiler (signalé par l'user, 2026-08-27). On mesure donc où est
+    // le formulaire AVANT, et on rend au défilement ce que la mise en page
+    // vient de prendre : à l'écran, le champ ne bouge pas d'un pixel, c'est le
+    // contenu au-dessus qui glisse. Réserver la place en permanence marcherait
+    // aussi, mais rendrait à chaque lot la hauteur que le masquage à vide
+    // (2026-08-15) lui avait justement fait gagner.
+    const before = flipped ? batchFormEl.getBoundingClientRect().top : 0;
     groupNodes.forEach(function (node) {
       node.ghostNew.style.display = has ? '' : 'none';
-      node.waveAddRows.forEach(function (r) { r.style.display = has ? '' : 'none'; });
+      node.ghostNew.classList.toggle('armed', has);
+      node.waveAddRows.forEach(function (r) {
+        r.style.display = has ? '' : 'none';
+        // ARMÉE : le prompt est tapé, ces lignes sont les endroits où il peut
+        // tomber — elles prennent la couleur d'action (cf. .wave-ghost.armed).
+        // Le masquage à vide de 2026-08-15 économisait la place ; il laissait
+        // le reste du temps une cible qu'on ne trouvait qu'au survol, d'où le
+        // détour par « + new wave » puis la remontée à la main.
+        r.classList.toggle('armed', has);
+      });
     });
+    ghostsShown = has;
+    if (!flipped) return;
+    // getBoundingClientRect force le recalcul : la mesure d'après est celle de
+    // la mise en page déjà à jour, jamais celle d'avant.
+    const delta = batchFormEl.getBoundingClientRect().top - before;
+    if (!delta) return;
+    const sc = document.scrollingElement || document.documentElement;
+    sc.scrollTop += delta;
   }
 
   function refreshCreateBtn() {
@@ -3555,10 +4478,29 @@ function renderHtml(webview) {
       // « Create » — le webview ne lit aucun transcript ici.
       form.masterPaste = text;
       form.masterSession = parsed.session || null;
+      // … et cherchée TOUT DE SUITE (plan agrafe 2026-08-27), au lieu
+      // d'attendre le clic sur « Create » : la filiation se voit avant de
+      // lancer. La recherche vit côté extension (elle lit des transcripts), on
+      // ne fait que la demander, datée de CE collage.
+      masterSeq++;
+      form.masterSeq = masterSeq;
+      form.master = null;
+      vscode.postMessage({
+        type: 'resolveMasterPaste',
+        seq: masterSeq,
+        paste: form.masterPaste,
+        session: form.masterSession,
+      });
       form.banner = t('claude-convs block recognized — {0} task(s) prefilled (model, effort, waves).', parsed.tasks.length);
     } else {
       form.masterPaste = null;
       form.masterSession = null;
+      // Un collage qui n'est plus un bloc valide annule la question en vol :
+      // sans ce coup de compteur, la réponse du collage précédent viendrait
+      // désigner une maîtresse pour un texte qui n'en a plus.
+      masterSeq++;
+      form.masterSeq = 0;
+      form.master = null;
       if (parsed.found && parsed.error) {
         form.errorBanner = t('claude-convs block not recognized: {0} — kept as a plain prompt.', parsed.error);
       }
@@ -3646,9 +4588,42 @@ function renderHtml(webview) {
     return card;
   }
 
+  // Pastille d'avertissement de la recherche de maîtresse (variante E de
+  // MOCKUP_master_cible_collage_2026-08-27) — UNIQUEMENT quand elle échoue.
+  // Le cas trouvé n'en a pas : l'agrafe le dit déjà, et sur la ligne
+  // elle-même. Ces deux échecs sont fréquents (bloc écrit à la main,
+  // conversation maîtresse fermée, jeton périmé) et un panneau muet se lirait
+  // comme une panne — d'où une phrase qui dit aussi la CONSÉQUENCE (« lot
+  // autonome », « aucune retenue »), pas seulement le constat.
+  function masterChip() {
+    const m = form.master;
+    if (!form.masterPaste || !m || m.sessionId) return null;
+    const chip = el('div', 'master-chip');
+    // PAS la classe « arrow » : elle appartient déjà à la flèche d'avancement
+    // des fenêtres de quota, qui est en position:absolute — le ⚠ partait se
+    // poser dans le coin haut-gauche du panneau, hors de sa pastille (mesuré
+    // en CDP le 2026-08-27, visible sur la capture).
+    chip.appendChild(el('span', 'sign', '⚠'));
+    const ambiguous = m.matches > 1;
+    chip.appendChild(el('span', 'who', ambiguous
+      ? t('{0} conversations contain this block', m.matches)
+      : t('No master conversation found')));
+    chip.appendChild(el('span', 'tail', ambiguous ? t('none kept') : t('standalone batch')));
+    chip.title = ambiguous
+      ? t('The block was found in more than one conversation — none is retained, and the batch starts without a parent. Use “Set master…” on the batch to link it yourself.')
+      : t('The pasted block was not found in any conversation of this panel — the batch starts without a parent. Use “Set master…” on the batch to link it yourself.');
+    return chip;
+  }
+
   function renderForm() {
     batchFormEl.replaceChildren();
     createBtn = null;
+
+    // En TÊTE du formulaire, avant même le conflit d'environnement : c'est la
+    // réponse à ce que l'utilisateur vient de faire (coller), elle se lit là
+    // où il regarde.
+    const chip = masterChip();
+    if (chip) batchFormEl.appendChild(chip);
 
     const disabled = !!(batchState.envConflict && batchState.envConflict.length);
     if (disabled) {
@@ -3729,7 +4704,7 @@ function renderHtml(webview) {
     // là) — Cancel remet le brouillon à zéro (une tâche vierge, mode simple)
     // plutôt que de fermer un panneau qui n'existe plus.
     foot.appendChild(button('', t('Cancel'), function () {
-      form = { group: '', tasks: [blankTask(1)] };
+      resetForm();
       renderForm();
     }));
     createBtn = button('pri', t('Create'), function () {
@@ -3749,12 +4724,17 @@ function renderHtml(webview) {
         paste: form.masterPaste || null,
         session: form.masterSession || null,
       });
-      form = { group: '', tasks: [blankTask(1)] };
+      resetForm();
       renderForm();
     });
     foot.appendChild(createBtn);
     batchFormEl.appendChild(foot);
     refreshCreateBtn();
+    // Le décor de la maîtresse est produit par le formulaire autant que par le
+    // flux : ajouter une tâche, changer un modèle ou vider le brouillon change
+    // ce que l'aperçu doit montrer. Une seule fonction, appelée des deux
+    // côtés — jamais deux constructions parallèles du même décor.
+    renderMasterCue();
   }
 
   function renderBatch(b) {
@@ -3798,6 +4778,24 @@ function renderHtml(webview) {
     return track;
   }
 
+  // Traits de segmentation sous la barre : 1 par heure sous 24h (5h → 5), 1
+  // par jour au-delà (7j → 7) — dérivé de windowMs, jamais du libellé (l10n).
+  const HOUR_MS = 60 * 60 * 1000;
+  const DAY_MS = 24 * HOUR_MS;
+  function segmentsFor(windowMs) {
+    if (!windowMs) return 0;
+    return Math.round(windowMs / (windowMs <= DAY_MS ? HOUR_MS : DAY_MS)) || 0;
+  }
+  function ticksRow(segments) {
+    const row = el('div', 'ticks');
+    for (let i = 1; i < segments; i++) {
+      const mark = el('i');
+      mark.style.left = (i / segments * 100) + '%';
+      row.appendChild(mark);
+    }
+    return row;
+  }
+
   function renderQuota(q) {
     quotaEl.replaceChildren();
     const windows = (q && q.windows) || [];
@@ -3823,6 +4821,8 @@ function renderHtml(webview) {
       wrap.appendChild(head);
       const barWrap = el('div', 'bar-wrap');
       barWrap.appendChild(bar('bar-q' + paceCls, w.pct));
+      const segments = segmentsFor(w.windowMs);
+      if (segments > 1) barWrap.appendChild(ticksRow(segments));
       barWrap.appendChild(arrowTrack(w.elapsedPct));
       wrap.appendChild(barWrap);
       if (w.resetLabel) wrap.appendChild(el('div', 'q-sub', t('resets {0}', w.resetLabel)));
@@ -3948,13 +4948,42 @@ function renderHtml(webview) {
     vscode.postMessage({ type: 'ready' });
   });
 
+  // Réponse à la recherche de conversation maîtresse lancée au collage. Le
+  // seul message extension → webview qui ne soit pas un push d'état, et le
+  // seul que le formulaire écoute : il ne change RIEN au brouillon (tâches,
+  // modèle, vagues), il ne fait que nommer la conversation à laquelle ce
+  // brouillon se rattachera.
+  function onMasterResolved(msg) {
+    // Datée du collage : une réponse qui ne porte pas le numéro du collage
+    // COURANT concerne un texte que l'utilisateur a déjà remplacé (ou un
+    // formulaire déjà lancé/annulé). On la jette sans rien afficher — sans
+    // quoi une recherche lente peindrait une filiation périmée par-dessus la
+    // bonne.
+    if (!form.masterSeq || msg.seq !== form.masterSeq) return;
+    form.master = {
+      sessionId: msg.sessionId || null,
+      title: msg.title || '',
+      matches: typeof msg.matches === 'number' ? msg.matches : 0,
+      reason: msg.reason || '',
+    };
+    // renderForm (et non renderMasterCue seul) : la pastille d'échec vit dans
+    // le formulaire, et c'est renderForm qui appelle le décor derrière elle.
+    renderForm();
+  }
+
   window.addEventListener('message', function (event) {
     const msg = event.data;
+    if (msg && msg.type === 'masterResolved') { onMasterResolved(msg); return; }
     if (!msg || msg.type !== 'state') return;
     // Preuve de vie du canal hôte→webview : tout état reçu remet l'horloge du
     // heartbeat à zéro et lève la dégradation (cf. checkFreshness).
     lastStateAt = Date.now();
     setDataStale(false);
+    // AVANT tout rendu : layoutFlow place les enfants de #flow par INDEX, un
+    // aperçu resté en place les décalerait tous d'un cran. Il est reconstruit
+    // à la fin de ce même rendu (renderMasterCue) — c'est ce qui le fait
+    // SURVIVRE au re-rendu du flux au lieu d'y disparaître.
+    detachMasterPreview();
     const convs = (msg.state && msg.state.conversations) || [];
     const groups = (msg.state && msg.state.groups) || [];
     // Une conversation groupée est rendue DANS son groupe, et nulle part
@@ -3971,6 +5000,10 @@ function renderHtml(webview) {
     // ici par masterIds, mais son groupe déjà filtré côté renderGroups).
     const masterIds = new Set();
     groups.forEach(function (g) { if (!g.done && g.master && g.master.listed && g.master.convId) masterIds.add(g.master.convId); });
+    // Gardés pour masterGroupNode() (cf. renderMasterCue) : remplacés à chaque
+    // état, jamais accumulés — un lot terminé ou dissous cesse d'exister ici
+    // au même battement qu'à l'écran.
+    lastGroups = groups;
     const seen = new Set();
     // renderUi AVANT le flux : le mode de tri qu'il reflète est celui que
     // layoutFlow applique — une seule lecture de ui.sortOrder pour les deux,
@@ -4016,7 +5049,14 @@ function renderHtml(webview) {
     canaryEl.classList.toggle('show', !!(msg.state && msg.state.canary));
     tabsFrozenEl.classList.toggle('show', !!(msg.state && msg.state.tabsFrozen));
     renderSetupBanner(msg.state && msg.state.setup);
+    renderTruthBanner(msg.state && msg.state.highlightNotice);
     renderBatch(msg.state && msg.state.batch);
+    // EN DERNIER, et inconditionnel : renderBatch ne re-rend le formulaire que
+    // si ce qui le conditionne a bougé, alors que le décor de la maîtresse,
+    // lui, dépend du flux qu'on vient de reconstruire — sa ligne a pu changer
+    // de place, entrer dans un lot ou disparaître. Idempotent : le rappeler
+    // après un renderForm qui l'a déjà fait ne produit rien de différent.
+    renderMasterCue();
   });
 
   renderForm();
