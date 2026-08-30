@@ -68,6 +68,10 @@ const { labelMatches, convMatchesLabel, pairTabs } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 const { liveSessionIds, foreignSessionIds, liveSessionEntries, SESSIONS_DIR } = require('./live-sessions.js');
 const { cleanLabel } = require('./session-titles.js');
+// Validation EN BLOC de la photo des positions d'onglets (2026-08-29) : même
+// juge pour le clic (focus.js) et pour le surlignage — une photo périmée
+// acceptée d'un côté et refusée de l'autre remettrait les deux en désaccord.
+const { validatePositions } = require('./tab-positions.js');
 const { computeSupersededBy } = require('./supersede.js');
 const { createCostReader } = require('./cost.js');
 const { logEvent, createVerdictFilter } = require('./ack-journal.js');
@@ -140,6 +144,48 @@ const STALE_MS = 5 * 60 * 1000;
 // de toute façon la levée au premier UserPromptSubmit/Stop (posée côté hook),
 // ce plafond ne couvre que le cas où AUCUN des deux ne survient jamais.
 const COMPACTING_CAP_MS = 10 * 60 * 1000;
+
+// Même filet, pour l'autre moitié appariée du spinner : une tâche de fond
+// LANCÉE dont la notification de fin n'arrive jamais (agent tué, notification
+// passée par un canal non relevé, CLI qui ne réécrit plus ce transcript).
+// `pendingResumeSignals` ne peut alors plus jamais se dénouer, et la
+// conversation tourne pour l'éternité — mesuré le 2026-08-28 sur la session
+// 935cae15 : tâche lancée à 02:07, entrée hooks à `done` depuis 10:30, spinner
+// encore en rotation à 10:49 (signalé par l'user, « la conversation est arrêtée
+// mais le loading continue de tourner »). Au-delà de ce plafond, le signal
+// cesse de tenir l'affichage et l'on retombe sur l'état ÉCRIT par les hooks —
+// jamais l'inverse : une tâche vraiment en vol se voit dans le quart d'heure.
+// Généreux (les sous-agents les plus longs se comptent en minutes) ; borne
+// sautée si le signal n'est pas datable (`0`), comme partout ailleurs ici.
+const PENDING_TASK_CAP_MS = 60 * 60 * 1000;
+
+// …et surtout : une tâche de fond ne tient le spinner que tant que la
+// conversation DONNE ENCORE SIGNE DE VIE. Mesuré le 2026-08-28, deuxième
+// signalement du même symptôme : commande de fond lancée à 11:45, tour terminé
+// (hook Stop, `done` ÉCRIT) à 11:53, plus une ligne écrite ensuite — et à 12:01
+// la conversation tournait toujours à l'écran alors qu'elle attendait une
+// réponse de l'utilisateur. Le plafond d'une heure ne pouvait rien y faire.
+// Le raisonnement : quand une tâche de fond se termine VRAIMENT, elle écrit —
+// sa notification arrive dans le transcript. Un transcript figé depuis
+// plusieurs minutes, avec un `done` posé par le CLI lui-même, ne décrit donc
+// pas une conversation au travail. Et si la notification finit par arriver, le
+// fichier bouge et la conversation repasse busy d'elle-même : le pire cas de
+// cette borne est un ✓ affiché quelques minutes trop tôt, jamais un spinner
+// qui ne s'éteint plus.
+const PENDING_IDLE_MS = Number(process.env.CLAUDE_QUOTA_PENDING_IDLE_MS) > 0
+  ? Number(process.env.CLAUDE_QUOTA_PENDING_IDLE_MS)
+  : 5 * 60 * 1000;
+
+// Temps laissé aux CLI respawnés par un rechargement de fenêtre pour republier
+// leurs libellés d'onglets avant qu'une ABSENCE de libellé puisse valoir preuve
+// de fermeture (cf. `settling` dans buildSnapshot). Même cause et même ordre de
+// grandeur que WAVE_ACTIVATION_GRACE_MS (extension.js), qui protège déjà les
+// lancements de vagues de cette même tempête ; un cran au-dessus parce que le
+// symptôme observé durait « environ une minute ». L'env var ne sert qu'aux
+// bancs — attendre 90 s par test serait absurde.
+const ACTIVATION_GRACE_MS = Number(process.env.CLAUDE_QUOTA_PRESENCE_GRACE_MS) > 0
+  ? Number(process.env.CLAUDE_QUOTA_PRESENCE_GRACE_MS)
+  : 90 * 1000;
 // Filtre anti-bavardage du journal de surlignage (lot 0) : une extension héberge
 // une seule fenêtre, donc un seul verdict à la fois — une clé fixe suffit,
 // partagée par tous les appels de buildSnapshot de ce process.
@@ -309,7 +355,16 @@ function effectiveState(entry, mtime, now, isLive, activityTs, resumeSignals, st
           // ts == null (rien à comparer) ou ts === 0 (présent, non datable) →
           // le doute profite à l'affichage précédent, jamais un blocage neuf.
           const startedAfter = (ts) => startedAt == null || !ts || ts >= startedAt;
-          const pending = !!rs.pendingTask && startedAfter(rs.pendingTaskAt);
+          // Plafond de fraîcheur (cf. PENDING_TASK_CAP_MS) : un lancement dont
+          // la notification n'est jamais venue ne tient pas le spinner
+          // indéfiniment. `wakeupAt` a déjà le sien (une date d'échéance).
+          const fresh = (ts) => !ts || now - ts <= PENDING_TASK_CAP_MS;
+          // Signe de vie : le transcript a-t-il bougé récemment ? (cf.
+          // PENDING_IDLE_MS.) Une conversation figée depuis plusieurs minutes
+          // n'est pas au travail, quoi qu'en dise un lancement sans réponse.
+          const stirring = now - activity <= PENDING_IDLE_MS;
+          const pending = !!rs.pendingTask && startedAfter(rs.pendingTaskAt)
+            && fresh(rs.pendingTaskAt) && stirring;
           const sleeping = !!rs.wakeupAt && rs.wakeupAt > now && startedAfter(rs.wakeupSetAt);
           if (pending || sleeping) return 'busy';
         }
@@ -551,6 +606,7 @@ function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab, id
     // Écriture postérieure à la grâce : la session est repartie ailleurs.
     closedAt.delete(c.sessionId);
   }
+
 
   // Process CLI vivant : identité STABLE, indépendante de tout libellé. C'est
   // la parade au bug d'origine (2026-07-22) — onglet renommé par l'extension
@@ -1042,14 +1098,104 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     openIds,
   );
 
+  // ── L'IDENTITÉ ÉCRASE L'APPARIEMENT (2026-08-29) ──────────────────────────
+  // `pairTabs` reste un appariement par ORDRE, y compris dans sa pré-passe par
+  // identité : celle-ci réserve un libellé à une session confirmée ouverte, mais
+  // ne choisit pas LEQUEL — avec deux libellés strictement égaux, elle prend le
+  // premier libre, dans l'ordre d'AFFICHAGE des conversations (mtime), qui n'a
+  // aucune raison d'être l'ordre des ONGLETS. Mesuré au banc d'intégration
+  // (test-click-highlight-loop.js) : sur deux sœurs homonymes, le surlignage
+  // désignait SYSTÉMATIQUEMENT l'autre — clic exact, ligne fausse, c'est-à-dire
+  // le symptôme signalé par l'utilisateur.
+  // Le memento du renderer, lui, dit la position VRAIE de chaque session
+  // (session-titles.js `locations`, `flatIndex` = rang parmi les onglets Claude,
+  // le même index que publie tabs.js). Quand il parle, il tranche ; sinon
+  // l'appariement par libellé garde la main, à l'octet près.
+  //
+  // ⚠️ LE MEMENTO S'ACCEPTE EN BLOC OU PAS DU TOUT. Il retarde ; une photo
+  // périmée mélangée aux libellés frais du tracker fabrique des positions qui
+  // n'ont jamais existé — pire que l'appariement qu'elle remplace (mesuré :
+  // après une fermeture non encore flushée, le surlignage désignait une
+  // troisième conversation, ni celle affichée ni celle cliquée). On le valide
+  // donc ENTIÈREMENT contre l'état frais avant d'en retenir la moindre ligne :
+  //   - autant d'onglets Claude connus du tracker que de positions publiées ;
+  //   - à chaque position, un libellé COMPATIBLE avec la conversation visée.
+  // Un seul désaccord ⇒ photo périmée ⇒ on garde l'appariement par libellé,
+  // à l'octet près. C'est le même principe que les trois contrôles de focus.js,
+  // appliqué ici à la table entière plutôt qu'à une ligne.
+  const tabLocations = (typeof opts.sessionTabLocations === 'function' && opts.sessionTabLocations()) || null;
+  const labels = (tabs && tabs.labels) || [];
+  const positionOf = validatePositions(tabLocations, {
+    claudeCount: labels.length,
+    activeFlatIndex: (tabs && typeof tabs.activeIndex === 'number') ? tabs.activeIndex : null,
+  });
+  // Sessions dont l'onglet est NOMMÉ par le memento validé, par opposition à
+  // celles que pairTabs a simplement appariées dans l'ordre. La distinction est
+  // décisive plus bas : seul un index d'identité autorise à surligner sans autre
+  // preuve quand plusieurs conversations partagent le libellé actif.
+  const indexFromMemento = new Set();
+  if (positionOf) {
+    for (const p of prepared) {
+      const loc = positionOf.get(p.c.sessionId);
+      if (!loc) continue;
+      const label = labels[loc.flatIndex];
+      if (label == null || !convMatchesLabel(label, { title: p.title, tabTitle: p.tabTitle })) continue;
+      pairing.index.set(p.c.sessionId, loc.flatIndex);
+      pairing.ambiguous.delete(p.c.sessionId);
+      indexFromMemento.add(p.c.sessionId);
+    }
+  }
+
   // Le store d'onglets publie-t-il l'identité de cette session ? (cf. isGone.)
   // `titles.size > 0` EST le garde-fou de panne exigé par le dossier : une
   // source qui rend zéro là où le fichier n'est pas vide n'est pas une
   // dégradation mais une PANNE (schéma d'URI changé sous nos pieds, 2026-08-20)
   // — dans ce cas personne n'est « publié », les trois exemptions d'isGone
   // reprennent toutes leur rôle d'avant, et rien ne disparaît de plus.
+  // …ET la fenêtre doit avoir fini de se remonter (2026-08-28). Le store des
+  // titres SURVIT au rechargement — il garde ses entrées pour toujours, onglet
+  // fermé compris — tandis que les libellés d'onglets (`~/.claude/panel-tabs/
+  // <pid>.json`) sont republiés par des CLI que VS Code vient tout juste de
+  // respawner, avec plusieurs dizaines de secondes de retard. Pendant ce
+  // creux, « identité publiée + aucun onglet à son nom » est vrai pour tout le
+  // monde : la preuve de fermeture se déclenche en masse, une ligne se barre,
+  // une autre disparaît — puis tout revient seul quand les libellés arrivent
+  // (constat user au reload de la 2.86.0, « se corrige au bout d'une minute »).
+  // Une preuve qui dépend d'une source pas encore revenue n'est pas une preuve :
+  // le temps de la grâce, on retombe exactement sur le comportement d'avant
+  // (les exemptions d'isGone rejouent leur rôle), donc au pire une ligne
+  // vraiment fermée reste visible une minute de plus — jamais l'inverse.
+  // Une fermeture VUE en direct (`closedAt`) n'est pas concernée : elle ne
+  // passe pas par ici et disparaît toujours en moins d'une seconde.
+  // `activatedAt` absent des opts (tous les bancs d'avant ce lot) ⇒ aucune
+  // grâce ⇒ comportement d'avant à l'octet près.
   const storeAlive = titles.size > 0;
   const identityKnown = (id) => storeAlive && titles.has(id);
+
+  // ── Fenêtre en cours de REMONTAGE (2026-08-28) ────────────────────────────
+  // Les libellés d'onglets (~/.claude/panel-tabs/<pid>.json) sont republiés par
+  // des CLI que VS Code vient tout juste de respawner, avec des dizaines de
+  // secondes de retard, tandis que le store des titres, lui, SURVIT au
+  // rechargement (il ne purge jamais). Pendant ce creux, « identité publiée +
+  // aucun onglet à son nom » devient vrai pour TOUT LE MONDE : une ligne se
+  // barre, une autre disparaît, puis tout revient seul (constat user au reload
+  // de la 2.86.0).
+  //
+  // La parade n'est PAS de suspendre le jugement — essayé en 2.86.1, et c'est
+  // pire : plus rien ne disparaissant, tout l'historique récent remonte en
+  // fantômes (mesuré chez l'user : 10 lignes pour 4 onglets). C'est de juger
+  // sur une source qui, elle, a survécu au reload : le memento
+  // `workbench.parts.editor` du RENDERER, qui porte l'IDENTITÉ des éditeurs
+  // restaurés. Relevé au même instant sur la fenêtre en cause : 4 sessions
+  // déclarées ouvertes, exactement les 4 onglets réels.
+  //
+  // openIds vide (base illisible, verrouillée, ancienne version de VS Code)
+  // ⇒ personne ne peut trancher ⇒ AUCUNE grâce, comportement d'avant à l'octet
+  // près : mieux vaut une disparition d'une minute qu'un panneau de fantômes.
+  // `activatedAt` absent des opts (tous les bancs d'avant ce lot) : idem.
+  const settling = typeof opts.activatedAt === 'number'
+    && now - opts.activatedAt < ACTIVATION_GRACE_MS
+    && openIds.size > 0;
 
   // Sessions dont l'onglet est PROUVÉ absent — identité publiée, appariement
   // tenté, aucun onglet. Publié hors de la liste rendue parce que le fait vaut
@@ -1072,9 +1218,15 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     // homonymes a retrouvé son ordre de départage cette fois-ci. Une perte
     // NON ambiguë (pairing.ambiguous ne contient pas ce sessionId) reste,
     // elle, immédiate — c'est un fait fiable, pas un tirage au sort.
-    const presenceHasTab = resolveHasTabForPresence(
-      c.sessionId, hasTab, pairing.ambiguous.has(c.sessionId), presenceMisses
-    );
+    // Pendant le remontage (cf. `settling`), la preuve d'onglet vient du
+    // RENDERER et de lui seul : les libellés ne sont pas tous revenus, et la
+    // tolérance aux pertes ambiguës ne sait rien d'une source absente. Le
+    // reste du temps, rien ne change.
+    const presenceHasTab = settling
+      ? openIds.has(c.sessionId)
+      : resolveHasTabForPresence(
+        c.sessionId, hasTab, pairing.ambiguous.has(c.sessionId), presenceMisses
+      );
     if (tabs.known && !presenceHasTab && identityKnown(c.sessionId)) tabGoneIds.add(c.sessionId);
     const gone = isGone(
       { sessionId: c.sessionId, title, tabTitle, titleSource, state, mtime: c.mtime },
@@ -1242,24 +1394,54 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     let target = activeIndex != null
       ? conversations.find((c) => pairing.index.get(c.sessionId) === activeIndex)
       : null;
+    const byIndex = !!target;
     if (!target) target = conversations.find((c) => convMatchesLabel(activeLabel, c));
-    // Groupe ambigu (lot 3 du plan d'appariement) : l'appariement qui a
-    // désigné `target` est ARBITRAIRE (ordre d'affichage vs ordre des
-    // onglets, cf. pairTabs) — se taire vaut mieux qu'un surlignage au hasard,
-    // le symptôme même du signalement d'origine. Seule exception :
-    // active-session.json (identifiant VRAI, pas un titre) désigne une des
-    // sœurs du groupe — alors c'est elle, jamais l'appariement arbitraire.
-    if (target && pairing.ambiguous.has(target.sessionId)) {
-      const sister = activeSessionId
-        ? conversations.find((c) => c.sessionId === activeSessionId
-            && pairing.ambiguous.has(c.sessionId) && convMatchesLabel(activeLabel, c))
-        : null;
+    // ── PLUSIEURS CONVERSATIONS PORTENT CE LIBELLÉ ⇒ SEULE L'IDENTITÉ TRANCHE
+    // (2026-08-29, onzième reprise du symptôme). La garde d'origine (lot 3 du
+    // plan d'appariement) testait `pairing.ambiguous` — le verdict de pairTabs,
+    // pas le fait observable. Relevé au journal ce jour sur deux sœurs
+    // homonymes RÉELLES : `matches:2` et pourtant `via:"label"`, donc un target
+    // désigné par « le premier qui matche » — c'est-à-dire au hasard, et le
+    // surlignage sautait d'une sœur à l'autre d'un recompute au suivant.
+    //
+    // Le critère est désormais le fait lui-même : dès que `highlightMatches > 1`,
+    // aucun raisonnement TEXTUEL ne peut désigner la bonne — ni le repli par
+    // libellé, ni un appariement que pairTabs a lui-même marqué arbitraire.
+    // Seul `active-session.json` (identifiant VRAI) est admis ; à défaut, aucun
+    // surlignage. Se taire est le seul repli honnête : le juge renderer
+    // ci-dessous, lui, tranchera par identité dès son prochain flush.
+    // Le critère n'est PAS « pairTabs a-t-il su apparier » — il croit toujours
+    // savoir, y compris quand il vient de tirer au sort entre deux libellés
+    // égaux (c'est le bug d'origine). C'est « d'où vient cet index » : du
+    // memento validé, qui NOMME l'onglet de cette session, ou d'un appariement
+    // par ordre, qui ne fait que la placer. Dans le second cas, avec plusieurs
+    // conversations au même libellé, seule une identité vraie peut désigner.
+    const arbitrary = highlightMatches > 1
+      && !(target && indexFromMemento.has(target.sessionId));
+    if (target && arbitrary) {
+      // Deux identités vraies peuvent départager, dans cet ordre de force :
+      //  1. `tabs.actSessionId` — le sessionId que le CLIC du panneau vient
+      //     d'activer par la voie identité (focus.js). C'est un geste humain
+      //     visant CETTE conversation-là, la preuve la plus directe qui existe.
+      //  2. `active-session.json` — la conv du dernier prompt soumis. Plus
+      //     faible (elle ne dit pas quel onglet est affiché) mais vraie, et
+      //     c'est le repli en place depuis le lot 3 du plan d'appariement.
+      const clicked = tabs && tabs.actSessionId;
+      const sister = (clicked
+        && conversations.find((c) => c.sessionId === clicked && convMatchesLabel(activeLabel, c)))
+        || (activeSessionId
+          && conversations.find((c) => c.sessionId === activeSessionId && convMatchesLabel(activeLabel, c)))
+        || null;
       target = sister || null;
-      if (sister) highlightVia = 'active-session';
+      if (sister) highlightVia = sister.sessionId === clicked ? 'panel-click' : 'active-session';
     }
     if (target) {
       target.isActive = true;
-      if (highlightVia !== 'active-session') highlightVia = 'label';
+      // `label` ne s'écrit que si aucune IDENTITÉ n'a désigné la cible :
+      // écraser 'panel-click'/'active-session' ferait passer une preuve exacte
+      // pour une correspondance de texte au journal — et c'est ce journal qui
+      // sert à diagnostiquer ce chemin (règle du dossier, 2026-08-26).
+      if (highlightVia === 'none') highlightVia = 'label';
       highlightSessionId = target.sessionId;
     }
   } else {

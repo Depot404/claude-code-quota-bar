@@ -104,6 +104,11 @@ writeTranscript('keep-me', 'Conversation qui doit rester');
 // AMB-A, pas retirer le chip d'amb-b.
 writeTranscript('amb-a', "Implement the single batch for the manual tab-close bug");
 writeTranscript('amb-b', "Implement the single batch for adding a task to an existing group");
+// Lot dont la maîtresse ferme son onglet DANS UNE RAFALE (reload / « Fermer
+// tout ») : il doit survivre, cf. §3ter et la garde de
+// dissolveBatchesOfClosedMaster.
+writeTranscript('mass-a', 'Cadrage massif à ne pas dissoudre');
+writeTranscript('mass-b', 'Tache massive qui reste groupee');
 
 const STATE_FILE = path.join(SANDBOX, '.claude', 'sessions-state.json');
 const now = Date.now();
@@ -115,8 +120,37 @@ fs.writeFileSync(STATE_FILE, JSON.stringify({
     'keep-me': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'keep-me.jsonl') },
     'amb-a': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'amb-a.jsonl') },
     'amb-b': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'amb-b.jsonl') },
+    'mass-a': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'mass-a.jsonl') },
+    'mass-b': { state: 'busy', since: now, updated_at: now, transcript: path.join(projectDir, 'mass-b.jsonl') },
   },
 }));
+
+// ── workspaceState bouchon : deux lots déjà en place au boot ───────────────
+// G1 — maîtresse `close-me`, membre `keep-me` : fermer l'onglet de la
+// maîtresse doit le dissoudre (§2bis), et `keep-me` redevenir une conv plate
+// sans que son onglet soit touché.
+// G2 — maîtresse `mass-a`, membre `mass-b` : fermées ENSEMBLE (rafale de
+// reload), il doit survivre (§3ter).
+const STORED = new Map([['batchGroups', [
+  {
+    id: 'g-master-closes', name: 'Lot piloté par close-me', createdAt: now,
+    masterSessionId: 'close-me', masterTitle: 'Conversation à fermer maintenant',
+    members: [{ key: 'm1', prompt: 'tâche restée ouverte', wave: 1, sessionId: 'keep-me', launchedAt: now }],
+  },
+  {
+    id: 'g-mass-reload', name: 'Lot emporté par une rafale', createdAt: now,
+    masterSessionId: 'mass-a', masterTitle: 'Cadrage massif à ne pas dissoudre',
+    members: [{ key: 'm1', prompt: 'tâche du lot massif', wave: 1, sessionId: 'mass-b', launchedAt: now }],
+  },
+]]]);
+const memento = {
+  get: (k, d) => (STORED.has(k) ? STORED.get(k) : d),
+  update: (k, v) => { STORED.set(k, v); },
+};
+const groupIds = () => {
+  const last = pushed[pushed.length - 1];
+  return ((last && last.state && last.state.groups) || []).map((g) => g.id);
+};
 
 const titlesOf = () => {
   const last = pushed[pushed.length - 1];
@@ -128,9 +162,12 @@ async function run() {
 
   // Les deux onglets sont ouverts, avec le libellé TRONQUÉ comme le fait la
   // vraie extension Claude (24 car. + « … »).
-  GROUPS = [group([claude('Conversation à fermer …'), claude('Conversation qui doit …')])];
+  GROUPS = [group([
+    claude('Conversation à fermer …'), claude('Conversation qui doit …'),
+    claude('Cadrage massif à ne pas …'), claude('Tache massive qui reste …'),
+  ])];
 
-  const context = { subscriptions: [] };
+  const context = { subscriptions: [], workspaceState: memento };
   ext.activate(context);
 
   // Le webview se résout et capture les push d'état.
@@ -150,7 +187,12 @@ async function run() {
     titlesOf().join(' | '));
 
   console.log('\n2. Fermeture de l\'onglet (conv `busy`)');
-  GROUPS = [group([claude('Conversation qui doit …')])];
+  check('le lot piloté par close-me est affiché avant fermeture',
+    groupIds().includes('g-master-closes'), groupIds().join(' | '));
+  GROUPS = [group([
+    claude('Conversation qui doit …'),
+    claude('Cadrage massif à ne pas …'), claude('Tache massive qui reste …'),
+  ])];
   const t0 = Date.now();
   emitTabs({ closed: [claude('Conversation à fermer …')], opened: [], changed: [] });
 
@@ -167,6 +209,17 @@ async function run() {
   check('l\'autre conversation reste', titlesOf().includes('Conversation qui doit rester'),
     titlesOf().join(' | '));
 
+  console.log('\n2bis. Fermer l\'onglet de la MAÎTRESSE dissout son lot (demande user 2026-08-29)');
+  check('le lot a disparu du panneau', !groupIds().includes('g-master-closes'), groupIds().join(' | '));
+  check('il est aussi retiré du stockage (pas seulement masqué)',
+    !STORED.get('batchGroups').some((g) => g.id === 'g-master-closes'),
+    JSON.stringify(STORED.get('batchGroups').map((g) => g.id)));
+  check('la conversation restée dans le lot est toujours là, sans lot',
+    titlesOf().includes('Conversation qui doit rester'), titlesOf().join(' | '));
+  check('son onglet n\'a PAS été fermé (dissoudre ne touche que les métadonnées)',
+    GROUPS[0].tabs.some((t) => t.label === 'Conversation qui doit …'),
+    JSON.stringify(GROUPS[0].tabs.map((t) => t.label)));
+
   console.log('\n3. Purge de sessions-state.json (sinon elle ressuscite ailleurs)');
   await sleep(200);
   const sessions = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).sessions;
@@ -182,6 +235,7 @@ async function run() {
   // avant le fix.
   GROUPS = [group([
     claude('Conversation qui doit …'),
+    claude('Cadrage massif à ne pas …'), claude('Tache massive qui reste …'),
     claude("Implement the single batch f…"),
     claude("Implement the single batch for adding a…"),
   ])];
@@ -194,6 +248,7 @@ async function run() {
 
   GROUPS = [group([
     claude('Conversation qui doit …'),
+    claude('Cadrage massif à ne pas …'), claude('Tache massive qui reste …'),
     claude("Implement the single batch for adding a…"),
   ])];
   emitTabs({ closed: [claude("Implement the single batch f…")], opened: [], changed: [] });
@@ -204,6 +259,20 @@ async function run() {
   const sessionsAmb = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).sessions;
   check('l\'entrée sessions-state.json d\'amb-b n\'est pas purgée',
     sessionsAmb['amb-b'] && sessionsAmb['amb-b'].state === 'busy', JSON.stringify(sessionsAmb['amb-b']));
+
+  console.log('\n3ter. Rafale (reload, « Fermer tout ») : la maîtresse part avec les autres → AUCUNE dissolution');
+  // C'est LA garde du plan : au rechargement de fenêtre, tous les onglets
+  // s'en vont ensemble. Un lot ne se dissout que sur une fermeture ISOLÉE,
+  // seule forme que peut prendre le clic sur la croix d'un onglet.
+  GROUPS = [group([claude('Conversation qui doit …'), claude("Implement the single batch for adding a…")])];
+  emitTabs({
+    closed: [claude('Cadrage massif à ne pas …'), claude('Tache massive qui reste …')],
+    opened: [], changed: [],
+  });
+  await sleep(300);
+  check('le lot dont la maîtresse a fermé DANS la rafale survit',
+    STORED.get('batchGroups').some((g) => g.id === 'g-mass-reload'),
+    JSON.stringify(STORED.get('batchGroups').map((g) => g.id)));
 
   console.log('\n4. Aucun résidu');
   for (const s of context.subscriptions) { try { s.dispose(); } catch {} }

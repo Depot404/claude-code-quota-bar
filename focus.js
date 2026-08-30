@@ -4,21 +4,52 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { norm, convMatchesLabel, isClaudeTab } = require('./labels');
+const { validatePositions } = require('./tab-positions');
 
 // ============================================================================
 // Clic sur une conversation du panneau → focus de son onglet, où qu'il soit.
 //
-// LE PANNEAU N'OUVRE JAMAIS D'ONGLET (decision user 2026-08-26). La voie
-// « clic par identifiant » du 2026-08-25 passait par
-// `claude-vscode.editor.open(sessionId)`, dont la premiere branche revele un
-// panneau deja ouvert — mais qui, si CETTE fenetre ne l'a pas, traite l'appel
-// comme une reprise de session et EN CREE UN (NOTES_api_claude_code_extension).
-// Sa garde (memento du state.vscdb) s'est revelee faillible en usage reel :
-// onglets rouverts apres fermeture, et jusqu'a DEUX onglets pour une seule
-// ligne. Elle est retiree, fonction comprise. Il ne reste que la revelation
-// d'un onglet EXISTANT ; sans correspondance, le clic ne fait rien.
+// ── VOIE PRINCIPALE : L'IDENTITÉ, JAMAIS LE TEXTE (2026-08-29) ──────────────
+// Onzième reprise du même symptôme, et la première qui change de GRANDEUR
+// MESURÉE. Toutes les précédentes affinaient la comparaison de libellés ;
+// aucune ne pouvait aboutir, parce que deux conversations peuvent porter le
+// même libellé au caractère près. Mesuré ce jour dans le memento du renderer,
+// deux onglets voisins (exemple transposé) :
 //
-// REPLI PAR LIBELLÉ (voie d'avant ce lot) — VS Code n'expose aucun mapping
+//   idx 7  <uuid A>  'Rename scanned invoic…'
+//   idx 8  <uuid B>  'Rename scanned invoic…'
+//
+// Les deux clics de l'utilisateur atterrissaient sur l'onglet de l'AUTRE sœur
+// (journal : `focus-click` sur A suivi d'un `stay-start` à l'index de B, et
+// réciproquement).
+//
+// LA VOIE RETENUE — le memento du renderer donne, pour chaque session, la
+// POSITION de son onglet (groupe + index, cf. session-titles.js `locations`).
+// On sélectionne cet onglet-là par `openEditorAtIndex`. Rien n'est comparé, et
+// surtout rien ne peut être OUVERT : cette commande ne sait que choisir parmi
+// les onglets existants. Les trois contrôles de concordance qui protègent du
+// retard du memento sont décrits sur `focusByIdentity` plus bas.
+//
+// ⚠️ POURQUOI PAS `claude-vscode.editor.open(sessionId)`, qui semblait pourtant
+// la voie royale (sa première branche est `sessionPanels.get(id).reveal()`,
+// focus exact sans aucun texte) — MESURÉ le 2026-08-29, et c'est un fait
+// nouveau que NOTES_api_claude_code_extension.md ne disait pas : elle ne
+// retrouve PAS un webview restauré qui n'a jamais été réaffiché depuis un
+// rechargement de fenêtre. VS Code désérialise ces panneaux paresseusement, à
+// la première visite ; tant qu'ils dorment ils sont absents de `sessionPanels`,
+// et la commande les traite comme une reprise de session : elle OUVRE. Observé
+// au journal — un onglet neuf titré « Claude Code » apparaissant à chaque clic,
+// refermé dans la foulée par le filet qui gardait alors l'appel. Le filet
+// marchait ; c'est l'action qu'il gardait qui était mauvaise. Un onglet
+// restauré est justement le cas le PLUS fréquent après un reload, donc cette
+// commande est inutilisable comme voie de focus, quelle que soit sa garde.
+//
+// Corollaire de méthode : la preuve d'appartenance par filiation de process
+// (owned-sessions.js, retirée le même jour) et le filet de fermeture ont
+// disparu avec elle — ils ne gardaient que cet appel. Une garde n'a pas de
+// valeur en soi ; quand l'action qu'elle protège s'en va, elle s'en va aussi.
+//
+// REPLI PAR LIBELLÉ (voie d'avant ce lot, conservée entière) — VS Code n'expose aucun mapping
 // onglet↔session (microsoft/vscode#158853), aucune API pour activer un onglet
 // (#162446), et aucune API pour remonter une fenêtre au premier plan (#51078,
 // #74945). Il ne reste donc que : retrouver l'onglet par son LIBELLÉ,
@@ -68,14 +99,82 @@ function setOpenSessionIdsSource(fn) {
   getOpenSessionIds = typeof fn === 'function' ? fn : () => new Set();
 }
 
-// Voie principale du clic (cf. en-tête du fichier) : focus EXACT par
-// sessionId, jamais par comparaison de titre. Ne réussit QUE si (1) le
-// memento confirme que ce sessionId est ouvert ICI et (2) la commande
-// officielle existe sur cette version de l'extension — sans ces deux gardes,
-// l'appel recréerait un panneau (doublon) au lieu d'en révéler un existant.
-// Toute défaillance (commande absente, exception à l'exécution) rend `false`
-// sans rien avoir tenté d'autre : c'est à l'appelant de retomber sur le
-// repli par libellé, jamais à cette fonction de le faire elle-même.
+// POSITION de l'onglet de chaque session, lue dans le memento du renderer
+// (session-titles.js `locations`) : { viewColumn, index, claudeCount }.
+let getSessionLocations = () => null;
+function setSessionLocationsSource(fn) {
+  getSessionLocations = typeof fn === 'function' ? fn : () => null;
+}
+
+// L'état FRAIS des onglets de cette fenêtre, dans le comptage qu'attend
+// tab-positions.js : combien d'onglets Claude, et à quel rang est l'actif —
+// rang parmi les onglets Claude, groupes enchaînés dans l'ordre, exactement
+// comme `flatIndex` du memento et `activeIndex` de tabs.js.
+function worldTabs() {
+  const out = { claudeCount: 0, activeFlatIndex: null };
+  let active = null;
+  try {
+    const g = vscode.window.tabGroups.activeTabGroup;
+    active = g && g.activeTab;
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of (group && group.tabs) || []) {
+        if (!isClaudeTab(tab)) continue;
+        if (tab === active) out.activeFlatIndex = out.claudeCount;
+        out.claudeCount++;
+      }
+    }
+  } catch { return { claudeCount: -1, activeFlatIndex: null }; }
+  return out;
+}
+
+// Voie principale du clic : révéler l'onglet dont le memento dit qu'il porte CE
+// sessionId, en le SÉLECTIONNANT à sa position — jamais en demandant à qui que
+// ce soit de l'ouvrir.
+//
+// Rend le libellé réellement activé, ou `null` — auquel cas l'appelant retombe
+// sur le repli par libellé. Cette fonction ne décide de rien d'autre qu'elle-même.
+//
+// ── LA CONCORDANCE EST VÉRIFIÉE, PAS SUPPOSÉE ────────────────────────────────
+// Le memento est flushé paresseusement : entre deux flushs, l'utilisateur a pu
+// fermer ou déplacer un onglet, et l'index désignerait alors son voisin. Trois
+// contrôles, tous sur l'API TEMPS RÉEL, avant d'agir :
+//   1. le groupe existe encore ;
+//   2. il porte exactement autant d'onglets Claude que le memento en comptait —
+//      une fermeture ou une ouverture depuis le flush se voit d'abord là ;
+//   3. l'onglet à cette position est bien un onglet Claude, et son libellé
+//      correspond à la conversation cliquée.
+// Un seul contrôle qui échoue ⇒ `null`, repli. On ne devine jamais une position.
+async function focusByIdentity(sessionId, conv) {
+  if (!sessionId) return null;
+  // La photo du memento est validée EN BLOC contre l'état frais des onglets
+  // (tab-positions.js) — même juge que le surlignage, au même instant.
+  let byId = null;
+  try {
+    byId = validatePositions(getSessionLocations(), worldTabs());
+  } catch { return null; }
+  if (!byId) {
+    log('identity focus: tab positions stale — falling back to labels');
+    return null;
+  }
+  const loc = byId.get(sessionId);
+  if (!loc || typeof loc.index !== 'number') return null;
+
+  let group = null;
+  try {
+    group = vscode.window.tabGroups.all.find((g) => g.viewColumn === loc.viewColumn) || null;
+  } catch { return null; }
+  if (!group || !Array.isArray(group.tabs)) return null;
+
+  const tab = group.tabs[loc.index];
+  if (!tab || !isClaudeTab(tab)) return null;
+  if (!convMatchesLabel(tab.label, conv)) {
+    log('identity focus: label at index %d is "%s", not this conversation — falling back', loc.index, tab.label);
+    return null;
+  }
+
+  await focusTab({ group, index: loc.index, label: tab.label });
+  return tab.label;
+}
 
 // Cherche l'onglet dans TOUS les groupes de CETTE fenêtre (le lot 1 ne regardait
 // que le groupe actif). Garde-fou conservé : sans correspondance on ne devine
@@ -199,6 +298,23 @@ function createFocusRelay(handlers = {}) {
     if (Date.now() - req.ts > REQUEST_TTL_MS) return;  // résidu
     lastTs = req.ts;
 
+    // Identité d'abord, ici aussi (2026-08-29). Le gain propre au relais : deux
+    // fenêtres portant chacune un onglet au libellé identique répondaient TOUTES
+    // LES DEUX à la même requête, et la dernière servie emportait le focus.
+    // `ownsSession` ne peut être vrai que dans une seule fenêtre.
+    if (req.action !== 'close') {
+      const label = await focusByIdentity(req.session_id, { title: req.title, tabTitle: req.tab_title });
+      if (label) {
+        raiseWindow(label);
+        // 3e argument : l'identité activée, connue ici avec certitude (c'est
+        // par elle qu'on a révélé l'onglet). Le chemin par libellé plus bas ne
+        // peut pas la fournir — il ne sait justement pas quelle sœur il a
+        // désignée.
+        try { onActivated(label, !!req.isTrusted, req.session_id || null); } catch {}
+        return;
+      }
+    }
+
     const match = findTab(req.title, req.tab_title);
     if (!match) return;                                // pas chez nous : une autre fenêtre répondra
     try {
@@ -239,15 +355,21 @@ async function focusConversation(msg) {
   const title = msg && msg.title;
   const tabTitle = (msg && msg.tabTitle) || null;
   const sessionId = (msg && msg.id) || null;
-  if (!norm(title) && !norm(tabTitle)) return null;
+  // L'identité se suffit à elle-même : une conversation sans titre exploitable
+  // (transcript pas encore né) reste cliquable par ce seul chemin.
+  if (!sessionId && !norm(title) && !norm(tabTitle)) return null;
 
-  // AUCUN APPEL A claude-vscode.editor.open ICI (decision user 2026-08-26).
-  // Cette commande OUVRE une conversation : utilisee comme voie de focus, elle
-  // fabriquait un second onglet des que sa garde se trompait (memento perime,
-  // onglet vivant dans une autre fenetre) - doublons constates par l'user, et
-  // reouverture d'onglets qu'il venait de fermer. Le panneau ne sait plus que
-  // REVELER un onglet existant : findTab ci-dessous, ou le relais aux autres
-  // fenetres. Aucune correspondance = aucun geste, jamais une creation.
+  // 1. IDENTITÉ — seule voie capable de départager deux onglets homonymes (cf.
+  // en-tête). Gardée par la preuve d'appartenance, et surtout filetée : si elle
+  // ouvre quoi que ce soit, elle le referme et rend `null`. Le contrat « le
+  // panneau n'ouvre jamais d'onglet » (décision user 2026-08-26) est donc tenu
+  // par vérification de l'effet, plus par l'abstinence.
+  const byIdentity = await focusByIdentity(sessionId, { title, tabTitle });
+  if (byIdentity) return byIdentity;
+
+  // 2. REPLI PAR LIBELLÉ — inchangé, et toujours nécessaire : identité inconnue
+  // (conv d'une autre fenêtre, sonde indisponible, version d'extension sans la
+  // commande). Ne peut pas départager des homonymes, par construction.
   const match = findTab(title, tabTitle);
   if (match) {
     await focusTab(match);
@@ -283,8 +405,22 @@ async function focusConversation(msg) {
 // peut encore écrire une telle requête, et l'ignorer laisserait son ⨯ sans
 // effet visible. Il disparaîtra quand plus aucune version émettrice ne circule.
 
+// `sessionsWithTabHere` : les sessions dont un onglet est ouvert dans CETTE
+// fenêtre, par IDENTITÉ (positions validées contre l'état frais) — `null` quand
+// la photo n'est pas utilisable. Exporté pour extension.js `closeConversations`,
+// qui doit départager deux conversations au même libellé quand l'une des deux
+// vient de fermer son onglet : c'est la même question que le clic, donc la même
+// réponse, lue au même endroit.
+function sessionsWithTabHere() {
+  try {
+    const byId = validatePositions(getSessionLocations(), worldTabs());
+    return byId ? new Set(byId.keys()) : null;
+  } catch { return null; }
+}
+
 module.exports = {
   focusConversation, createFocusRelay, findTab,
-  setOpenSessionIdsSource,
+  setOpenSessionIdsSource, setSessionLocationsSource,
+  focusByIdentity, sessionsWithTabHere,
   REQUEST_PATH, REQUEST_TTL_MS,
 };

@@ -1,5 +1,90 @@
 # Changelog
 
+## [2.94.0] - 2026-08-30
+
+### Changed
+- **A refused insertion target no longer gets its own dimmed highlight.** Hovering a wave the batch can no longer reach (already past, already running) used to layer a second, separate color over the row on top of its normal hover/selection background — two highlights stacked on the same pixels. It now leaves that row exactly as any row looks under the cursor, and only the ribbon says the insertion is refused here.
+
+## [2.93.0] - 2026-08-30
+
+### Fixed
+- **A finished task's row no longer leaves its batch while its tab is still open.** Closing the tab afterwards would appear to fix it, but that was a coincidence: the row was sharing one DOM node between the batch and the flat list, and whichever list drew last kept it. A task whose conversation had not yet been tagged as belonging to its batch lost that race and ended up alone below every batch — indistinguishable from an ordinary conversation. The flat list now defers to what the batch actually rendered, rather than re-deriving the same answer from a second, occasionally stale, source.
+
+## [2.92.0] - 2026-08-30
+
+### Changed
+- **The batch form lost two rows it did not need.** The optional "Group name" field cost a label and an input for something a batch can be given afterwards anyway — and a pasted block carrying `group:` still names the batch on its own. The "claude-convs block recognized — N task(s) prefilled" banner said, right above N prefilled tasks, what the screen already showed. Failure messages stay: those say something you cannot see.
+
+## [2.91.0] - 2026-08-30
+
+### Fixed
+- **A wave that has already gone by no longer offers itself as a target.** On a batch that had moved on to wave 4, hovering wave 1 lit it up and showed a green "+ into wave 1" — but the engine refuses any wave earlier than the running one, so the click did nothing. The refusal was only checked for multi-wave blocks; a single-wave block got a dead target dressed as a live one. The wave now dims instead of lighting up, and the ribbon says why.
+- **The waves no longer renumber for an insertion that will not happen.** Hovering a refused target still pushed every following wave's number up, announcing a result that could never occur.
+- **A target that changes meaning now redraws.** Hovering the same row twice was treated as "nothing changed" and skipped — so when the batch had advanced in between, the ribbon kept promising a drop the engine had started refusing.
+
+## [2.90.1] - 2026-08-30
+
+### Fixed
+- **Closing a tab now removes its row straight away, even when another conversation shares its label.** The row used to linger for a few seconds — long enough, inside a batch, to read "interrupted — never finished" before disappearing. The reason was the same one behind the click bug: a truncated label shared by two conversations cannot say which of them just closed, so nothing was removed and the row waited for the slower presence verdict to catch up. The panel now asks the same question it asks for a click — which sessions still have a tab here — and removes the one that no longer does. When that cannot be answered yet, it simply tries once more a moment later; if it still cannot, it removes nothing rather than the wrong one.
+
+## [2.90.0] - 2026-08-30
+
+### Fixed
+- **Hovering a batch row now moves the preview even when wave numbers have gaps.** Deleting conversations leaves a batch showing, say, wave 1 then wave 4: the empty waves have no header left. The panel looked for the header of "the next wave" by adding one to the wave you aimed at, found nothing, and fell back to the bottom of the batch — so the preview sat still wherever you pointed. It now looks for the first wave that actually follows.
+- **Clicking a row reveals that exact conversation, and the highlight follows it — even when two rows share the same tab label.** 2.89.0 fixed the click by asking the Claude extension to reveal the session's panel, but that command cannot find a tab that was restored by a window reload and never looked at since: VS Code only wakes such panels when they are first shown, so the command treated them as a session to resume and opened a *new* tab, which then had to be closed again. The panel no longer asks anyone to open anything. It reads the position of each session's tab from the editor layout the renderer writes to disk, and simply selects that tab — a command that can only choose among existing tabs, never create one.
+- **The highlight no longer lands on the wrong sibling.** Rows were matched to tabs in display order, which has no reason to be tab order; with two identical labels the highlight systematically pointed at the *other* conversation. Positions now come from the same source as the click, so the highlighted row and the visible tab can no longer disagree. When that source is out of date — a tab closed or opened since the layout was last written — it is rejected as a whole rather than trusted line by line, and the highlight waits for a real identity instead of guessing.
+
+### Known limitation
+- Two tabs **with the same label**, reordered by hand in the split second before VS Code rewrites its layout, cannot be told apart — nothing observable distinguishes them. A click may then reveal the neighbouring sibling until the layout is written again, which repairs it. No tab is ever created or closed in the meantime.
+
+## [2.89.0] - 2026-08-29
+
+### Fixed
+- **Clicking a row now reveals *that* conversation, even when two of them share the same tab label.** Tab labels are truncated, so two conversations started from the same plan can end up with a strictly identical one. Every click was then resolved by comparing text — which cannot tell two identical strings apart — so it landed on whichever sibling came first, and the same one won every time. The click now travels by session identity: the panel asks the Claude extension to reveal the panel holding that exact session, comparing no text and guessing no tab position. A window only answers for a session whose CLI process is one of its own children, so two windows can no longer both claim the same label. And should that guard ever be wrong, the click is checked by its effect rather than trusted: a tab opened by mistake is closed immediately and the click falls back — the panel still never leaves a tab behind it.
+- **The highlight no longer picks a sibling at random.** When several listed conversations match the active tab's label, no reading of the text can say which one is on screen. The highlight now requires a real identity — the session the click just revealed, or the one that last received a prompt — and stays put rather than guessing. It is restored by the renderer's own view of the active editor as soon as it refreshes.
+
+### Changed
+- **The rows of a batch are now the insertion targets — there are no wave buttons left.** Two dashed lines used to close every batch ("+ new wave", "+ this wave"); both are gone. With a block waiting in the form, hovering any row of a batch lights up its whole wave and shows a ribbon saying what a click would do; the click drops the block right there. Aiming at the last wave is what "+ new wave" used to be, and aiming at the *running* wave is now allowed — the block lands behind it rather than in front of it, which is the one case the old gesture could never express.
+- **Hovering shows the result, not a promise.** The preview of the upcoming conversations moves to the exact spot the click would use, the waves it pushes back are renumbered on the spot, and the staple's arrow follows it — the master keeps breathing, it is still the parent. Nothing is sent while you hover.
+- **The preview now looks like the batch it will become.** It used to be indented with a dashed border, which read as a *sub*-tree — yet those conversations are born siblings, not children. It now sits on the exact axis of the real rows, carries the batch's own wave separators, and the batch's vertical line runs through it, faded and dashed, before turning solid again below. When the preview closes the batch, it takes over the end hook too, and the solid line goes straight for as long as the hover lasts. Only a slow breathing says it does not exist yet.
+- **The hovered wave is one single frame.** Lighting the wave header and its rows separately drew two boxes that read as two selections; one rectangle now spans the whole wave, gutters included, without shifting anything by a pixel.
+
+### Fixed
+- **A multi-wave block no longer mixes itself into an existing wave.** Dropping a 4-wave block onto wave 2 used to melt its first wave *into* that wave — the task already there ended up beside a new one, and the rest of the batch was shifted by three. The result read as a shuffle, and there was no way to see it coming. The block now arrives intact, behind the wave you aimed at; nothing merges.
+- **Dropping into a running wave no longer looks dead.** It used to raise a confirmation at the bottom of the panel, hundreds of pixels below the button just clicked — easy to miss entirely, and it read as a button doing nothing. What it protected is now said where the gesture happens: on the ribbon of the row under the cursor.
+
+## [2.87.0] - 2026-08-29
+
+### Changed
+- **Closing the tab of a batch's master conversation now dissolves that batch.** Shutting the conversation a batch was launched from says plainly that the work is over, yet the batch outlived it: you then had to unlink the master line, and remove every remaining conversation one by one — three gestures for one decision. Closing that tab is now the whole gesture. Nothing is closed or interrupted along the way: only the grouping disappears, and the conversations still inside become ordinary lines of the panel, tabs untouched — exactly what the ✕ on the batch handle has always done. A conversation that leads several batches dissolves all of them, which is the same statement made once. **Reloading the window changes nothing**: a reload — like *Close All* — takes every tab at once, and a batch is only ever dissolved when its master's tab closes *on its own*, which is the only shape a click on a tab's cross can take.
+
+## [2.86.3] - 2026-08-28
+
+### Fixed
+- **A conversation that is waiting for you no longer spins.** Launching a background command or agent marks a conversation as still working until a notification says otherwise, and 2.86.0 made that mark expire after an hour. An hour was far too long: measured on a live session, a background command started at 11:45 and a turn that ended at 11:53 left the conversation spinning at 12:01 while it was plainly waiting for an answer. The mark now also requires the conversation to still be *writing something*: a transcript that has not moved for five minutes is not a conversation at work, whatever an unanswered launch claims. Nothing is lost if the task really is running — when its notification lands, the file moves and the conversation lights up again on its own.
+
+## [2.86.2] - 2026-08-28
+
+### Fixed
+- **Reloading the window no longer fills the panel with conversations that are not open.** 2.86.1 fixed a line that was wrongly struck out after a reload by suspending the judgment altogether for ninety seconds — and since nothing could be ruled closed during that window, every recent conversation came back instead: ten lines for four open tabs. Suspending a proof to avoid a false negative simply manufactures the opposite error, in bulk. The panel now judges on the source that *did* survive the reload: the editor record written by the process that paints the screen, which carries the identity of every restored tab. Measured on the window where the bug happened, it named four sessions — exactly the four open tabs. If that record cannot be read at all, nothing changes from before: a genuinely open conversation may vanish for a minute, which is still better than a panel full of ghosts.
+- **Switching a batch to manual now actually hands you the controls.** The ▶ button on the next wave only appeared once the current wave had finished or jammed, so flipping to manual while a wave was running gave you nothing to click and the switch looked dead. Manual mode offers ▶ as soon as a wave is queued — forcing a partially finished wave is precisely what the button is for. Auto mode is unchanged: nothing on a wave separator is clickable there, the switch remains the only door.
+
+## [2.86.1] - 2026-08-28
+
+### Fixed
+- **Reloading the window no longer crosses out one conversation and makes another vanish for a minute.** VS Code's store of tab titles survives a reload untouched — it keeps its entries forever — while the tab labels themselves are republished by CLIs the window has only just respawned. For the few dozen seconds in between, "this session's identity is published and no tab carries its name" was true of *every* conversation, which is exactly the panel's proof that a tab has been closed: a line got struck through, another disappeared, and both came back on their own once the labels landed. A conversation's absence from a source that has not finished coming back is not evidence of anything, so nothing is concluded from it during the first 90 seconds after the window activates — neither for the conversation lines nor for the batches that read the same fact. A tab closed **in front of you** still disappears in under a second, reload or not: that is observed directly, not inferred from missing labels.
+
+## [2.86.0] - 2026-08-28
+
+### Added
+- **A wave that is already running now accepts new tasks.** Until now the only waves you could add to — or move a queued task into — were those still ahead in the queue: the current wave was off limits, so a prompt that belonged with the batch already in flight had nowhere to go. Both doors now offer it: the **+ this wave** row appears under the running wave as well, and the **wave n ▾** destination menu lists it, labelled so there is no doubt about what happens next. Because whatever lands there starts immediately, and a launch cannot be undone, that one case asks for confirmation first — and only that one: adding to a queued wave still deposits straight away, since it can be moved or removed afterwards. A wave that is already finished stays closed: dropping a task into it would mean nothing, and nothing would ever open it. The running wave's button reads **+ this wave — starts now**, so the two buttons that sit a few rows apart can never be mistaken for one another.
+
+### Fixed
+- **The + this wave and + new wave buttons no longer refuse a block of several prompts.** Pasting a `claude-convs` block and clicking either button produced a "multi-wave block" banner and did nothing — including for blocks holding a *single* wave, where there was no ambiguity at all to refuse. Several prompts now land where the click asked: all of them in the wave you aimed at when the block has one wave, and, when it has several, its first wave joins the one you aimed at while the rest slot in behind it, pushing the following waves back. The two entry points (one task, several) also stopped being two separate implementations — the refusal only ever existed in one of them.
+- **A conversation whose background task never reported back no longer spins forever.** Launching a background agent or command marks the conversation as still working, and it is a *notification* in the transcript that clears that mark. When the notification never arrives — the agent was killed, the CLI stopped writing that transcript — nothing could ever clear it: measured on a live session, a task launched in the early morning still had the conversation spinning eight hours later, long after its own turn had ended. The signal now expires after an hour, falling back to the state the hooks actually recorded. A task genuinely in flight is unaffected: those finish in minutes.
+- **Fewer banners at once in the form, and the one that asks a question is now visible.** Up to four could stack under *New conversation*, two of them contradicting each other. A pending confirmation now shows alone and scrolls itself into view — it used to be posted at the bottom of a panel you had to scroll, which read as a button that did nothing. What a pasted block's `group:` and `session:` lines lose to the target batch is reported after the deposit instead of inside a question.
+- **Clearing the last prompt now clears the insertion decor with it.** Deleting the tasks one by one left the master row highlighted, the staple and its arrow drawn, and a "0 prompts" counter attached to nothing; only *Cancel* removed them. They all hang on a single value now, so they go together.
+
 ## [2.85.1] - 2026-08-27
 
 ### Fixed

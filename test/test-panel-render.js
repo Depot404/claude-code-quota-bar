@@ -47,6 +47,16 @@ const USER_DATA_DIR = 'C:\\OctopusData\\BraveOctopus';
 const PORT = 9223;
 
 let pass = 0, fail = 0;
+// ── Bancs LENTS, sautes par defaut (2026-08-28) ─────────────────────────────
+// Mesure du jour : 88,5 s d'attente reelle sur 151 pauses, dont 65 s pour la
+// SEULE section 8 (deux ticks de 30 s a attendre pour de vrai). Trois quarts du
+// temps de ce banc pour une verification qui ne regarde aucun pixel — l'user a
+// tranche : « seuls les bancs indispensables doivent tourner ». Ce qui est lent
+// ET independant du rendu passe donc derriere `--slow`, que Publish.ps1 pose
+// avant toute publication ; le reste du banc (507 verifications de geometrie et
+// de comportement) tourne en ~25 s et reste le defaut.
+const SLOW = process.argv.includes('--slow') || process.env.CLAUDE_QUOTA_SLOW === '1';
+
 function check(name, cond, detail) {
   if (cond) { pass++; console.log(`  ok   ${name}`); }
   else { fail++; console.log(`  FAIL ${name}${detail ? ' → ' + detail : ''}`); }
@@ -404,20 +414,24 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     }
     await cdp.send('Emulation.setEmulatedMedia', { features: [] });
 
-    console.log('\n8. Auto-actualisation sans interaction (tick 30 s, attente réelle ≥ 60 s)');
-    // Fenêtre synthétique de 5 min, reset dans 4 min → 20 % écoulé maintenant ;
-    // aucun autre postMessage n'arrivera pendant l'attente : si la position
-    // bouge, c'est uniquement le tick local de panel.js qui l'a fait.
-    const TICK_WINDOW_MS = 5 * 60 * 1000;
-    const tickState = JSON.parse(JSON.stringify(STATE));
-    tickState.quota.windows = [mkWindow('tick test', 10, new Date(Date.now() + 4 * 60 * 1000).toISOString(), TICK_WINDOW_MS)];
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: tickState })}, '*')`);
-    await sleep(120);
-    const posBefore = await cdp.evaluate(`parseFloat(document.querySelector('.arrow').style.left)`);
-    await sleep(65000);
-    const posAfter = await cdp.evaluate(`parseFloat(document.querySelector('.arrow').style.left)`);
-    check(`la flèche avance seule entre deux polls (${posBefore.toFixed(1)}% → ${posAfter.toFixed(1)}%, aucun nouveau postMessage envoyé)`,
-      posAfter > posBefore + 5, `${posBefore} → ${posAfter}`);
+    if (!SLOW) {
+      console.log('\n8. Auto-actualisation sans interaction — SAUTÉE (65 s d\'attente réelle ; --slow pour la jouer)');
+    } else {
+      console.log('\n8. Auto-actualisation sans interaction (tick 30 s, attente réelle ≥ 60 s)');
+      // Fenêtre synthétique de 5 min, reset dans 4 min → 20 % écoulé maintenant ;
+      // aucun autre postMessage n'arrivera pendant l'attente : si la position
+      // bouge, c'est uniquement le tick local de panel.js qui l'a fait.
+      const TICK_WINDOW_MS = 5 * 60 * 1000;
+      const tickState = JSON.parse(JSON.stringify(STATE));
+      tickState.quota.windows = [mkWindow('tick test', 10, new Date(Date.now() + 4 * 60 * 1000).toISOString(), TICK_WINDOW_MS)];
+      await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: tickState })}, '*')`);
+      await sleep(120);
+      const posBefore = await cdp.evaluate(`parseFloat(document.querySelector('.arrow').style.left)`);
+      await sleep(65000);
+      const posAfter = await cdp.evaluate(`parseFloat(document.querySelector('.arrow').style.left)`);
+      check(`la flèche avance seule entre deux polls (${posBefore.toFixed(1)}% → ${posAfter.toFixed(1)}%, aucun nouveau postMessage envoyé)`,
+        posAfter > posBefore + 5, `${posBefore} → ${posAfter}`);
+    }
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
@@ -636,6 +650,27 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(150);
     check("… l'ex-maîtresse reprend sa ligne dans la liste plate (une seule fois)",
       await cdp.evaluate(`[...document.querySelectorAll('#flow > .conv .title')].filter(e => e.textContent === 'Terminée déjà lue').length`) === 1);
+
+    console.log('\n9quater. Membre fini + onglet ouvert dont la conv n\'a jamais reçu c.groupId (2026-08-30)');
+    // Repro exacte du défaut signalé par l'user sur son panneau réel (« en
+    // fermant les onglets, les lignes de conversation sont réapparues dans
+    // l'extension ») et mesuré au CDP (instrument-flat-leak.js) : un membre
+    // encore `done` (onglet ouvert, PAS `done-closed`) dont la conv ne porte
+    // aucun `groupId` — exactement ce que fabrique test/make-mockup.js.
+    // `flat` ne s'appuyait QUE sur `c.groupId` : layoutFlow (appelé après
+    // renderGroups) replace alors le MÊME nœud DOM partagé (rowFor met en
+    // cache un nœud par conv) dans la liste plate, ce qui le retire de
+    // `mn.slot` — la ligne quitte visuellement son lot, `.m-slot` reste vide.
+    const groupIdLeak = JSON.parse(JSON.stringify(grouped));
+    delete groupIdLeak.conversations[1].groupId;   // c2 : aucun indice côté conv, comme sur le panneau réel
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: groupIdLeak })}, '*')`);
+    await sleep(150);
+    check('le membre fini (onglet ouvert) reste DANS son lot malgré l\'absence de c.groupId',
+      await cdp.evaluate(`[...document.querySelectorAll('#flow .grp .conv .title')].some(e => e.textContent === 'Terminée jamais lue')`));
+    check('… et n\'est pas dupliqué/déporté dans la liste plate',
+      await cdp.evaluate(`[...document.querySelectorAll('#flow > .conv .title')].filter(e => e.textContent === 'Terminée jamais lue').length`) === 0);
+    check('… aucun m-slot de membre laissé vide (le nœud n\'est pas volé par layoutFlow)',
+      await cdp.evaluate(`[...document.querySelectorAll('#flow .grp .m-slot')].every(s => s.children.length > 0)`));
 
     // Retour à l'état de base de la section 9 pour la suite du banc (9bis).
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
@@ -869,15 +904,17 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('3 vagues en AUTO : aucune ne devient ▶, la 2 comme la 3 restent « — queued »',
       triHdrTexts.indexOf('wave 2 — queued') !== -1 && triHdrTexts.indexOf('wave 3 — queued') !== -1
       && triHdrTexts.indexOf('▶') === -1, triHdrTexts);
-    // ── Mode MANUEL (2026-08-26, resserré 2026-08-27) : seule porte restante
-    // vers un forçage — le ▶ suit toujours les règles 2.73.0 (vague finie ou
-    // hard-bloquée), inchangées par ce lot.
+    // ── Mode MANUEL (2026-08-26, ROUVERT 2026-08-28) : seule porte vers un
+    // forçage, et elle est ouverte dès qu'il reste une vague en file — y
+    // compris quand la vague courante tourne encore (waves.js canForceLaunch,
+    // « forcer un partiel »). Le resserrement du 2026-08-27 la fermait, et
+    // l'interrupteur manuel semblait alors ne rien faire (constat user).
     const manualNotReady = JSON.parse(JSON.stringify(grouped));
     manualNotReady.groups[0].waveMode = 'manual';
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: manualNotReady })}, '*')`);
     await sleep(120);
-    check('MANUEL, vague courante pas finie : séparateur toujours inerte',
-      await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr.launch').length`) === 0);
+    check('MANUEL, vague courante PAS finie : le ▶ est quand même offert (sinon l\'interrupteur ne donne la main sur rien)',
+      await cdp.evaluate(`(() => { const h = document.querySelector('#flow .wave-hdr.launch'); return h ? h.textContent.trim() : null; })()`) === '▶ wave 2');
     const manualReadyState = JSON.parse(JSON.stringify(manualNotReady));
     manualReadyState.groups[0].members[0].status = 'done';
     manualReadyState.groups[0].members[0].waveStatus = 'done';
@@ -1248,13 +1285,14 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     })()`);
     check('clic sur le pill : le menu s\'ouvre sans rien envoyer, et l\'overlay est tenu ouvert',
       menu.open === true && menu.sent === 0 && menu.held === true, JSON.stringify(menu));
-    check('… il liste les vagues encore EN FILE (2 et 3), jamais la vague 1 déjà partie',
-      menu.labels.length === 3 && /2/.test(menu.labels[0]) && /3/.test(menu.labels[1]),
+    check('… il liste la vague EN COURS (1, « démarre aussitôt ») puis les vagues en file (2 et 3)',
+      menu.labels.length === 4 && /1/.test(menu.labels[0]) && /running|cours/i.test(menu.labels[0])
+      && /2/.test(menu.labels[1]) && /3/.test(menu.labels[2]),
       JSON.stringify(menu.labels));
     check('… la vague COURANTE est marquée « ici » et n\'est pas cliquable (le store la refuserait)',
       menu.dead.length === 1 && /2/.test(menu.dead[0]) && /\(ici\)|\(here\)/.test(menu.dead[0]), JSON.stringify(menu));
     check('… et « nouvelle vague à la fin » ferme la liste',
-      /fin|end/i.test(menu.labels[2]), JSON.stringify(menu.labels));
+      /fin|end/i.test(menu.labels[menu.labels.length - 1]), JSON.stringify(menu.labels));
 
     // Le geste : UN clic, une destination ABSOLUE — là où il fallait autant de
     // flèches que de vagues à franchir.
@@ -1403,366 +1441,328 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: linkedOutOfView })}, '*')`);
     await sleep(150);
 
-    console.log('\n10bis. Ajout en file à un groupe existant (plan ajout-tache 2026-07-24)');
-    check('ligne fantôme « + nouvelle vague » présente même sur un groupe fini (mono-vague, nextWave null)',
-      await cdp.evaluate(`!!document.querySelector('#flow .wave-ghost')`) === true);
+    console.log('\n10bis. Ajout en file : ce sont les LIGNES du lot qui sont les cibles (2026-08-29)');
+    // Les deux lignes-boutons de vague (« + nouvelle vague », « + cette vague »)
+    // ont disparu : survoler une ligne du lot désigne SA vague, et le clic y
+    // dépose. Survoler la DERNIERE ligne couvre ce que « + nouvelle vague »
+    // faisait — c'est ce qui autorisait sa suppression.
+    check('plus aucune ligne-bouton de vague dans le panneau',
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-ghost').length`) === 0);
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
-    // Restylage (lot chip fermeture 2026-07-24) : le petit « + » du séparateur
-    // a disparu ; la ligne d'ajout pleine largeur (.wave-add-row) n'existe
-    // dans le DOM QUE pour les vagues strictement en file — jamais masquée
-    // par un style, absente pour de vrai sur les autres.
-    const waveAddRowsCount = await cdp.evaluate(`document.querySelectorAll('#flow .wave-add-row').length`);
-    check('« + ajouter à cette vague » absent sur la vague 1 (déjà lancée / en cours) et présent sur la vague 2 (en file) seulement',
-      waveAddRowsCount === 1, String(waveAddRowsCount));
-    check('ligne fantôme toujours présente (groupe multi-vagues)',
-      await cdp.evaluate(`!!document.querySelector('#flow .wave-ghost')`) === true);
-
-    // Masquage à vide (2026-08-15, constat user) : les deux fantômes existent
-    // dans le DOM (queries ci-dessus) mais ne doivent RIEN peser tant qu'aucune
-    // tâche active n'est prête à être déposée — sinon on n'économise rien et
-    // on attire l'œil vers un bouton qui ne ferait que rendre le focus au champ.
-    const ghostVisEmpty = await cdp.evaluate(`(() => {
-      const ghostNew = document.querySelector('#flow .wave-ghost.wave-new');
-      const addRow = document.querySelector('#flow .wave-add-row');
-      return {
-        ghostNewDisplay: ghostNew ? getComputedStyle(ghostNew).display : null,
-        addRowDisplay: addRow ? getComputedStyle(addRow).display : null,
-      };
-    })()`);
-    check('champ prompt vide : « + nouvelle vague » et « + cette vague » masqués (display:none), pas retirés du DOM',
-      ghostVisEmpty.ghostNewDisplay === 'none' && ghostVisEmpty.addRowDisplay === 'none', JSON.stringify(ghostVisEmpty));
-
-    // Lot B densité (2026-08-09) — les deux fantômes ne font plus qu'UNE
-    // rangée. Un groupe se terminait par deux lignes pleine largeur empilées
-    // (~52 px) pour deux actions voisines ; elles partagent maintenant la même
-    // bande, chacune sur sa moitié. Ce qui est vérifié ici, c'est la
-    // GÉOMÉTRIE (une seule rangée, deux boîtes disjointes) — les règles qui
-    // les séparent, elles, sont testées juste en dessous et en 10ter, sur ces
-    // mêmes nœuds : rien n'a bougé de leur logique, seulement de leur parent.
-    // Depuis le masquage à vide (2026-08-15), les deux fantômes n'occupent de
-    // la géométrie que si le champ prompt porte une tâche active — le poser
-    // ici est la précondition de tout ce bloc, pas juste de ce test-ci.
-    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Geometrie fantome'; ta.dispatchEvent(new Event('input')); })()`);
-    const ghostVisFilled = await cdp.evaluate(`(() => {
-      const ghostNew = document.querySelector('#flow .wave-ghost.wave-new');
-      const addRow = document.querySelector('#flow .wave-add-row');
-      return {
-        ghostNewDisplay: ghostNew ? getComputedStyle(ghostNew).display : null,
-        addRowDisplay: addRow ? getComputedStyle(addRow).display : null,
-      };
-    })()`);
-    check('… et réapparaissent dès qu\'une tâche active existe dans le champ',
-      ghostVisFilled.ghostNewDisplay !== 'none' && ghostVisFilled.addRowDisplay !== 'none', JSON.stringify(ghostVisFilled));
-
-    // ARMÉES (2026-08-27) : réapparaître ne suffisait pas. Ces deux lignes
-    // EXISTAIENT déjà — c'est leur discrétion qui coûtait quatre gestes pour
-    // insérer en vague 2 : ne s'allumant qu'au survol, elles se découvraient
-    // par hasard, et « + new wave » finissait par servir de porte unique (la
-    // tâche tombait en dernière vague, puis se remontait à la main). Dès qu'un
-    // prompt attend, elles prennent donc la couleur d'ACTION du thème, celle
-    // des boutons — le seul jeton dont la vivacité est garantie dans tous les
-    // thèmes (cf. CLAUDE.md du dossier : list.activeSelectionBackground ne
-    // l'est pas). Mesuré sur le style calculé, pas sur la classe : c'est la
-    // couleur qui doit changer, pas un attribut.
-    await cdp.evaluate(`document.documentElement.style.setProperty('--vscode-button-background', ${JSON.stringify(PALETTE.dark['--vscode-button-background'])})`);
-    await sleep(60);
-    const armed = await cdp.evaluate(`(() => {
-      const hex = function (c) {
-        const m = c.match(/\\d+/g);
-        return m ? '#' + m.slice(0, 3).map(function (n) { return ('0' + Number(n).toString(16)).slice(-2); }).join('') : c;
-      };
-      const ghostNew = document.querySelector('#flow .wave-ghost.wave-new');
-      const addRow = document.querySelector('#flow .wave-add-row');
-      return {
-        ghostNewBg: hex(getComputedStyle(ghostNew).backgroundColor),
-        addRowBg: hex(getComputedStyle(addRow).backgroundColor),
-        bodyBg: hex(getComputedStyle(document.body).backgroundColor),
-        ghostNewArmed: ghostNew.classList.contains('armed'),
-        addRowArmed: addRow.classList.contains('armed'),
-      };
-    })()`);
-    const BTN = String(PALETTE.dark['--vscode-button-background'] || '').slice(0, 7).toLowerCase();
-    check('… et elles s\'ALLUMENT : fond à la couleur d\'action du thème, sans attendre le survol',
-      armed.ghostNewArmed === true && armed.addRowArmed === true
-      && armed.ghostNewBg.toLowerCase() === BTN && armed.addRowBg.toLowerCase() === BTN,
-      JSON.stringify({ armed: armed, attendu: BTN }));
-    check('… et ce fond se DÉTACHE de celui du panneau (c\'est tout l\'objet : se voir sans survol)',
-      armed.ghostNewBg.toLowerCase() !== armed.bodyBg.toLowerCase(), JSON.stringify(armed));
-
-    // … et elles s'éteignent avec le prompt : une cible en couleur pleine sans
-    // rien à y déposer serait le bouton menteur que tout le panneau évite.
-    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = ''; ta.dispatchEvent(new Event('input')); })()`);
-    check('champ vidé : elles s\'éteignent (plus de couleur d\'action sur une cible sans matière)',
-      await cdp.evaluate(`document.querySelectorAll('#flow .wave-ghost.armed').length`) === 0);
-
-    // LA ZONE DE SAISIE NE BOUGE PAS (2026-08-27, signalé par l'user). Le
-    // formulaire est SOUS les lots : allumer une ligne d'ajout dans chacun
-    // pousse tout ce qui suit, et le champ fuyait sous le curseur à la
-    // première frappe — le panneau entier semblait défiler. Mesuré ici de la
-    // seule façon qui prouve quelque chose : la position À L'ÉCRAN du champ,
-    // avant et après la bascule, panneau réellement défilable (sinon il n'y a
-    // rien à compenser et le test passerait sans rien couvrir).
-    const stay = await cdp.evaluate(`(() => {
-      const form = document.getElementById('batchForm');
-      const ta = document.querySelector('.task-top textarea.inp');
-      const sc = document.scrollingElement || document.documentElement;
-      const scrollable = sc.scrollHeight - sc.clientHeight;
-      ta.value = '';
-      ta.dispatchEvent(new Event('input'));
-      const before = form.getBoundingClientRect().top;
-      const rowsBefore = document.querySelectorAll('#flow .wave-ghost.armed').length;
-      ta.value = 'Une tache qui attend';
-      ta.dispatchEvent(new Event('input'));
-      return {
-        scrollable: scrollable,
-        rowsBefore: rowsBefore,
-        rowsAfter: document.querySelectorAll('#flow .wave-ghost.armed').length,
-        moved: Math.round((form.getBoundingClientRect().top - before) * 10) / 10,
-      };
-    })()`);
-    check('(mise en place) le panneau est bien défilable et des lignes s\'allument vraiment',
-      stay.scrollable > 0 && stay.rowsBefore === 0 && stay.rowsAfter > 0, JSON.stringify(stay));
-    check('la zone de saisie ne bouge PAS d\'un pixel quand les lignes s\'allument',
-      Math.abs(stay.moved) <= 1, JSON.stringify(stay));
-
-    await cdp.evaluate(`document.documentElement.style.removeProperty('--vscode-button-background')`);
-    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Geometrie fantome'; ta.dispatchEvent(new Event('input')); })()`);
-    const mergedGhost = await cdp.evaluate(`(() => {
-      const line = document.querySelector('#flow .ghost-line');
-      const addRow = line && line.querySelector('.wave-add-row');
-      const ghostNew = line && line.querySelector('.wave-ghost:not(.wave-add-row)');
-      if (!line || !addRow || !ghostNew) return { line: !!line, addRow: !!addRow, ghostNew: !!ghostNew };
-      const l = line.getBoundingClientRect(), a = addRow.getBoundingClientRect(), n = ghostNew.getBoundingClientRect();
-      const body = line.parentElement;
-      // Le rail est un enfant du corps en position absolue, que place()
-      // repousse en fin de liste au fil des insertions par index : il ne dit
-      // rien de l'ordre VISUEL, on l'écarte avant de chercher le dernier.
-      const flow = Array.from(body.children).filter((c) => !c.classList.contains('grp-rail'));
-      return {
-        line: true, addRow: true, ghostNew: true,
-        distinct: addRow !== ghostNew,
-        sameTop: Math.abs(a.top - n.top) < 0.5,
-        sameBottom: Math.abs(a.bottom - n.bottom) < 0.5,
-        disjoint: a.right <= n.left + 0.5,
-        addFirst: a.left < n.left,
-        lineHeight: l.height, cellHeight: a.height,
-        addRowsInBody: document.querySelectorAll('#flow .grp-body > .wave-add-row').length,
-        ghostLines: document.querySelectorAll('#flow .ghost-line').length,
-        closesGroup: body.classList.contains('grp-body') && flow[flow.length - 1] === line,
-      };
-    })()`);
-    check('les deux fantômes sont deux nœuds DISTINCTS sur la même rangée (mêmes haut et bas)',
-      mergedGhost.distinct === true && mergedGhost.sameTop === true && mergedGhost.sameBottom === true,
-      JSON.stringify(mergedGhost));
-    check('… boîtes DISJOINTES, « + cette vague » à gauche, « + nouvelle vague » à droite (un clic ne peut pas se tromper de cible)',
-      mergedGhost.disjoint === true && mergedGhost.addFirst === true, JSON.stringify(mergedGhost));
-    check('… la rangée ne coûte que la hauteur d\'UNE ligne (plus deux empilées)',
-      mergedGhost.lineHeight <= mergedGhost.cellHeight + 0.5, JSON.stringify(mergedGhost));
-    check('… plus aucune ligne d\'ajout pleine largeur en enfant du corps (la dernière vague en file a fusionné)',
-      mergedGhost.addRowsInBody === 0 && mergedGhost.ghostLines === 1, JSON.stringify(mergedGhost));
-    check('… et c\'est cette rangée unique qui ferme le groupe',
-      mergedGhost.closesGroup === true, JSON.stringify(mergedGhost));
-
-    // Deux vagues en file : SEULE la dernière fusionne. Celle du milieu garde
-    // sa rangée, au contact des membres de SA vague — la fusion est une
-    // économie de fin de groupe, pas une migration de toutes les lignes
-    // d'ajout vers le bas (elles ne diraient plus à quelle vague elles
-    // ajoutent).
-    const twoQueued = JSON.parse(JSON.stringify(grouped));
-    twoQueued.groups[0].members.push({
-      key: 'm4', prompt: 'Encore plus tard', wave: 3, asked: { model: null, effort: null }, convId: null,
-      status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, note: '', hint: 'Queued — opens when this wave starts.',
-    });
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: twoQueued })}, '*')`);
-    await sleep(150);
-    const midWave = await cdp.evaluate(`(() => {
-      const body = document.querySelector('#flow .grp-body');
-      const inBody = Array.from(body.querySelectorAll(':scope > .wave-add-row'));
-      const merged = document.querySelector('#flow .ghost-line .wave-add-row');
-      const next = inBody[0] ? inBody[0].nextElementSibling : null;
-      return {
-        inBody: inBody.length,
-        merged: !!merged,
-        mergedIsOther: !!merged && merged !== inBody[0],
-        nextIsWaveHeader: !!next && next.classList.contains('wave-hdr'),
-        total: document.querySelectorAll('#flow .wave-add-row').length,
-      };
-    })()`);
-    check('vagues 2 et 3 en file : une seule ligne d\'ajout reste dans le corps (la vague 2), l\'autre a fusionné',
-      midWave.total === 2 && midWave.inBody === 1 && midWave.merged === true && midWave.mergedIsOther === true,
-      JSON.stringify(midWave));
-    check('… et celle de la vague 2 reste au contact de ses membres (suivie de l\'en-tête de la vague 3)',
-      midWave.nextIsWaveHeader === true, JSON.stringify(midWave));
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
-    await sleep(150);
-
-    // Prompt rempli → clic sur la ligne d'ajout de la vague 2 → addTaskToGroup, champ vidé.
+    // UNE seule tâche au formulaire : le bloc tient en une vague, il REJOINT
+    // donc la vague survolée (mode 'into') au lieu de s'insérer derrière elle.
     await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Nouvelle tache en file'; ta.dispatchEvent(new Event('input')); })()`);
+    const lastWave = await cdp.evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('#flow [data-ins-wave]'));
+      const r = rows[rows.length - 1];
+      if (!r) return null;
+      (r.querySelector('.conv, .m-pending') || r).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      return Number(r.dataset.insWave);
+    })()`);
+    await sleep(220);
+    const hov = await cdp.evaluate(`(() => ({
+      zones: document.querySelectorAll('.ins-zone').length,
+      hot: document.querySelectorAll('#flow .ins-hot').length,
+      tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+      hl: document.querySelector('.task-top textarea.inp').classList.contains('hl-target'),
+    }))()`);
+    check('survol d une ligne : la vague s eclaire, et d UN seul cadre',
+      hov.zones === 1 && hov.hot >= 2, JSON.stringify(hov));
+    check('… un ruban dit ce qui va se passer', !!hov.tag && hov.tag.indexOf('wave') !== -1, JSON.stringify(hov));
+    check('… et le champ prompt s allume : c est SON contenu qui va tomber la',
+      hov.hl === true, JSON.stringify(hov));
+
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').click()`);
+    await cdp.evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('#flow [data-ins-wave]'));
+      rows[rows.length - 1].click();
+    })()`);
     const afterAdd = await cdp.evaluate(`window.__sent`);
-    check('clic ligne d\'ajout vague en file → addTaskToGroup (id du groupe, vague, prompt)',
-      Array.isArray(afterAdd) && afterAdd.length === 1 && afterAdd[0].type === 'addTaskToGroup'
-      && afterAdd[0].id === 'g1' && afterAdd[0].wave === 2 && afterAdd[0].task.prompt === 'Nouvelle tache en file',
-      JSON.stringify(afterAdd));
+    check('clic sur la ligne -> addTasksToGroup, mode into, sur la vague de la ligne',
+      Array.isArray(afterAdd) && afterAdd.length === 1 && afterAdd[0].type === 'addTasksToGroup'
+      && afterAdd[0].id === 'g1' && afterAdd[0].mode === 'into' && afterAdd[0].wave === lastWave
+      && afterAdd[0].tasks.length === 1 && afterAdd[0].tasks[0].prompt === 'Nouvelle tache en file',
+      JSON.stringify([afterAdd, lastWave]));
     check('champ prompt vidé après dépôt',
       await cdp.evaluate(`document.querySelector('.task-top textarea.inp').value`) === '');
+    check('… et le décor de survol s eteint avec lui',
+      await cdp.evaluate(`document.querySelectorAll('.ins-zone, .ins-tag').length`) === 0);
 
-    // Prompt vide → clic = aucun message, focus rendu au champ (invitation à taper).
+    // Champ VIDE : la ligne redevient ce qu'elle a toujours été — un raccourci
+    // vers l'onglet. Le clic ne peut pas insérer ce qui n'existe pas.
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').click()`);
-    const afterEmptyClick = await cdp.evaluate(`window.__sent`);
-    check('prompt vide : aucun message envoyé', Array.isArray(afterEmptyClick) && afterEmptyClick.length === 0, JSON.stringify(afterEmptyClick));
-    check('… et le focus revient au champ prompt',
-      await cdp.evaluate(`document.activeElement === document.querySelector('.task-top textarea.inp')`) === true);
-
-    // Survol de la ligne d'ajout : la zone prompt passe en surbrillance (lien visuel).
-    await cdp.evaluate(`document.querySelector('.task-top textarea.inp').value = 'x'`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').dispatchEvent(new MouseEvent('mouseenter'))`);
-    check('survol de la ligne d\'ajout : la zone prompt passe en surbrillance',
-      await cdp.evaluate(`document.querySelector('.task-top textarea.inp').classList.contains('hl-target')`) === true);
-    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').dispatchEvent(new MouseEvent('mouseleave'))`);
-    check('fin du survol : surbrillance retirée',
-      await cdp.evaluate(`document.querySelector('.task-top textarea.inp').classList.contains('hl-target')`) === false);
-
-    // Fix orpheline « + add to this wave » (constat user 2026-08-05) : une
-    // vague en file qui passe à lancée doit purger sa ligne d'ajout, pas la
-    // laisser collée en fin de corps (waveNums la contient encore, seul son
-    // statut queued change).
-    const waveLaunched = JSON.parse(JSON.stringify(grouped));
-    waveLaunched.groups[0].launchedWave = 2;
-    waveLaunched.groups[0].nextWave = null;
-    waveLaunched.groups[0].members[2].waveStatus = 'launched';
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: waveLaunched })}, '*')`);
-    await sleep(150);
-    check('vague 2 lancée : sa ligne « + add to this wave » disparaît (plus d\'orpheline en fin de corps)',
-      await cdp.evaluate(`document.querySelectorAll('#flow .wave-add-row').length`) === 0);
-    // … et la rangée fusionnée retombe sur son seul occupant : « + nouvelle
-    // vague » reprend TOUTE la largeur, comme avant le lot B. La cellule
-    // d'ajout est absente du DOM, jamais masquée par un style — un enfant de
-    // flux coûterait sa place même invisible (invariant maison, cf. le pied
-    // des membres en file et la croix des lignes de groupe).
-    // Le champ a été vidé par le dépôt plus haut (l.~1266) : reposer une tâche
-    // active, sinon « + nouvelle vague » elle-même est masquée à vide et ce
-    // test mesurerait une géométrie nulle, pas la fusion qu'il vérifie.
-    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Geometrie fantome solo'; ta.dispatchEvent(new Event('input')); })()`);
-    const soloGhost = await cdp.evaluate(`(() => {
-      const line = document.querySelector('#flow .ghost-line');
-      if (!line) return { line: false };
-      const cell = line.querySelector('.wave-ghost');
-      const l = line.getBoundingClientRect(), c = cell.getBoundingClientRect();
-      return { line: true, children: line.children.length, lineWidth: l.width, cellWidth: c.width };
+    await cdp.evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('#flow [data-ins-wave]'));
+      const r = rows[rows.length - 1];
+      (r.querySelector('.conv, .m-pending') || r).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      r.click();
     })()`);
-    check('… la rangée fantôme reste, avec « + nouvelle vague » seule sur toute la largeur',
-      soloGhost.line === true && soloGhost.children === 1
-      && Math.abs(soloGhost.lineWidth - soloGhost.cellWidth) < 0.5, JSON.stringify(soloGhost));
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
-    await sleep(150);
+    await sleep(120);
+    const emptyClick = await cdp.evaluate(`window.__sent`);
+    check('champ vide : aucune insertion, la ligne garde son geste d origine',
+      Array.isArray(emptyClick) && emptyClick.every(function (m) { return m.type !== 'addTasksToGroup'; }),
+      JSON.stringify(emptyClick));
+    check('… et rien ne s eclaire : sans matiere a deposer, il n y a pas de cible',
+      await cdp.evaluate(`document.querySelectorAll('.ins-zone').length`) === 0);
 
-    // Ligne fantôme → nouvelle vague (wave: null).
-    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Ligne fantome'; ta.dispatchEvent(new Event('input')); })()`);
+    // VAGUES A TROUS — le cas reel qui a echappe a tout le banc (2026-08-30).
+    // Une vague videe de ses membres n'a plus d'en-tete : un lot affiche alors
+    // 1 puis 4. L'apercu doit se poser devant la PREMIERE vague qui suit, pas
+    // devant un numero calcule qui n'existe pas.
+    const gapped = JSON.parse(JSON.stringify(grouped));
+    gapped.groups[0].members = gapped.groups[0].members.map(function (m) {
+      return m.wave === 2 ? Object.assign({}, m, { wave: 4 }) : m;
+    });
+    gapped.groups[0].nextWave = 4;
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: gapped })}, '*')`);
+    await sleep(150);
+    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Une tache pour la vague 1'; ta.dispatchEvent(new Event('input')); })()`);
+    const gapWaves = await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .grp-body > .wave-hdr .wave-hdr-label')).map(function (n) { return n.textContent; })`);
+    check('(mise en place) le lot affiche bien des vagues NON contigues',
+      gapWaves.join('|') === 'wave 1|wave 4 \u2014 queued', JSON.stringify(gapWaves));
+    await cdp.evaluate(`(() => {
+      const r = Array.from(document.querySelectorAll('#flow [data-ins-wave]'))
+        .find(function (x) { return Number(x.dataset.insWave) === 1; });
+      (r.querySelector('.conv, .m-pending') || r).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    })()`);
+    await sleep(220);
+    const gapSpot = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      const next = prev ? prev.nextElementSibling : null;
+      return {
+        present: !!prev,
+        nextIsWaveHeader: !!next && next.classList.contains('wave-hdr'),
+        nextLabel: next ? next.textContent : null,
+        atEndOfBody: !!next && next.classList.contains('ghost-line'),
+      };
+    })()`);
+    check('vagues a trous : l apercu se pose DEVANT la vague suivante, pas en fin de lot',
+      gapSpot.present === true && gapSpot.nextIsWaveHeader === true && gapSpot.atEndOfBody === false,
+      JSON.stringify(gapSpot));
+
+    // VAGUE DEJA PASSEE — le lot de l'user etait arrive a la vague 4, sa vague 1
+    // terminee. Le store refuse toute vague anterieure a celle en cours
+    // (groups.js : n < launchedWave). Le ruban le disait pour un bloc
+    // MULTI-vagues seulement : sur un bloc mono-vague il restait vert, donc une
+    // cible morte presentee comme vivante (2026-08-30).
+    const pastWave = JSON.parse(JSON.stringify(gapped));
+    pastWave.groups[0].launchedWave = 4;
+    pastWave.groups[0].nextWave = null;
+    // La vague 4 est EN COURS, la 1 terminee : c'est le cas de l'user. Un lot
+    // dont TOUT est fini se replie tout seul (repli auto), ce qui masquerait
+    // les lignes qu'on veut survoler.
+    pastWave.groups[0].members = pastWave.groups[0].members.map(function (m) {
+      return m.wave === 1
+        ? Object.assign({}, m, { status: 'done', waveStatus: 'done', canClose: true })
+        : Object.assign({}, m, { status: 'busy', waveStatus: 'launched', canClose: false });
+    });
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: pastWave })}, '*')`);
+    await sleep(150);
+    await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Une tache de plus'; ta.dispatchEvent(new Event('input')); })()`);
+    const prevSpotBefore = await cdp.evaluate(`(() => {
+      const p = document.querySelector('.master-preview');
+      return p && p.nextElementSibling ? p.nextElementSibling.className : null;
+    })()`);
+    await cdp.evaluate(`(() => {
+      const r = Array.from(document.querySelectorAll('#flow [data-ins-wave]'))
+        .find(function (x) { return Number(x.dataset.insWave) === 1; });
+      if (r) (r.querySelector('.conv, .m-pending') || r).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    })()`);
+    await sleep(220);
+    const past = await cdp.evaluate(`(() => {
+      const p = document.querySelector('.master-preview');
+      return {
+        tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+        refusedStyle: !!document.querySelector('.ins-tag.no'),
+        prevNext: p && p.nextElementSibling ? p.nextElementSibling.className : null,
+      };
+    })()`);
+    const pastHeaders = await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .grp-body > .wave-hdr .wave-hdr-label')).map(function (n) { return n.textContent; })`);
+    console.log('       [sonde] en-tetes rendus : ' + JSON.stringify(pastHeaders));
+    check('(mise en place) le lot est bien arrive a la vague 4',
+      pastHeaders.join('|').indexOf('wave 4') !== -1, JSON.stringify(pastHeaders));
+    check('vague DEJA PASSEE : le ruban dit non au lieu de promettre un depot',
+      !!past.tag && /already past/.test(past.tag) && past.refusedStyle === true, JSON.stringify(past));
+    // Le contrat n'est pas « il n'a pas bouge depuis la mesure d'avant » (un
+    // survol precedent pouvait encore le deplacer) mais « il est a sa place PAR
+    // DEFAUT » : en fin de corps, la ou les taches iront reellement.
+    check('… et l apercu reste a sa place par defaut, en fin de lot',
+      past.prevNext === null || /ghost-line/.test(past.prevNext || ''), JSON.stringify(past));
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
-    const afterGhost = await cdp.evaluate(`window.__sent`);
-    check('clic ligne fantôme → addTaskToGroup avec wave: null (nouvelle vague)',
-      Array.isArray(afterGhost) && afterGhost.length === 1 && afterGhost[0].type === 'addTaskToGroup' && afterGhost[0].wave === null,
-      JSON.stringify(afterGhost));
+    await cdp.evaluate(`(() => {
+      const r = Array.from(document.querySelectorAll('#flow [data-ins-wave]'))
+        .find(function (x) { return Number(x.dataset.insWave) === 1; });
+      if (r) r.click();
+    })()`);
+    await sleep(120);
+    check('… et le clic n envoie rien',
+      await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'addTasksToGroup'; }).length`) === 0);
+
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
 
-    console.log('\n10ter. Coller un bloc multi-vagues DANS un groupe existant (plan repli-auto étape 10)');
+    console.log('\n10ter. Bloc de PLUSIEURS prompts : deux gestes nommes + apercu au survol (2026-08-29)');
+    // Un bloc a K vagues ne rentre dans AUCUNE vague : les lignes d'ajout
+    // changent alors de sens ET de nom (« + insert here »), et le clic envoie
+    // mode:'before'. Avant le 2026-08-29, un geste unique fondait la premiere
+    // vague du bloc dans la vague visee et intercalait les suivantes — d'ou le
+    // melange signale par l'user (une tache existante a cote d'une nouvelle).
+    // Le survol, lui, MONTRE le resultat sans rien envoyer.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
     const multiBlock = '```claude-convs\nmodel: sonnet\neffort: medium\nstage: 1\nPremiere tache\n[---]\nmodel: opus\neffort: high\nstage: 2\nDeuxieme tache\n```';
-    await cdp.evaluate(`(() => {
-      const ta = document.querySelector('.task-top textarea.inp');
-      ta.value = ${JSON.stringify(multiBlock)};
-      ta.dispatchEvent(new Event('change'));
-    })()`);
-    await sleep(50);
-    check('bloc reconnu : 2 tâches préremplies (mode étendu)',
-      await cdp.evaluate(`document.querySelectorAll('#batchForm .task').length`) === 2);
-
-    // Les deux cibles de cette section vivent sur la MÊME rangée depuis le lot
-    // B densité : c'est exactement ce que la fusion ne doit pas confondre —
-    // l'une refuse un bloc multi-tâches, l'autre le transfère en entier après
-    // confirmation. La vérifier ici, c'est prouver que les deux règles
-    // s'exercent bien sur des cellules voisines et non sur un bouton unique.
-    check('(mise en place) les deux cibles testées ci-dessous sont bien les deux cellules de la MÊME rangée fantôme',
+    const monoBlock = '```claude-convs\nmodel: sonnet\neffort: medium\nstage: 1\nPremiere tache\n[---]\nmodel: opus\neffort: high\nstage: 1\nDeuxieme tache\n```';
+    const pasteBlock = async function (txt) {
       await cdp.evaluate(`(() => {
-        const line = document.querySelector('#flow .ghost-line');
-        const a = document.querySelector('#flow .wave-add-row');
-        const n = document.querySelector('#flow .wave-ghost:not(.wave-add-row)');
-        return !!line && a.parentElement === line && n.parentElement === line && a !== n;
-      })()`) === true);
-
-    // « + ajouter à cette vague » (vague 2, en file) avec un bloc multi-tâches
-    // dans le champ → REFUS, aucun message, le formulaire n'est PAS vidé.
-    await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-add-row').click()`);
-    const afterRefusal = await cdp.evaluate(`window.__sent`);
-    check('« + ajouter à cette vague » sur un bloc multi-tâches → aucun message envoyé (pas de télescopage silencieux)',
-      Array.isArray(afterRefusal) && afterRefusal.length === 0, JSON.stringify(afterRefusal));
-    check('refus signalé en bannière', /multi-wave/i.test(await cdp.evaluate(`document.querySelector('#batchForm .banner')?.textContent || ''`)));
-    check('le formulaire garde ses 2 tâches (rien de transféré)',
+        const ta = document.querySelector('.task-top textarea.inp');
+        ta.value = ${JSON.stringify(txt)};
+        ta.dispatchEvent(new Event('change'));
+      })()`);
+      await sleep(80);
+    };
+    const rowOfWave = function (w) {
+      return `(function () {
+        return Array.from(document.querySelectorAll('#flow [data-ins-wave]'))
+          .find(function (r) { return Number(r.dataset.insWave) === ${w}; });
+      })()`;
+    };
+    const hoverWave = async function (w) {
+      await cdp.evaluate(`(() => {
+        const r = ${rowOfWave(w)};
+        if (!r) return;
+        (r.querySelector('.conv, .m-pending') || r).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      })()`);
+      await sleep(160);
+    };
+    await pasteBlock(multiBlock);
+    check('bloc reconnu : 2 taches preremplies (mode etendu)',
       await cdp.evaluate(`document.querySelectorAll('#batchForm .task').length`) === 2);
 
-    // « + nouvelle vague » (ligne fantôme) avec le même bloc → confirmation
-    // affichée, RIEN envoyé tant qu'elle n'est pas validée.
+    // SURVOL de la ligne de la vague 1 : le bloc se pose DERRIERE elle, donc
+    // devant la vague 2. L'apercu s'y installe, les vagues suivantes sont
+    // renumerotees, la fleche de l'agrafe suit — et RIEN n'est envoye.
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
-    const afterGhostMulti = await cdp.evaluate(`window.__sent`);
-    check('clic ligne fantôme sur bloc multi-tâches → AUCUN message avant confirmation',
-      Array.isArray(afterGhostMulti) && afterGhostMulti.length === 0, JSON.stringify(afterGhostMulti));
-    const confirmText = await cdp.evaluate(`document.querySelectorAll('#batchForm .banner.info .btn')[1]?.closest('.banner').textContent || ''`);
-    check('bannière de confirmation : compte tâches/vagues, group:/session: absents du bloc → rien à signaler dessus',
-      /2/.test(confirmText) && !/ignored/i.test(confirmText), confirmText);
+    const targetTopBefore = await cdp.evaluate(`(() => {
+      const r = ${rowOfWave(1)};
+      return r ? Math.round(r.getBoundingClientRect().top) : null;
+    })()`);
+    await hoverWave(1);
+    const hovered = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      const tip = document.querySelector('.mcue-tip');
+      const target = ${rowOfWave(1)};
+      return {
+        // Depuis 2026-08-29 l'apercu pose de VRAIS separateurs de vague (il doit
+        // montrer ce que le lot aura, pas un rendu maison) : les deux jeux
+        // d'en-tetes portent donc la meme classe et se distinguent par leur
+        // parent, jamais par leur selecteur.
+        waves: Array.from(document.querySelectorAll('.master-preview .wave-hdr-label')).map(function (n) { return n.textContent; }),
+        bumped: document.querySelectorAll('#flow .wave-hdr.bumped').length,
+        headers: Array.from(document.querySelectorAll('#flow .wave-hdr-label')).filter(function (n) { return !n.closest('.master-preview'); }).map(function (n) { return n.textContent; }),
+        tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+        zones: document.querySelectorAll('.ins-zone').length,
+        tipY: tip ? Math.round(tip.getBoundingClientRect().top) : null,
+        prevY: prev ? Math.round(prev.getBoundingClientRect().top) : null,
+        targetTop: target ? Math.round(target.getBoundingClientRect().top) : null,
+        prevAfterTarget: !!prev && !!target
+          && (target.compareDocumentPosition(prev) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+        sent: (window.__sent || []).length,
+      };
+    })()`);
+    check('survol : le ruban annonce une insertion DERRIERE la vague visee',
+      !!hovered.tag && /insert after this wave/.test(hovered.tag), JSON.stringify(hovered.tag));
+    check('… un seul cadre eclaire la vague visee', hovered.zones === 1, String(hovered.zones));
+    check('survol : l\'apercu annonce les numeros DEFINITIFS (vagues 2 et 3, pas 1 et 2)',
+      hovered.waves.join('|') === 'wave 2 \u2014 queued|wave 3 \u2014 queued', JSON.stringify(hovered.waves));
+    check('… la vague en file est repoussee a 4 et le DIT (classe bumped)',
+      hovered.bumped === 1 && hovered.headers.join('|') === 'wave 1|wave 4 \u2014 queued', JSON.stringify(hovered.headers));
+    // L'apercu se DEPLACE jusqu'a la cible (il occupe la place qu'il annonce),
+    // mais il se pose DERRIERE la vague visee : celle-ci ne se derobe donc pas
+    // sous la souris qui la vise — c'etait le reproche du 2026-08-29.
+    check('… l\'apercu se pose bien APRES la ligne visee, dans le corps du lot',
+      hovered.prevAfterTarget === true, JSON.stringify(hovered));
+    check('… et la vague visee ne bouge PAS d\'un pixel sous la souris',
+      hovered.targetTop === targetTopBefore, JSON.stringify([targetTopBefore, hovered.targetTop]));
+    check('… la fleche de l\'agrafe a quitte la maitresse pour le haut de l\'apercu',
+      hovered.tipY !== null && Math.abs(hovered.tipY - hovered.prevY) < 40, JSON.stringify(hovered));
+    check('… et RIEN n\'a ete envoye : le survol montre, il n\'engage pas', hovered.sent === 0);
 
-    // Annuler : la bannière disparaît, le formulaire est intact, rien envoyé.
-    await cdp.evaluate(`document.querySelectorAll('#batchForm .banner.info .btn')[0].click()`);
-    check('Annuler : bannière de confirmation disparue', await cdp.evaluate(`!document.querySelector('#batchForm .banner.info .btn.pri')`));
-    check('Annuler : les 2 tâches sont toujours dans le formulaire',
-      await cdp.evaluate(`document.querySelectorAll('#batchForm .task').length`) === 2);
-    check('Annuler : toujours aucun message envoyé', await cdp.evaluate(`window.__sent.length`) === 0);
-
-    // Re-déclenche puis CONFIRME : un seul message addTasksToGroup, vagues
-    // RELATIVES (1,2 — le décalage sur la dernière vague du groupe se fait
-    // côté extension, sur son état à jour), champ vidé après transfert.
-    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
-    await cdp.evaluate(`document.querySelectorAll('#batchForm .banner.info .btn')[1].click()`);
-    const afterConfirm = await cdp.evaluate(`window.__sent`);
-    check('Confirmer → un seul addTasksToGroup, groupe cible, 2 tâches, vagues relatives 1 et 2, model/effort de section',
-      Array.isArray(afterConfirm) && afterConfirm.length === 1 && afterConfirm[0].type === 'addTasksToGroup'
-      && afterConfirm[0].id === 'g1' && afterConfirm[0].tasks.length === 2
-      && afterConfirm[0].tasks[0].wave === 1 && afterConfirm[0].tasks[0].model === 'sonnet' && afterConfirm[0].tasks[0].effort === 'medium'
-      && afterConfirm[0].tasks[1].wave === 2 && afterConfirm[0].tasks[1].model === 'opus' && afterConfirm[0].tasks[1].effort === 'high',
-      JSON.stringify(afterConfirm));
-    check('champ vidé après le transfert (retour au formulaire simple, une tâche vierge)',
+    // CLIC sur la ligne : le geste EXACT que l'apercu montrait, sans confirmation.
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`${rowOfWave(1)}.click()`);
+    const afterMultiWave = await cdp.evaluate(`window.__sent`);
+    check('clic sur la vague 1 -> UN addTasksToGroup, mode before, vague 2, vagues relatives et modeles conserves',
+      Array.isArray(afterMultiWave) && afterMultiWave.length === 1 && afterMultiWave[0].type === 'addTasksToGroup'
+      && afterMultiWave[0].id === 'g1' && afterMultiWave[0].wave === 2 && afterMultiWave[0].mode === 'before'
+      && afterMultiWave[0].tasks.length === 2
+      && afterMultiWave[0].tasks[0].wave === 1 && afterMultiWave[0].tasks[0].model === 'sonnet' && afterMultiWave[0].tasks[0].effort === 'medium'
+      && afterMultiWave[0].tasks[1].wave === 2 && afterMultiWave[0].tasks[1].model === 'opus' && afterMultiWave[0].tasks[1].effort === 'high',
+      JSON.stringify(afterMultiWave));
+    check('sortie du depot : la numerotation d\'origine revient',
+      await cdp.evaluate(`document.querySelectorAll('#flow .wave-hdr.bumped').length`) === 0);
+    check('aucune banniere de refus (le message « multi-vagues » n\'existe plus)',
+      await cdp.evaluate(`!document.querySelector('#batchForm .banner:not(.info)')`) === true);
+    check('formulaire vide apres le depot (retour au formulaire simple, une tache vierge)',
       await cdp.evaluate(`document.querySelectorAll('#batchForm .task').length`) === 1
       && await cdp.evaluate(`document.querySelector('.task-top textarea.inp').value`) === '');
 
-    // group:/session: du bloc → mentionnés dans la confirmation (ignorés dans ce mode).
-    const namedBlock = '```claude-convs\ngroup: Nom du bloc\nsession: fake-token\nmodel: sonnet\nstage: 1\nSeule tache\n[---]\nmodel: opus\nstage: 2\nAutre tache\n```';
-    await cdp.evaluate(`(() => {
-      const ta = document.querySelector('.task-top textarea.inp');
-      ta.value = ${JSON.stringify(namedBlock)};
-      ta.dispatchEvent(new Event('change'));
-    })()`);
-    await sleep(50);
+    // NOUVELLE VAGUE EN FIN DE LOT — ce que « + nouvelle vague » faisait, et la
+    // raison pour laquelle ce bouton a pu disparaitre : survoler la DERNIERE
+    // vague pose le bloc derriere elle, donc apres tout le lot.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
+    await sleep(150);
+    await pasteBlock(multiBlock);
+    await hoverWave(2);
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#flow .wave-ghost:not(.wave-add-row)').click()`);
-    const namedConfirmText = await cdp.evaluate(`document.querySelectorAll('#batchForm .banner.info .btn')[1]?.closest('.banner').textContent || ''`);
-    check('group: présent dans le bloc → signalé comme ignoré dans la confirmation',
-      /ignored/i.test(namedConfirmText) && /Nom du bloc/.test(namedConfirmText), namedConfirmText);
-    // Referme proprement (Annuler) pour ne pas polluer la suite du banc.
-    await cdp.evaluate(`document.querySelectorAll('#batchForm .banner.info .btn')[0].click()`);
-    // Annuler ne remet le formulaire QU'à « pas de transfert en attente » — il
-    // garde les 2 tâches du bloc (comportement voulu, testé plus haut). Les
-    // sections suivantes du banc supposent le formulaire simple d'origine :
-    // le Cancel du formulaire (pas celui de la bannière, déjà fermée) le fait.
-    await cdp.evaluate(`Array.from(document.querySelectorAll('#batchForm button')).find((b) => b.textContent === 'Cancel')?.click()`);
+    await cdp.evaluate(`${rowOfWave(2)}.click()`);
+    const afterLastWave = await cdp.evaluate(`window.__sent`);
+    check('clic sur la DERNIERE vague -> le bloc se pose derriere elle (vague 3, mode before)',
+      Array.isArray(afterLastWave) && afterLastWave.length === 1
+      && afterLastWave[0].type === 'addTasksToGroup' && afterLastWave[0].wave === 3
+      && afterLastWave[0].mode === 'before' && afterLastWave[0].tasks.length === 2,
+      JSON.stringify(afterLastWave));
+
+    // Bloc MONO-vague : le geste redevient « rejoindre la vague », y compris la
+    // vague EN COURS — et le depot part DIRECTEMENT. La confirmation qui
+    // existait pour ce cas a ete retiree le 2026-08-29 : elle s'affichait dans
+    // le formulaire, a l'autre bout du panneau, et l'user en concluait que le
+    // bouton ne faisait rien (« ca ne fait absolument rien »). Ce qu'elle
+    // disait est maintenant sur le ruban de la ligne visee.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
+    await sleep(150);
+    await pasteBlock(monoBlock);
+    await hoverWave(1);
+    check('bloc mono-vague sur la vague EN COURS : le ruban dit « starts now »',
+      /starts now/.test(await cdp.evaluate(`(function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : ''; })()`)),
+      await cdp.evaluate(`(function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : ''; })()`));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`${rowOfWave(1)}.click()`);
+    const afterRunningClick = await cdp.evaluate(`window.__sent`);
+    check('… et le clic depose DIRECTEMENT dans la vague en cours (mode into, vague 1), sans confirmation',
+      Array.isArray(afterRunningClick) && afterRunningClick.length === 1
+      && afterRunningClick[0].wave === 1 && afterRunningClick[0].mode === 'into'
+      && afterRunningClick[0].tasks.length === 2, JSON.stringify(afterRunningClick));
+    check('… aucune banniere de confirmation ne subsiste dans le formulaire',
+      await cdp.evaluate(`!Array.from(document.querySelectorAll('#batchForm .banner')).some(function (b) { return /already running/i.test(b.textContent); })`) === true);
+
+    // group:/session: du bloc : signalés APRÈS le dépôt, en bannière d'info —
+    // ils ne sont plus une question à valider, seulement un constat.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
+    await sleep(150);
+    const namedBlock = '```claude-convs\ngroup: Nom du bloc\nsession: fake-token\nmodel: sonnet\nstage: 1\nSeule tache\n[---]\nmodel: opus\nstage: 2\nAutre tache\n```';
+    await pasteBlock(namedBlock);
+    await hoverWave(1);
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`${rowOfWave(1)}.click()`);
+    const namedNote = await cdp.evaluate(`document.querySelector('#batchForm .banner.info')?.textContent || ''`);
+    check('group: présent dans le bloc → signalé comme ignoré, après le dépôt',
+      /ignored/i.test(namedNote) && /Nom du bloc/.test(namedNote), namedNote);
+    check('… et le dépôt a bien eu lieu (pas de question posée)',
+      await cdp.evaluate(`window.__sent.length`) === 1);
+    // Referme la bannière d'info pour ne pas polluer la suite du banc.
+    await cdp.evaluate(`document.querySelector('#batchForm .banner.info .xdel')?.click()`);
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
@@ -1842,24 +1842,12 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… et dès qu\'une seconde vague existe, les en-têtes redeviennent « wave N »',
       !!formHdrs2.texts && formHdrs2.texts.join('|') === 'wave 1|wave 2', JSON.stringify(formHdrs2));
 
-    console.log('\n12b. Lot 12 §1 — le champ « Group name » apparaît/disparaît avec le nombre de tâches');
-    const groupFieldExtended = await cdp.evaluate(`(() => {
-      return { present: !!Array.from(document.querySelectorAll('#batchForm .fld-label')).find(l => l.textContent.indexOf('Group name') !== -1) };
-    })()`);
-    check('mode étendu (3 tâches après les clics précédents) : champ « Group name » affiché',
-      groupFieldExtended.present === true, JSON.stringify(groupFieldExtended));
-    // Retour à une seule tâche (suppression des deux ajoutées ci-dessus) :
-    // retour au mode simple — « une seule tâche crée une conversation simple,
-    // pas de groupe » (lot 2), donc le champ n'a plus lieu d'être affiché.
-    await cdp.evaluate(`(() => {
-      Array.from(document.querySelectorAll('#batchForm .xdel')).slice(1).forEach(b => b.click());
-    })()`);
-    const groupFieldSimple = await cdp.evaluate(`(() => ({
-      present: !!Array.from(document.querySelectorAll('#batchForm .fld-label')).find(l => l.textContent.indexOf('Group name') !== -1),
-      taskCount: document.querySelectorAll('#batchForm .task').length,
-    }))()`);
-    check('retour à une seule tâche : le champ « Group name » disparaît',
-      groupFieldSimple.present === false && groupFieldSimple.taskCount === 1, JSON.stringify(groupFieldSimple));
+    console.log('\n12b. Lot 12 §1 — plus AUCUN champ de nom dans le formulaire (2026-08-30)');
+    // Deux rangees pour un libelle facultatif, dans une barre laterale ou le
+    // pixel vertical est la ressource rare. Un lot se renomme apres coup, et un
+    // bloc colle qui porte « group: » le nomme sans qu'on tape quoi que ce soit.
+    check('aucun champ « Group name », quel que soit le nombre de taches',
+      await cdp.evaluate(`!Array.from(document.querySelectorAll('#batchForm .fld-label')).some(function (l) { return l.textContent.indexOf('Group name') !== -1; })`) === true);
 
     console.log('\n12c. Lot 14 — plus de bouton « inherit » : pré-sélection sur le défaut résolu');
     // Un prompt vide désactive déjà Create pour sa propre raison (rien à
@@ -2232,7 +2220,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       // c'est tout l'intérêt de la mesurer ainsi.
       const content = last ? last.querySelector('.body, .m-body') : null;
       const contentLeft = content ? content.getBoundingClientRect().left : null;
-      const ghostRect = document.querySelector('#flow .wave-ghost:not(.wave-add-row)').getBoundingClientRect();
+      const ghostRect = document.querySelector('#flow .ghost-line').getBoundingClientRect();
       return {
         top: Math.abs(railRect.top - start) < 1,
         hasBar: !!barRect,
@@ -2241,7 +2229,11 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
         foot: barRect ? (railRect.bottom - (barRect.top + barRect.height / 2))
             : lastRect ? (railRect.bottom - lastRect.bottom) : null,
         hookRight: contentLeft === null ? null : (railRect.right - contentLeft),
-        aboveGhost: railRect.bottom <= ghostRect.top + 0.5,
+        // Le repere de fin de corps a une hauteur NULLE depuis le retrait des
+        // lignes-boutons (2026-08-29) : le crochet, pose a HOOK_W/2 sous le bas
+        // de la derniere ligne, le touche donc au pixel. Ce que l'invariant
+        // protege reste le meme : le trait ne descend pas AU-DELA du corps.
+        aboveGhost: railRect.bottom <= ghostRect.top + 2,
         hasBottomBorder: parseFloat(cs.borderBottomWidth) > 0,
         radius: parseFloat(cs.borderBottomLeftRadius),
       };
@@ -2276,40 +2268,16 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('ligne en attente (queued) : anneau présent, même axe',
       !!pendingRing && pendingRing.present && pendingRing.centerDelta < 0.5, JSON.stringify(pendingRing));
 
-    // Séparateurs de vague et lignes fantômes : commencent après l'axe du
-    // rail, ne le croisent pas (décision 2, dernier paragraphe).
-    //
-    // Mesuré en GÉOMÉTRIE depuis le lot B densité (2026-08-09) : la ligne
-    // d'ajout de la dernière vague en file n'est plus un enfant du corps mais
-    // une cellule de la rangée fantôme finale, qui porte l'écart pour elle —
-    // lire sa marge PROPRE interrogerait la mauvaise boîte et jurerait « 0 »
-    // sur une ligne pourtant bien placée. Ce que la règle protège, c'est le
-    // bord gauche RÉEL de chaque bordure pointillée : il reste à droite du
-    // rail, où que la cellule soit rangée.
+    // Séparateur de vague : commence APRÈS l'axe du rail, ne le croise pas
+    // (décision 2, dernier paragraphe). Les deux lignes-boutons qui étaient
+    // mesurées ici ont disparu le 2026-08-29 — ce sont les lignes du lot qui
+    // portent désormais les cibles d'insertion.
     const sepOffset = await cdp.evaluate(`(() => {
       const hdr = document.querySelector('#flow .grp-body .wave-hdr:not(.launch)');
-      const addRow = document.querySelector('#flow .wave-ghost.wave-add-row');
-      const ghostNew = document.querySelector('#flow .wave-ghost:not(.wave-add-row)');
-      const railEl = document.querySelector('#flow .grp-rail');
-      const rail = railEl.getBoundingClientRect();
-      return {
-        hdrPaddingLeft: hdr ? parseFloat(getComputedStyle(hdr).paddingLeft) : null,
-        // Bord droit du TRAIT VERTICAL, pas de la boîte : depuis le crochet de
-        // fin de lot (2026-08-17) la boîte s'étend jusqu'à la barre de
-        // contexte, mais son encre à cette hauteur-là se limite au border-left.
-        // Ce que ces contrôles protègent est inchangé : aucune bordure
-        // pointillée ne croise le trait que l'œil suit.
-        railRight: rail.left + parseFloat(getComputedStyle(railEl).borderLeftWidth),
-        addRowLeft: addRow ? addRow.getBoundingClientRect().left : null,
-        ghostNewLeft: ghostNew ? ghostNew.getBoundingClientRect().left : null,
-      };
+      return { hdrPaddingLeft: hdr ? parseFloat(getComputedStyle(hdr).paddingLeft) : null };
     })()`);
-    check('séparateur de vague inerte : padding-left après l\'axe du rail (14px + marge)',
+    check('s\u00e9parateur de vague inerte : padding-left apr\u00e8s l\'axe du rail (14px + marge)',
       sepOffset.hdrPaddingLeft !== null && sepOffset.hdrPaddingLeft >= 20, JSON.stringify(sepOffset));
-    check('ligne d\'ajout en file : bord gauche à droite du rail (sa bordure pointillée ne le croise pas)',
-      sepOffset.addRowLeft !== null && sepOffset.addRowLeft >= sepOffset.railRight - 0.5, JSON.stringify(sepOffset));
-    check('« + nouvelle vague » : même écart au rail, cellule voisine sur la même rangée',
-      sepOffset.ghostNewLeft !== null && sepOffset.ghostNewLeft >= sepOffset.railRight - 0.5, JSON.stringify(sepOffset));
 
     console.log('\n13ter. Repli = les CONVERSATIONS du groupe disparaissent, la ligne master ne bouge PAS d\'un pixel (2026-08-07)');
     // Signalement user : replier « changeait l'apparence de la master » (elle
@@ -2462,28 +2430,16 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       ta.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await sleep(50);
-    const pasted = await cdp.evaluate(`(() => {
-      const banner = document.querySelector('#batchForm .banner.info');
-      return {
-        bannerText: banner ? banner.textContent : null,
-        hasDismiss: banner ? !!banner.querySelector('.xdel') : null,
-      };
-    })()`);
-    check('bloc reconnu : bannière « N tâche(s) pré-remplie(s) » avec × de fermeture',
-      !!pasted.bannerText && pasted.bannerText.indexOf('prefilled') !== -1 && pasted.hasDismiss === true, JSON.stringify(pasted));
-    await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#batchForm .banner.info .xdel').click()`);
-    await sleep(50);
-    const afterBannerDismiss = await cdp.evaluate(`(() => ({
-      bannerGone: !document.querySelector('#batchForm .banner.info'),
+    const pasted = await cdp.evaluate(`(() => ({
+      banner: !!document.querySelector('#batchForm .banner.info'),
       taskPrompt: (document.querySelector('#batchForm .task textarea') || {}).value,
-      sent: window.__sent,
     }))()`);
-    check('× ferme la bannière — état ÉPHÉMÈRE local, aucun message posté vers l\'extension',
-      afterBannerDismiss.bannerGone === true && Array.isArray(afterBannerDismiss.sent) && afterBannerDismiss.sent.length === 0,
-      JSON.stringify(afterBannerDismiss));
-    check('… la tâche pré-remplie par le collage reste intacte (le dismiss ne touche que la bannière)',
-      afterBannerDismiss.taskPrompt === 'Faire le lot 3', afterBannerDismiss.taskPrompt);
+    // Plus de banniere de SUCCES (2026-08-30) : elle disait « N taches
+    // pre-remplies » juste au-dessus des N taches pre-remplies. Ce qui doit
+    // rester vrai, c'est le PRE-REMPLISSAGE lui-meme.
+    check('bloc reconnu : aucune banniere de succes, mais la tache EST pre-remplie',
+      pasted.banner === false && pasted.taskPrompt === 'Faire le lot 3',
+      JSON.stringify(pasted));
 
     // Bloc reconnu mais INVALIDE (modèle inconnu) : bannière d'erreur, même ×.
     await cdp.evaluate(`(() => {
@@ -2544,7 +2500,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(250);
     const healed = await cdp.evaluate(`(() => {
       const rail = document.querySelector('#flow .grp-rail');
-      const ghost = document.querySelector('#flow .wave-ghost:not(.wave-add-row)');
+      const ghost = document.querySelector('#flow .ghost-line');
       // Le rail ne part plus du haut du corps mais du bas de la capsule (étape
       // 19) : sa hauteur attendue est l'écart entre les DEUX bouts mesurés,
       // jamais le seul offsetTop de la ligne fantôme.
@@ -2554,7 +2510,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       return {
         railHeight: rail.getBoundingClientRect().height,
         ghostTop: ghost.offsetTop, railTop: rail.offsetTop,
-        aboveGhost: rail.offsetTop + rail.getBoundingClientRect().height <= ghost.offsetTop + 0.5,
+        aboveGhost: rail.offsetTop + rail.getBoundingClientRect().height <= ghost.offsetTop + 2,
       };
     })()`);
     check('… le ResizeObserver corrige tout seul la hauteur corrompue, SANS nouveau postMessage',

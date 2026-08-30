@@ -221,36 +221,72 @@ function editorSessionInfo(editor) {
 // Aucune exception ne doit remonter : un noeud/éditeur malformé (schéma qui
 // bouge, une extension tierce dont le JSON diffère) est simplement ignoré.
 function analyzeEditorState(parsed) {
-  const out = { ids: new Set(), active: null };
+  const out = { ids: new Set(), active: null, locations: new Map() };
   const state = parsed && parsed['editorpart.state'];
   const root = state && state.serializedGrid && state.serializedGrid.root;
   if (!root) return out;
   const activeGroupId = state.activeGroup;
-  const stack = [root];
-  while (stack.length) {
-    const node = stack.pop();
-    if (!node) continue;
+  // Parcours ORDONNÉ (gauche → droite), pas la pile LIFO d'avant : `locations`
+  // a besoin du rang du groupe pour le traduire en `viewColumn` (1-based, ordre
+  // d'affichage). Les deux autres sorties se moquent de l'ordre — elles ne
+  // changent pas de valeur pour autant.
+  const leaves = [];
+  (function walk(node) {
+    if (!node) return;
     if (node.type === 'branch' && Array.isArray(node.data)) {
-      for (const child of node.data) stack.push(child);
-      continue;
+      for (const child of node.data) walk(child);
+      return;
     }
-    if (node.type !== 'leaf' || !node.data || !Array.isArray(node.data.editors)) continue;
-    for (const editor of node.data.editors) {
-      const info = editorSessionInfo(editor);
-      if (info.sessionId) out.ids.add(info.sessionId);
-    }
-    if (activeGroupId != null && node.data.id === activeGroupId
-        && Array.isArray(node.data.mru) && node.data.mru.length) {
-      const activeEditor = node.data.editors[node.data.mru[0]];
-      if (activeEditor) out.active = editorSessionInfo(activeEditor);
-    }
-  }
-  return out;
-}
+    if (node.type === 'leaf' && node.data && Array.isArray(node.data.editors)) leaves.push(node.data);
+  })(root);
 
-// Compatibilité : l'ensemble seul, pour createOpenSessionIds ci-dessous.
-function sessionIdsFromEditorState(parsed) {
-  return analyzeEditorState(parsed).ids;
+  // Rang de l'onglet parmi TOUS les onglets Claude de la fenêtre, groupes
+  // enchaînés dans l'ordre : c'est l'index que publie tabs.js (`localActiveIndex`
+  // / `claudeTabLabels`), et donc celui que state.js apparie. Distinct de
+  // `index`, qui compte TOUS les éditeurs du groupe (fichiers compris) parce que
+  // c'est ce qu'attend `openEditorAtIndex`. Confondre les deux fait viser un
+  // onglet pour un autre dès qu'un fichier est ouvert à côté d'une conversation.
+  let flat = 0;
+  leaves.forEach((leaf, leafRank) => {
+    // Nombre d'onglets Claude de ce groupe : sert de somme de contrôle au
+    // consommateur (focus.js) — un memento en retard se trahit d'abord par un
+    // compte qui ne correspond plus à ce que l'API montre.
+    let claudeCount = 0;
+    leaf.editors.forEach((editor, index) => {
+      const info = editorSessionInfo(editor);
+      if (!info.claude) return;
+      const flatIndex = flat++;
+      claudeCount++;
+      if (!info.sessionId) return;
+      out.ids.add(info.sessionId);
+      // POSITION EXACTE de l'onglet portant cette session. C'est elle qui
+      // permet un focus par identité SANS jamais appeler une commande capable
+      // d'OUVRIR (mesuré le 2026-08-29 : `claude-vscode.editor.open` recrée un
+      // panneau quand le webview restauré n'a pas encore été réaffiché depuis
+      // un reload — VS Code ne le désérialise qu'à la première visite).
+      // `viewColumn` 1-based, comme vscode.window.tabGroups.
+      out.locations.set(info.sessionId, { viewColumn: leafRank + 1, index, flatIndex });
+    });
+    for (const sid of out.locations.keys()) {
+      const loc = out.locations.get(sid);
+      if (loc && loc.viewColumn === leafRank + 1) loc.claudeCount = claudeCount;
+    }
+    if (activeGroupId != null && leaf.id === activeGroupId
+        && Array.isArray(leaf.mru) && leaf.mru.length) {
+      const activeEditor = leaf.editors[leaf.mru[0]];
+      if (activeEditor) {
+        out.active = editorSessionInfo(activeEditor);
+        // Rang de l'ACTIF parmi les onglets Claude, dans le même comptage que
+        // `flatIndex` : c'est la somme de contrôle qui dit si cette photo décrit
+        // encore le monde d'aujourd'hui (cf. tab-positions.js).
+        if (out.active && out.active.sessionId) {
+          const loc = out.locations.get(out.active.sessionId);
+          out.activeFlatIndex = loc ? loc.flatIndex : null;
+        }
+      }
+    }
+  });
+  return out;
 }
 
 // createOpenSessionIds(path) → { get(): Set<sessionId> } — les sessions dont
@@ -270,30 +306,49 @@ function createOpenSessionIds(stateDbPath, options = {}) {
   const minStatIntervalMs = options.minStatIntervalMs != null
     ? options.minStatIntervalMs : MIN_STAT_INTERVAL_MS;
   let ids = new Set();
+  let locations = { byId: new Map(), activeFlatIndex: null };
   let key = null;
   let lastStatAt = 0;
   let warned = false;
 
+  function refresh() {
+    if (!stateDbPath) return;
+    const now = Date.now();
+    if (lastStatAt && now - lastStatAt < minStatIntervalMs) return;
+    lastStatAt = now;
+    let stat;
+    try { stat = fs.statSync(stateDbPath); } catch { return; }
+    const k = `${stat.mtimeMs}:${stat.size}`;
+    if (k === key) return;
+    const res = readVscdbKey(stateDbPath, EDITOR_STATE_KEY);
+    if (!res.ok) {
+      if (res.error && !warned) { warned = true; log('open-session ids read failed: %s', res.error.message); }
+      return;   // lecture ratée → on garde le dernier ensemble connu
+    }
+    key = k;
+    warned = false;
+    const analyzed = analyzeEditorState(res.value);
+    ids = analyzed.ids;
+    locations = {
+      byId: analyzed.locations,
+      activeFlatIndex: analyzed.activeFlatIndex != null ? analyzed.activeFlatIndex : null,
+    };
+  }
+
   return {
-    get() {
-      if (!stateDbPath) return ids;
-      const now = Date.now();
-      if (lastStatAt && now - lastStatAt < minStatIntervalMs) return ids;
-      lastStatAt = now;
-      let stat;
-      try { stat = fs.statSync(stateDbPath); } catch { return ids; }
-      const k = `${stat.mtimeMs}:${stat.size}`;
-      if (k === key) return ids;
-      const res = readVscdbKey(stateDbPath, EDITOR_STATE_KEY);
-      if (!res.ok) {
-        if (res.error && !warned) { warned = true; log('open-session ids read failed: %s', res.error.message); }
-        return ids;   // lecture ratée → on garde le dernier ensemble connu
-      }
-      key = k;
-      warned = false;
-      ids = sessionIdsFromEditorState(res.value);
-      return ids;
-    },
+    get() { refresh(); return ids; },
+    // La PHOTO des positions : { byId: Map<sessionId, {viewColumn,index,flatIndex}>,
+    // activeFlatIndex }. Même lecture, même cadence — c'est le même memento, il
+    // serait absurde de le rouvrir pour la question voisine. Elle n'est jamais
+    // consommée telle quelle : `tab-positions.js` la valide d'abord contre
+    // l'état frais, en bloc.
+    locations() { refresh(); return locations; },
+    // Un clic est rare et doit viser juste : on force alors une relecture, au
+    // lieu de servir une photo qui peut avoir jusqu'à MIN_STAT_INTERVAL_MS de
+    // retard alors que le fichier a déjà été flushé. Sans ça, le cache de
+    // cadence — utile pour les dizaines de lectures par seconde du moteur —
+    // devenait lui-même une source de positions périmées.
+    freshLocations() { lastStatAt = 0; refresh(); return locations; },
   };
 }
 

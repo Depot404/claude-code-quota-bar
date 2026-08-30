@@ -1003,6 +1003,73 @@ console.log('\n13. buildSnapshot : identité câblée de bout en bout, plus de c
     emptySnap.conversations.length === 2, JSON.stringify(emptySnap.conversations.map((c) => c.title)));
 }
 
+console.log('\n14. Fenêtre en cours de remontage : c\'est le RENDERER qui tranche (2026-08-28)');
+{
+  // Au reload, le store des titres survit intact — il ne purge jamais — alors
+  // que les libellés d'onglets sont republiés par des CLI tout juste
+  // respawnés. « Identité publiée + aucun onglet à son nom » devient donc vrai
+  // pour TOUT LE MONDE pendant quelques dizaines de secondes : une ligne se
+  // barre, une autre disparaît (constat user au reload de la 2.86.0).
+  //
+  // Suspendre le jugement pendant ce creux a été essayé (2.86.1) et c'était
+  // PIRE : plus rien ne disparaissant, tout l'historique récent remontait en
+  // fantômes (10 lignes pour 4 onglets, capture user). Ce banc tient les deux
+  // bouts : l'ouverte reste, la fermée part — et sans le renderer, on ne
+  // touche à rien.
+  const wsG = 'C:\\Users\\Test\\Projets VSCODE\\Grace';
+  const dirG = state.projectDirFor(wsG);
+  fs.mkdirSync(dirG, { recursive: true });
+  fs.writeFileSync(path.join(dirG, 'g1.jsonl'),
+    [userMsg('sujet ouvert'), assistant, { type: 'ai-title', aiTitle: 'Conv bien ouverte' }]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  fs.writeFileSync(path.join(dirG, 'g2.jsonl'),
+    [userMsg('sujet ferme'), assistant, { type: 'ai-title', aiTitle: 'Conv fermee hier' }]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const buildG = (extra) => state.buildSnapshot({
+    workspacePath: wsG, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    // Onglets connus, mais AUCUN libellé encore republié : l'état exact du
+    // creux qui suit un rechargement de fenêtre.
+    tabs: () => ({ known: true, labels: [] }),
+    liveSessions: () => new Set(),
+    // Le store, lui, publie les deux identités — c'est ce qui rendait la
+    // fermeture « prouvée » alors qu'une des deux était bien ouverte.
+    sessionTitles: () => new Map([['g1', 'Conv bien ouverte'], ['g2', 'Conv fermee hier']]),
+    ...extra,
+  }, state.createTranscriptReader());
+  const titlesOf = (snap) => snap.conversations.map((c) => c.title).sort();
+
+  const noGrace = titlesOf(buildG({}));
+  check('sans activatedAt (bancs d\'avant ce lot) : comportement d\'avant, les deux sont déclarées fermées',
+    noGrace.length === 0, JSON.stringify(noGrace));
+
+  // Le cœur : le renderer (memento workbench.parts.editor) a survécu au
+  // reload et désigne g1. Relevé en réel le 2026-08-28 sur la fenêtre en
+  // cause : 4 sessions déclarées, exactement les 4 onglets ouverts.
+  const settling = titlesOf(buildG({
+    activatedAt: Date.now(),
+    openSessionIds: () => new Set(['g1']),
+  }));
+  check('remontage + renderer : l\'ouverte RESTE…',
+    settling.includes('Conv bien ouverte'), JSON.stringify(settling));
+  check('… et la fermée ne revient PAS en fantôme (la régression de 2.86.1)',
+    !settling.includes('Conv fermee hier') && settling.length === 1, JSON.stringify(settling));
+
+  // Sans renderer, personne ne peut trancher : on ne touche à rien plutôt que
+  // de fabriquer des fantômes.
+  const blind = titlesOf(buildG({ activatedAt: Date.now(), openSessionIds: () => new Set() }));
+  check('remontage SANS renderer (base illisible) : comportement d\'avant, aucune grâce',
+    JSON.stringify(blind) === JSON.stringify(noGrace), JSON.stringify(blind));
+
+  // Grâce écoulée : les libellés sont revenus depuis longtemps, la preuve
+  // ordinaire reprend tout son rôle.
+  const settled = titlesOf(buildG({
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(['g1']),
+  }));
+  check('grâce écoulée : on revient au jugement ordinaire (par les libellés)',
+    JSON.stringify(settled) === JSON.stringify(noGrace), JSON.stringify(settled));
+}
+
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

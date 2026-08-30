@@ -690,26 +690,56 @@ function renderHtml(webview) {
     color: var(--vscode-editor-background, #1f1f1f); background: var(--master-cue-hue);
   }
 
-  /* ── APERÇU DES FUTURES CONVERSATIONS, à leur place définitive (P2) ───────
+  /* ── APERÇU DES FUTURES CONVERSATIONS, à leur place définitive (P2) ───
      AUCUN rendu neuf : ce sont les classes que le panneau donne déjà à une
-     tâche pas encore lancée (.m-pending / .m-prompt / .m-intent). Seuls
-     l'atténuation et le liseré en pointillés disent « ça n'existe pas
-     encore ». Le décalage de 14px est celui d'une gouttière d'anneau, comme
-     partout ailleurs dans ce panneau. */
-  .master-preview {
-    position: relative; opacity: .62;
-    margin: 1px 0 4px 14px; padding-left: 6px;
-    border-left: 2px dashed color-mix(in srgb, var(--master-cue-hue) 70%, transparent);
+     tâche pas encore lancée (.m-pending / .m-prompt / .m-intent). Seule
+     l'atténuation dit « ça n'existe pas encore ».
+     PAS DE DÉCALAGE À DROITE (2026-08-29) : le retrait de 14px et le liséré en
+     pointillés se lisaient comme une SOUS-arborescence, alors que ces
+     conversations naissent sœurs des autres, sur le même axe (constat user :
+     « on a l'impression qu'on crée une sous-arborescence »). L'aperçu montre
+     donc exactement la géométrie que le lot aura. */
+  .master-preview { position: relative; margin: 1px 0 4px; padding: 0; }
+  /* L'atténuation porte sur les LIGNES, pas sur la boîte : le segment de rail
+     ci-dessous doit rester opaque pour masquer le trait coloré du lot.
+     Elle RESPIRE, lentement (2026-08-29) : c'est le seul signe qui dise « ceci
+     n'existe pas encore » une fois que tout le reste — géométrie, séparateurs,
+     anneaux, rail — est devenu identique au résultat final. Lentement, et
+     jamais jusqu'à l'effacement : c'est un état, pas une alerte. */
+  .master-preview > *:not(.mp-rail) { opacity: .62; animation: mp-breathe 3.4s ease-in-out infinite; }
+  @keyframes mp-breathe { 0%, 100% { opacity: .46; } 50% { opacity: .74; } }
+  /* Le rail du lot TRAVERSE l'aperçu. Sur cette hauteur on remplace son encre
+     par la même en pointillés et délavée — « le lot continue ici, mais ce
+     n'est pas encore vrai » — puis il repart coloré sous l'aperçu s'il reste
+     des conversations. Même axe (13px) et même épaisseur que .grp-rail : un
+     seul repère, sinon les deux traits se décaleraient d'un pixel.
+     Un ÉLÉMENT et non un ::before : placé en PREMIER enfant, il reste sous les
+     lignes à z-index égal (l'anneau d'une ligne le troue comme il troue le
+     rail réel), là où un ::after aurait peint par-dessus les glyphes. */
+  .mp-rail {
+    position: absolute; z-index: 2; left: 13px; top: 0; bottom: 0;
+    width: var(--hook-w); box-sizing: border-box; pointer-events: none;
+    border-left: var(--hook-w) dashed
+      color-mix(in srgb, var(--grp-hue, var(--muted)) 45%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+    /* Bande OPAQUE, large du seul trait : elle efface l'encre du rail réel sur
+       la hauteur de l'aperçu, et les tirets se posent dessus. Cadrée sur la
+       border-box, sinon elle ne couvrirait pas la bordure elle-même. */
+    background: linear-gradient(var(--vscode-sideBar-background, var(--vscode-editor-background)),
+                                var(--vscode-sideBar-background, var(--vscode-editor-background)))
+                no-repeat border-box left top;
+    background-size: var(--hook-w) 100%;
   }
-  .master-preview-wave {
-    font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--muted); opacity: .8; margin: 3px 0 1px 6px;
+  /* L'APERÇU FERME LE LOT : c'est à lui de porter le CROCHET de fin, en
+     pointillés. Sans ça le coude restait accroché à la dernière conversation
+     réelle, au-dessus de l'aperçu — donc l'aperçu annonçait une forme que le
+     lot n'aurait jamais (constat user 2026-08-29 : « un aperçu 100 % identique
+     à ce que ça donnera, en tout point »). Le trait réel, lui, redevient
+     vertical le temps du survol : c'est measureRail qui pose les deux. */
+  .mp-rail.hooked {
+    border-bottom: var(--hook-w) dashed
+      color-mix(in srgb, var(--grp-hue, var(--muted)) 45%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+    border-bottom-left-radius: var(--hook-radius);
   }
-  /* L'aperçu peut se poser SOUS une maîtresse qui vit dans un lot : ses lignes
-     hériteraient alors de l'anneau et du disque des membres de CE lot, dont
-     elles ne font pas partie. On les coupe — l'aperçu doit avoir la même tête
-     que la maîtresse soit dans un lot ou non. */
-  .master-preview .ico-pending::after { display: none; }
 
   /* ── Échec de la recherche : le formulaire le DIT ─────────────────────────
      « 0 candidate » et « 2 candidates » sont fréquents (bloc écrit à la main,
@@ -1061,6 +1091,51 @@ function renderHtml(webview) {
   .wave-hdr-label {
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* CIBLE SURVOLÉE — UN SEUL CADRE, jamais un par nœud (2026-08-29).
+     La vague visée, c'est son en-tête ET ses lignes : deux fonds séparés se
+     lisaient comme deux sélections distinctes (constat user). Un rectangle
+     unique posé en coordonnées de DOCUMENT les englobe — il ne prend aucune
+     place, donc rien ne bouge, et les gouttières entre les nœuds sont dedans
+     au lieu de couper le fond en deux.
+     .ins-hot ne peint plus rien : la classe ne sert qu'à désigner les nœuds
+     dont on prend l'emprise. */
+  .ins-zone {
+    position: absolute; z-index: 40; pointer-events: none; border-radius: 5px;
+    --ins-hue: var(--vscode-charts-yellow, #cca700);
+    animation: ins-breathe 1.4s ease-in-out infinite;
+  }
+  /* La pulsation anime background-color et NON une custom property : une
+     propriété personnalisée non enregistrée ne s'interpole pas, elle bascule
+     d'un coup à 50 % — c'était un clignotement, pas une respiration. */
+  @keyframes ins-breathe {
+    0%, 100% { background-color: color-mix(in srgb, var(--ins-hue) 10%, transparent); }
+    50%      { background-color: color-mix(in srgb, var(--ins-hue) 28%, transparent); }
+  }
+  /* CIBLE REFUSEE : pas de .ins-zone du tout (setInsertHover ne l'appelle
+     plus). La ligne garde sa couleur de survol NATIVE (.conv:hover, celle de
+     n'importe quelle ligne) au lieu d'un second calque de couleur composé
+     par-dessus — fusion demandée par l'user, 2026-08-30 : un seul mécanisme de
+     surlignage, la couleur change seulement en mode insertion éligible. */
+
+  /* Le ruban : posé en coordonnées de DOCUMENT comme l'agrafe (il ne pousse
+     donc rien et ne peut pas déformer la ligne qu'il annote), à droite de la
+     ligne visée. Cliquable dans la variante où seul le ruban agit. */
+  .ins-tag {
+    position: absolute; z-index: 60; pointer-events: none;
+    font-size: 10px; line-height: 16px; height: 16px; padding: 0 6px; border-radius: 3px;
+    white-space: nowrap; font-weight: 600;
+    color: var(--vscode-editor-background, #1f1f1f); background: var(--master-cue-hue);
+    box-shadow: 0 1px 3px rgba(0,0,0,.35);
+  }
+  /* Cible refusée (la vague en cours ne se laisse pas dépasser) : le ruban le
+     DIT, il ne disparaît pas — une cible muette se lit comme une panne. */
+  .ins-tag.no { background: var(--vscode-editorWarning-foreground, #cca700); opacity: .85; }
+
+  /* REPOUSSÉE par l'insertion qu'on survole (2026-08-29) : son numéro vient de
+     changer sous les yeux, et un numéro qui change sans rien dire se lit comme
+     une erreur d'affichage. Même orange que l'agrafe et l'aperçu — c'est le
+     même geste qui les allume tous les trois, il n'a qu'une couleur. */
+  .wave-hdr.bumped > .wave-hdr-label { color: var(--master-cue-hue); font-weight: 600; }
   /* Séparateur devenu bouton de lancement (lot 4 §2) : la prochaine vague à
      ouvrir remplace le bouton ▶ du bas — plus de ligne dédiée, la même
      sémantique (dim = auto, franc/bleu = attend l'humain) que l'ancien
@@ -1160,50 +1235,10 @@ function renderHtml(webview) {
     transform: translate(14px, -50%); background: var(--vscode-button-background);
   }
   .tg:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; border-radius: 3px; }
-  /* Ligne fantôme « + nouvelle vague » : toujours présente en fin de groupe. */
-  .wave-ghost {
-    display: flex; align-items: center; justify-content: center;
-    margin: var(--sp-sep) 0 var(--sp-tight); padding: var(--sp-tight) 4px; border-radius: 3px; cursor: pointer;
-    font-size: 10px; letter-spacing: .06em; color: var(--muted);
-    border-top: 1px dashed var(--vscode-panel-border, rgba(128,128,128,.35));
-    overflow: hidden; white-space: nowrap;
-  }
-  .wave-ghost:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
-  /* ARMÉE : un prompt est tapé, ces lignes sont les endroits où il peut tomber
-     (2026-08-27). Elles existaient déjà — c'est leur DISCRÉTION qui coûtait
-     quatre gestes : ne s'allumant qu'au survol, elles se découvraient par
-     hasard, et « + new wave » finissait par servir de porte unique, la tâche
-     tombant en dernière vague avant d'être remontée à la main. Elles prennent
-     donc la couleur d'action du thème dès qu'il y a quelque chose à déposer,
-     avec le halo des contrôles primaires : le trait pointillé devient plein,
-     la cible se lit d'un coup d'œil au lieu de se chercher. Rien d'autre ne
-     change — mêmes nœuds, mêmes clics, mêmes garde-fous. Le survol reste, en
-     plus appuyé, pour dire laquelle des deux on vise. */
-  .wave-ghost.armed {
-    color: var(--vscode-button-foreground); background: var(--vscode-button-background);
-    border-top: 1px solid var(--vscode-button-background);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder) 45%, transparent);
-  }
-  .wave-ghost.armed:hover {
-    color: var(--vscode-button-foreground);
-    background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
-  }
-  /* Ligne fantôme FINALE : UNE ligne, DEUX cibles (lot B densité, 2026-08-09).
-     Un groupe se terminait par deux lignes pleine largeur empilées — « + add to
-     this wave » (la dernière vague en file) puis « + new wave » — soit ~52 px
-     de hauteur pour deux actions voisines, dans une sidebar où le pixel
-     vertical est la ressource rare. Elles partagent maintenant la même rangée,
-     chacune sur sa moitié : deux boîtes distinctes, deux bordures pointillées
-     séparées par le gap, deux survols indépendants — donc deux cibles qu'on ne
-     confond pas, alors qu'un seul bouton à deux zones se serait payé en clics
-     ratés. Ce sont les MÊMES nœuds qu'avant (mêmes classes, mêmes écouteurs,
-     mêmes garde-fous) : seule leur boîte parente change, aucune règle métier
-     ne se rejoue ici. La cellule d'ajout n'est présente QUE lorsque la
-     dernière vague est en file ; sinon elle n'existe pas dans le DOM (jamais
-     masquée par un style — un enfant de flux coûte sa place même invisible),
-     et « + new wave » occupe seule toute la ligne, exactement comme avant. */
-  .ghost-line { display: flex; align-items: stretch; gap: 6px; margin: var(--sp-sep) 0 var(--sp-tight); }
-  .ghost-line > .wave-ghost { flex: 1 1 0; min-width: 0; margin: 0; }
+  /* Ligne fantôme FINALE — depuis 2026-08-29 elle ne porte plus AUCUN bouton
+     (les lignes du lot sont les cibles) : il n'en reste qu'un repère de fin de
+     corps, de hauteur nulle, devant lequel l'aperçu vient se poser. */
+  .ghost-line { height: 0; margin: 0; }
   .task {
     margin-bottom: var(--sp-sep); padding: 5px; border-radius: 4px;
     border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
@@ -1567,6 +1602,10 @@ function renderHtml(webview) {
             mask: linear-gradient(to right, #000 0, #000 calc(100% - var(--hook-fade)), transparent 100%);
     pointer-events: none;
   }
+  /* CROCHET CÉDÉ À L'APERÇU : quand les futures conversations ferment le lot,
+     c'est leur segment de rail qui porte le coude — le trait réel descend
+     alors tout droit jusqu'à elles, et le retrouve dès que l'aperçu repart. */
+  .grp-rail.no-hook { border-bottom: none; border-bottom-left-radius: 0; }
   /* Anneau troué autour du symbole d'état d'une ligne DE GROUPE (membre lié
      OU ligne « en attente » avec son symbole queued) : cercle bordé teinte du
      groupe, fond OPAQUE = fond du panneau (c'est lui qui troue le rail), le
@@ -1720,13 +1759,11 @@ function renderHtml(webview) {
      BOÎTE bordée qui doit s'écarter, pas son contenu). */
   .grp-body .wave-hdr:not(.launch), .grp-body .wave-ctrl { padding-left: 20px; }
   .grp-body .wave-hdr.launch { margin-left: 20px; }
-  .grp-body .wave-ghost { margin-left: 20px; }
   /* La ligne fantôme finale porte l'écart pour ses DEUX cellules : c'est elle
      la boîte qui longe le rail, elles ne s'en écartent pas une seconde fois
      (sélecteur à trois classes = il prime sur la règle ci-dessus, quel que
      soit l'ordre des déclarations). */
   .grp-body .ghost-line { margin-left: 20px; }
-  .grp-body .ghost-line > .wave-ghost { margin-left: 0; }
   /* Moteur de vagues (lot 4) : en-tête de vague identique à celui du formulaire,
      toggle auto/manuel dans l'en-tête de groupe, contrôle de vague suivante en
      bas de la vague courante. */
@@ -2660,6 +2697,227 @@ function renderHtml(webview) {
 
   let mcueHost = null;
   let masterPreviewEl = null;
+  // CIBLE D'INSERTION SURVOLÉE (2026-08-29) — { gid, wave, mode }.
+  // Le décor du collage (aperçu des futures conversations + agrafe) existait
+  // déjà, mais il montrait TOUJOURS la même chose : les tâches sous la
+  // maîtresse. On ne pouvait donc pas savoir, avant de cliquer, ce qu'un
+  // bouton d'insertion allait faire — et le résultat surprenait (constat user
+  // du 2026-08-29 : « ça me fait un rendu archaïque… elles se sont réparties
+  // entre les vagues »). Survoler un bouton déplace maintenant ce même décor à
+  // l'endroit visé : mêmes nœuds, même vocabulaire, juste une autre place.
+  // C'est un état d'AFFICHAGE : aucun message n'est envoyé, seul le clic agit.
+  let insertHover = null;
+  // Nombre de vagues du bloc en préparation. Il décide du geste que portent
+  // les boutons (rejoindre une vague / insérer devant), donc du libellé, du
+  // mode envoyé et de l'aperçu — une seule source pour les quatre.
+  function blockWaveCount() {
+    const tasks = activeTasks();
+    if (!tasks.length) return 0;
+    return new Set(tasks.map(function (tk) { return tk.wave; })).size;
+  }
+  // Pose ou retire la cible survolée. La ligne survolée ne doit PAS se dérober
+  // sous le curseur : l'aperçu qui se pose au-dessus d'elle la pousserait vers
+  // le bas, la souris en sortirait, l'aperçu disparaîtrait, la ligne
+  // remonterait — un clignotement sans fin. Le bloc se posant APRES la vague
+  // éclairée, elle ne bouge pas ; et si le défilement change quand même, on lui
+  // rend ce que la mise en page vient de prendre.
+  function setInsertHover(h, anchorEl) {
+    // « Meme cible » se juge sur ce qu'elle DIT et FAIT, pas seulement sur ou
+    // elle pointe : entre deux survols, le lot a pu avancer d'une vague et la
+    // meme ligne passer d'acceptee a refusee. Comparer les seuls (lot, vague,
+    // geste) laissait alors le ruban d'avant a l'ecran, qui promettait un depot
+    // que le moteur refuse desormais (mesure du banc, 2026-08-30).
+    const same = (!h && !insertHover)
+      || (h && insertHover && h.gid === insertHover.gid && h.wave === insertHover.wave
+        && h.mode === insertHover.mode && h.refused === insertHover.refused
+        && h.label === insertHover.label);
+    if (same) return;
+    // Sortie d'une ligne alors qu'une AUTRE est déjà survolée (les lignes se
+    // touchent) : c'est l'entrée qui fait foi, pas la sortie.
+    if (!h && insertHover && anchorEl && anchorEl._wave !== insertHover.wave) return;
+    const gid = (h && h.gid) || (insertHover && insertHover.gid);
+    const before = anchorEl ? anchorEl.getBoundingClientRect().top : null;
+    const prevRow = insertHover && insertHover.rowEl;
+    insertHover = h;
+    clearHotWave();
+    hideInsTag();
+    repaintWaveHeaders(gid);
+    renderMasterCue();
+    // La ligne visée s'allume et porte son ruban APRÈS le rendu du décor :
+    // l'aperçu vient de se poser, donc la géométrie n'est stable que maintenant.
+    if (h && h.rowEl) {
+      const nodes = hotWaveNodes(h.gid, h.hotWave != null ? h.hotWave : h.wave);
+      (nodes.length ? nodes : [h.rowEl]).forEach(function (n) { n.classList.add('ins-hot'); hotNodes.push(n); });
+      // Cible REFUSEE : pas de cadre. La ligne survolée porte déjà, nativement,
+      // la même couleur de sélection que n'importe quelle ligne (.conv:hover) —
+      // en superposer une seconde ne ferait qu'empiler deux filtres de couleur
+      // sur le même pixel. Seul le ruban distingue ce cas : il dit que
+      // l'insertion n'aura pas lieu ici (arbitrage user, 2026-08-30).
+      if (!h.refused) showInsZone(hotNodes);
+      showInsTag(h.rowEl, h.label || '', !!h.refused);
+    }
+    // Le champ de saisie s'allume tant qu'une cible est visée : c'est LUI dont
+    // le contenu va tomber là, et il vit en bas de l'écran.
+    highlightPromptField(!!h);
+    if (before != null && anchorEl.isConnected) {
+      const after = anchorEl.getBoundingClientRect().top;
+      if (after !== before && document.scrollingElement) document.scrollingElement.scrollTop += (after - before);
+    }
+  }
+  // De combien le NUMÉRO affiché d'une vague est repoussé par l'insertion en
+  // cours de survol. Zéro partout dès qu'aucune ligne n'est survolée.
+  function waveShift(gid, w) {
+    // Une cible REFUSEE ne repousse rien : renumeroter les vagues pour une
+    // insertion qui n'aura pas lieu annoncait un resultat imaginaire (constat
+    // sur maquette, 2026-08-30).
+    if (!insertHover || insertHover.refused) return 0;
+    if (insertHover.mode !== 'before' || insertHover.gid !== gid) return 0;
+    return w >= insertHover.wave ? blockWaveCount() : 0;
+  }
+  // Un en-tête de vague porte son numéro À DEUX MOMENTS : au rendu du flux, et
+  // pendant un survol qui le repousse. Une seule fonction l'écrit, sinon les
+  // deux finiraient par ne plus dire la même chose.
+  function paintWaveHeader(hdr, num) {
+    setText(hdr._label, hdr._launch ? t('▶ wave {0}', num) : (hdr._queued ? t('wave {0} — queued', num) : t('wave {0}', num)));
+    hdr.classList.toggle('bumped', num !== hdr._w);
+  }
+  // Cible portée par une LIGNE du lot. Le champ wave est la vague de la ligne : un
+  // bloc mono-vague la rejoint, un bloc à plusieurs vagues s'insère DEVANT
+  // elle. La vague en cours ne se laisse pas dépasser (le store refuse, et
+  // ouvrir tout le bloc d'un coup serait pire que le refus) : le ruban le dit
+  // au lieu de laisser une cible morte.
+  function rowInsertTarget(gid, wave, launchedWave, rowEl) {
+    const insert = blockWaveCount() > 1;
+    // Cible du STORE : toujours « la vague devant laquelle on s'installe ».
+    // Se poser APRES la vague w, c'est s'installer devant la w + 1. Effet de
+    // bord heureux : viser la vague EN COURS devient légal (on se pose
+    // derrière elle), donc le cas qui a lancé tout ce chantier — « mes quatre
+    // prompts juste après la vague qui tourne » — se fait en un survol. Et
+    // survoler la DERNIERE vague pose le bloc après elle : c'est ce que
+    // « + nouvelle vague » faisait, ce bouton n'a donc plus lieu d'être.
+    const target = insert ? wave + 1 : wave;
+    // CE QUE LE STORE ACCEPTE, et rien d'autre (groups.js) : il refuse toute
+    // vague strictement anterieure a celle en cours. Le refus vaut donc pour
+    // les DEUX gestes — un bloc mono-vague ne peut pas plus rejoindre une vague
+    // passee qu'un bloc multi-vagues ne peut se glisser devant elle. Sans ca,
+    // un lot arrive a la vague 4 offrait un ruban vert sur la vague 1 : une
+    // cible morte, presentee comme vivante (constat user 2026-08-30).
+    const refused = launchedWave > 0 && (insert ? target <= launchedWave : wave < launchedWave);
+    // Le ruban ne porte pas de NUMERO : la vague visee affiche deja, a cet
+    // instant, celui qu'elle aura APRES insertion, et l'apercu annonce ceux des
+    // nouvelles vagues. Un numero de plus ne pourrait que les contredire.
+    const label = refused
+      ? (wave < launchedWave ? t('wave {0} is already past', wave) : t('wave {0} is already running', wave))
+      : (insert ? t('⤓ insert after this wave')
+        : (wave === launchedWave ? t('+ into wave {0} — starts now', wave) : t('+ into wave {0}', wave)));
+    return {
+      gid: gid, wave: target, hotWave: wave, mode: insert ? 'before' : 'into',
+      rowEl: rowEl, label: label, refused: refused,
+    };
+  }
+  // Délégation posée UNE fois sur le corps du lot : les lignes vont et
+  // viennent à chaque rendu, un écouteur par ligne fuirait.
+  function wireRowTargets(node, gid) {
+    if (node._rowTargetsWired) return;
+    node._rowTargetsWired = true;
+    node.body.addEventListener('mouseover', function (e) {
+      if (!activeTasks().length) return;
+      const host = e.target.closest ? e.target.closest('[data-ins-wave]') : null;
+      if (!host || !node.body.contains(host)) return;
+      const w = Number(host.dataset.insWave);
+      if (!Number.isInteger(w)) return;
+      setInsertHover(rowInsertTarget(gid, w, node._launchedWave || 0, host), null);
+    });
+    node.body.addEventListener('mouseleave', function () {
+      if (insertHover && insertHover.gid === gid && insertHover.rowEl) setInsertHover(null, null);
+    });
+    // Le clic de la ligne insère au lieu d'ouvrir l'onglet, tant qu'un bloc est
+    // en préparation. En capture, car le handler de la ligne (focusConv) est
+    // posé sur elle.
+    node.body.addEventListener('click', function (e) {
+      if (!activeTasks().length) return;
+      const host = e.target.closest ? e.target.closest('[data-ins-wave]') : null;
+      if (!host || !node.body.contains(host)) return;
+      const h = insertHover;
+      if (!h || h.refused) return;
+      e.stopPropagation();
+      e.preventDefault();
+      addTaskAtWave(h.gid, h.wave, false, h.mode);
+    }, true);
+  }
+
+  // Ruban de la ligne visée. Un seul nœud pour tout le panneau : il n'annote
+  // jamais deux lignes à la fois, et le poser en coordonnées de document
+  // garantit qu'il ne déplace RIEN (une ligne qui grandit sous le curseur se
+  // dérobe, et le survol se met à clignoter).
+  let insTagEl = null;
+  let insZoneEl = null;
+  // Tous les noeuds eclaires pour la vague visee (en-tete compris) : la cible
+  // d'un geste doit se voir en entier, sinon on croit viser une ligne seule.
+  let hotNodes = [];
+  function clearHotWave() {
+    hotNodes.forEach(function (n) { n.classList.remove('ins-hot'); });
+    hotNodes = [];
+    hideInsZone();
+  }
+  function hotWaveNodes(gid, wave) {
+    const node = groupNodes.get(gid);
+    if (!node || !Number.isInteger(wave)) return [];
+    const out = [];
+    const hdr = node.waveHeaders.get(wave);
+    if (hdr && hdr.parentElement === node.body) out.push(hdr);
+    Array.prototype.forEach.call(node.body.children, function (k) {
+      if (k.dataset && Number(k.dataset.insWave) === wave) out.push(k);
+    });
+    return out;
+  }
+  function hideInsTag() { if (insTagEl) { insTagEl.remove(); insTagEl = null; } }
+  function hideInsZone() { if (insZoneEl) { insZoneEl.remove(); insZoneEl = null; } }
+
+  // L'EMPRISE de la vague visée, en un seul rectangle : du haut de son en-tête
+  // au bas de sa dernière ligne, gouttiières comprises. N'est appelée que pour
+  // une cible ELIGIBLE (setInsertHover) : une cible refusée n'a pas de cadre,
+  // cf. le commentaire au-dessus de cet appel.
+  function showInsZone(nodes) {
+    hideInsZone();
+    const live = (nodes || []).filter(function (n) { return n && n.isConnected; });
+    if (!live.length) return;
+    let top = Infinity, bottom = -Infinity, left = Infinity, right = -Infinity;
+    live.forEach(function (n) {
+      const r = n.getBoundingClientRect();
+      if (r.height <= 0) return;
+      top = Math.min(top, r.top); bottom = Math.max(bottom, r.bottom);
+      left = Math.min(left, r.left); right = Math.max(right, r.right);
+    });
+    if (!(bottom > top)) return;
+    const sy = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+    const z = el('div', 'ins-zone');
+    z.style.top = (top + sy - 1) + 'px';
+    z.style.left = (left - 2) + 'px';
+    z.style.width = Math.max(20, right - left + 4) + 'px';
+    z.style.height = (bottom - top + 2) + 'px';
+    document.body.appendChild(z);
+    insZoneEl = z;
+  }
+  function showInsTag(rowEl, text, refused) {
+    hideInsTag();
+    if (!rowEl || !rowEl.isConnected) return;
+    const tag = el('div', 'ins-tag' + (refused ? ' no' : ''), text);
+    document.body.appendChild(tag);
+    const r = rowEl.getBoundingClientRect();
+    const sy = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+    tag.style.top = (r.top + sy + (r.height - 16) / 2) + 'px';
+    tag.style.left = Math.max(4, r.right - tag.offsetWidth - 8) + 'px';
+    insTagEl = tag;
+  }
+
+  function repaintWaveHeaders(gid) {
+    if (!gid || !groupNodes.has(gid)) return;
+    groupNodes.get(gid).waveHeaders.forEach(function (hdr) {
+      if (hdr._w == null) return;
+      paintWaveHeader(hdr, hdr._w + waveShift(gid, hdr._w));
+    });
+  }
   // Groupes du dernier état poussé — gardés parce que le décor de la maîtresse
   // se reconstruit AUSSI hors d'un push (au collage, à la réponse de
   // l'extension, à chaque renderForm) et qu'il doit alors répondre à la même
@@ -2678,7 +2936,14 @@ function renderHtml(webview) {
   // updateRow (au rendu) ET par renderMasterCue (entre deux rendus) : une
   // seule fonction, donc aucun moyen que les deux divergent.
   function masterTargetId() {
-    return (form && form.masterPaste && form.master && form.master.sessionId) ? form.master.sessionId : null;
+    // Plus aucun prompt à insérer ⇒ plus rien à désigner (2026-08-28). La
+    // cible surlignée, l'agrafe, sa flèche, l'aperçu et le compteur
+    // « n prompts » tiennent tous à cette seule valeur : les effacer ici les
+    // efface tous, ensemble. Avant, supprimer les tâches une à une laissait
+    // TOUT le décor en place autour d'un « 0 prompts », et seul « Annuler »
+    // s'en débarrassait — constat user.
+    if (!form || !form.tasks || !form.tasks.some(function (tk) { return tk.prompt.trim(); })) return null;
+    return (form.masterPaste && form.master && form.master.sessionId) ? form.master.sessionId : null;
   }
 
   // La LIGNE de cette conversation, si elle est réellement à l'écran. Une
@@ -2704,7 +2969,13 @@ function renderHtml(webview) {
   // file — nourrie du formulaire au lieu du store. Les titres n'existent pas
   // encore au collage, l'aperçu montre donc le début du prompt, comme le
   // panneau le fait déjà pour une tâche pas encore lancée.
-  function buildMasterPreview() {
+  // Le parametre offset (2026-08-29) : décalage à appliquer aux numéros de vague affichés.
+  // Zéro à la place par défaut (le lot n'existe pas encore, ses vagues partent
+  // de 1) ; pendant un survol d'insertion, l'aperçu doit annoncer les numéros
+  // DÉFINITIFS — « vague 3 » et non « vague 1 », sans quoi il contredirait la
+  // renumérotation qu'il provoque juste en dessous.
+  function buildMasterPreview(offset) {
+    const shift = Number.isInteger(offset) ? offset : 0;
     // La variable de boucle s'appelle tk et non t : dans ce webview, t est la
     // fonction de traduction — la masquer avec une tâche casserait les
     // libellés de vague juste dessous.
@@ -2713,6 +2984,8 @@ function renderHtml(webview) {
     const tasks = form.tasks.filter(function (tk) { return tk.prompt.trim(); });
     if (!tasks.length) return null;
     const box = el('div', 'master-preview');
+    // Premier enfant : le segment de rail qui prolonge celui du lot (voir CSS).
+    box.appendChild(el('div', 'mp-rail'));
     let wave = null;
     tasks.slice().sort(function (a, b) { return a.wave - b.wave; }).forEach(function (tk) {
       if (tk.wave !== wave) {
@@ -2721,7 +2994,13 @@ function renderHtml(webview) {
         // vague au-delà de la première naît « queued » (seule la vague 1 part
         // à la création), et l'aperçu ne peut pas dire autre chose que ce que
         // le lot dira dans dix secondes.
-        box.appendChild(el('div', 'master-preview-wave', wave > 1 ? t('wave {0} — queued', wave) : t('wave {0}', wave)));
+        const num = wave + shift;
+        // Le VRAI separateur de vague du panneau, pas un rendu maison : c'est
+        // celui-la que le lot posera dans dix secondes.
+        const hdr = el('div', 'wave-hdr');
+        hdr.appendChild(el('div', 'wave-hdr-label',
+          num > 1 ? t('wave {0} — queued', num) : t('wave {0}', num)));
+        box.appendChild(hdr);
       }
       box.appendChild(pendingLine({
         status: 'queued',
@@ -2738,14 +3017,24 @@ function renderHtml(webview) {
   // défilement sans être redessiné, et une maîtresse sortie par le haut voit
   // son agrafe filer hors écran sans pointe visible — c'est suffisant, l'ancre
   // de bord a été explicitement écartée.
-  function drawMasterCue(row) {
+  // Le parametre atTop (2026-08-29) : la cible n'est plus forcément une LIGNE. Quand la
+  // flèche montre un point d'insertion, elle vise un BLOC de plusieurs lignes —
+  // son axe serait alors au milieu du bloc, c'est-à-dire nulle part. On pointe
+  // sa première ligne : l'endroit exact où la première tâche va se poser.
+  function drawMasterCue(targets) {
     if (!mcueHost) { mcueHost = el('div', 'mcue'); document.body.appendChild(mcueHost); }
     mcueHost.replaceChildren();
-    if (!row || !form.masterPaste) return;
-    const a = row.getBoundingClientRect();
+    const list = (Array.isArray(targets) ? targets : [targets]).filter(function (x) { return x && x.node && x.node.isConnected; });
+    if (!list.length || (!form.masterPaste && !insertHover)) return;
     const b = newConvHeadEl.getBoundingClientRect();
     const sy = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
-    const yTop = a.top + sy + a.height / 2;    // axe de la ligne maîtresse
+    // Une ordonnée par cible : l'axe de la ligne pour une conversation, la
+    // PREMIÈRE ligne pour un bloc d'aperçu (son milieu ne désigne rien).
+    const ys = list.map(function (x) {
+      const a = x.node.getBoundingClientRect();
+      return x.atTop ? a.top + sy + Math.min(a.height / 2, 11) : a.top + sy + a.height / 2;
+    });
+    const yTop = Math.min.apply(null, ys);
     const yBot = b.top + sy + b.height / 2;    // axe de « New conversation »
     if (yBot - yTop < MCUE_MIN_SPAN) return;
 
@@ -2755,8 +3044,9 @@ function renderHtml(webview) {
     v.style.height = (yBot - yTop) + 'px';
     mcueHost.appendChild(v);
 
-    // Les deux crochets, identiques, centrés sur leur axe respectif.
-    [yTop, yBot].forEach(function (y) {
+    // Un crochet par extrémité ET par cible : une pointe posée au milieu du
+    // trait sans son crochet flotterait à côté de lui.
+    [yBot].concat(ys).forEach(function (y) {
       const h = el('div', 'mcue-h');
       h.style.left = MCUE_X + 'px';
       h.style.top = (y - MCUE_THICK / 2) + 'px';
@@ -2779,12 +3069,14 @@ function renderHtml(webview) {
     // à 16px, juste avant la pastille.
     const tipH = Math.round(MCUE_THICK * 1.5);
     const tipW = Math.round(MCUE_THICK * 1.8);
-    const tip = el('div', 'mcue-tip');
-    tip.style.setProperty('--mcue-tip-h', tipH + 'px');
-    tip.style.setProperty('--mcue-tip-w', tipW + 'px');
-    tip.style.left = (MCUE_X + MCUE_HOOK + MCUE_THICK - tipW) + 'px';
-    tip.style.top = (yTop - tipH) + 'px';
-    mcueHost.appendChild(tip);
+    ys.forEach(function (y) {
+      const tip = el('div', 'mcue-tip');
+      tip.style.setProperty('--mcue-tip-h', tipH + 'px');
+      tip.style.setProperty('--mcue-tip-w', tipW + 'px');
+      tip.style.left = (MCUE_X + MCUE_HOOK + MCUE_THICK - tipW) + 'px';
+      tip.style.top = (y - tipH) + 'px';
+      mcueHost.appendChild(tip);
+    });
 
     const n = form.tasks.filter(function (tk) { return tk.prompt.trim(); }).length;
     const lbl = el('div', 'mcue-lbl', t('{0} prompts', n));
@@ -2800,8 +3092,17 @@ function renderHtml(webview) {
     rows.forEach(function (row, rid) { row.root.classList.toggle('master-target', rid === id); });
     detachMasterPreview();
     const row = masterTargetRow();
-    if (row && form.masterPaste) {
-      masterPreviewEl = buildMasterPreview();
+    // Une cible SURVOLÉE l'emporte sur la place par défaut : c'est la question
+    // que l'utilisateur est en train de poser (« qu'est-ce que ce bouton va
+    // faire ? »), et elle se pose même sans maîtresse résolue — un bloc collé
+    // sans ligne session: a le droit de savoir où il atterrit.
+    // En mode 'still', la cible survolée ne DÉPLACE plus l'aperçu — elle change
+    // seulement ce qu'il annonce (ses numéros de vague) : c'est le trait qui
+    // porte la position, et lui ne pousse rien.
+    const spot = insertSpot();
+    const moves = !!spot;
+    if (spot || (row && form.masterPaste)) {
+      masterPreviewEl = buildMasterPreview(spot ? spot.wave - 1 : 0);
       // « À LEUR PLACE DÉFINITIVE » se prend au mot, et cette place n'est pas
       // toujours la ligne d'en dessous : quand la maîtresse est DÉJÀ la tête
       // d'un lot vivant, « Create » ne fonde pas un second lot — il enchaîne
@@ -2812,12 +3113,79 @@ function renderHtml(webview) {
       const grp = masterGroupNode();
       // Sinon : juste après la ligne. L'aperçu POUSSE la liste vers le bas
       // pendant la composition — c'est le coût de P2, connu et assumé.
-      if (masterPreviewEl) { if (grp) grp.body.appendChild(masterPreviewEl); else row.after(masterPreviewEl); }
+      if (masterPreviewEl) {
+        if (moves) spot.parent.insertBefore(masterPreviewEl, spot.before);
+        else if (grp) grp.body.appendChild(masterPreviewEl);
+        else if (row) row.after(masterPreviewEl);
+        // Repli quand le survol est la SEULE raison d'exister de l'apercu (bloc
+        // colle sans maitresse resolue) : sans cette ancre il etait construit
+        // puis attache nulle part — invisible, alors que c'est lui qui montre
+        // ce qui va etre pose (mesure du banc, 2026-08-29).
+        else if (spot) spot.parent.appendChild(masterPreviewEl);
+      }
     }
+    // L'aperçu vient de s'insérer DANS le corps du lot : la dernière ligne
+    // réelle a changé d'ordonnée, donc le trait vertical du lot aussi. Sans ce
+    // remesurage il s'arrêtait au-dessus de l'aperçu, alors qu'il doit le
+    // traverser et se refermer sous les conversations qui suivent.
+    groupNodes.forEach(measureRail);
     // Après l'insertion de l'aperçu, jamais avant : il déplace « New
     // conversation » vers le bas, donc le pied de l'agrafe.
-    drawMasterCue(row);
+    drawMasterCue(cueTargets());
   }
+
+  // OU VA LE BLOC, ET COMMENT ON LE DIT — figé le 2026-08-29 après essais en
+  // maquette. Cinq réglages ont été comparés en vrai ; ce qui reste est le
+  // choix de l'user, et les interrupteurs d'essai sont partis avec lui :
+  //   . la flèche de l'agrafe pointe TOUJOURS la destination (l'aperçu) — au
+  //     repos comme au survol ; la filiation reste dite par la respiration de
+  //     la maîtresse, qui ne s'éteint jamais ;
+  //   . les LIGNES du lot sont les cibles, clic entier : plus aucun bouton de
+  //     vague, donc plus rien qui prenne de la place pour un geste rare ;
+  //   . l'aperçu se DEPLACE jusqu'à la cible — il occupe la place qu'il
+  //     annonce, et comme le bloc se pose APRES la vague éclairée, la cible ne
+  //     se dérobe pas sous la souris qui la vise ;
+  //   . la vague visée s'éclaire d'un fond jaune qui respire, sans contour.
+  function cueTargets() {
+    const prev = masterPreviewEl && masterPreviewEl.isConnected ? masterPreviewEl : null;
+    if (prev) return [{ node: prev, atTop: true }];
+    const row = masterTargetRow();
+    return row ? [{ node: row, atTop: false }] : [];
+  }
+
+  // Premier en-tete de vague de numero >= n, dans le corps du lot. Les numeros
+  // de vague ne sont PAS contigus : une vague videe de ses membres n'a plus
+  // d'en-tete, si bien qu'un lot peut afficher 1 puis 4. Chercher exactement
+  // n + 1 ne trouvait alors rien et l'apercu repliait en fin de lot, immobile
+  // quelle que soit la ligne survolee (constat user 2026-08-30).
+  function headerAtLeast(node, n) {
+    let best = null;
+    node.waveHeaders.forEach(function (hdr, w) {
+      if (w < n || hdr.parentElement !== node.body) return;
+      if (!best || w < best.w) best = { w: w, hdr: hdr };
+    });
+    return best ? best.hdr : null;
+  }
+
+  // Ou poser l'apercu quand une ligne d'insertion est survolee : le noeud
+  // devant lequel il s'insere, dans le corps du lot vise. Rend null si rien
+  // n'est survole, si le lot n'est pas rendu, ou si le formulaire est vide.
+  function insertSpot() {
+    if (!insertHover || insertHover.refused || !activeTasks().length) return null;
+    const node = groupNodes.get(insertHover.gid);
+    if (!node || !node.body.isConnected) return null;
+    const w = insertHover.wave;
+    // 'before' : devant la premiere vague de numero >= w, c'est-a-dire devant
+    // celle que l'insertion va repousser.
+    // 'into'   : a la suite des membres de la vague w, donc devant la premiere
+    //            vague qui la suit.
+    const hdr = headerAtLeast(node, insertHover.mode === 'before' ? w : w + 1);
+    if (hdr) return { parent: node.body, before: hdr, wave: w };
+    // Aucune vague au-dela : en fin de corps, avant le repere final. C'est la
+    // que les taches apparaitront.
+    return { parent: node.body, before: node.ghostRow.parentElement === node.body ? node.ghostRow : null, wave: w };
+  }
+
 
   // Défilement et redimensionnement ne changent que la GÉOMÉTRIE : inutile de
   // reconstruire l'aperçu, une image suffit (rAF, jamais un tir par événement
@@ -2825,7 +3193,12 @@ function renderHtml(webview) {
   let mcueRaf = 0;
   function scheduleMasterCue() {
     if (mcueRaf) return;
-    mcueRaf = requestAnimationFrame(function () { mcueRaf = 0; drawMasterCue(masterTargetRow()); });
+    mcueRaf = requestAnimationFrame(function () {
+      mcueRaf = 0;
+      // La cible du moment, pas « la maîtresse » : défiler pendant qu'on
+      // survole une ligne d'insertion ne doit pas ramener la flèche en arrière.
+      drawMasterCue(cueTargets());
+    });
   }
   window.addEventListener('scroll', scheduleMasterCue, { passive: true });
 
@@ -2902,7 +3275,7 @@ function renderHtml(webview) {
     for (let i = kids.length - 1; i >= 0; i--) {
       const k = kids[i];
       if (k === node.rail || k.offsetParent === null) continue;
-      if (k.classList.contains('ghost-line') || k.classList.contains('wave-ghost')) continue;
+      if (k.classList.contains('ghost-line')) continue;
       if (k.classList.contains('wave-hdr') || k.classList.contains('wave-ctrl')) continue;
       if (k.classList.contains('grp-head')) continue;         // grip d'un sous-lot
       if (k.classList.contains('grp-master-head')) continue;  // la tête n'est pas une fin
@@ -2947,8 +3320,17 @@ function renderHtml(webview) {
     // lot vide) → pas de trait du tout. Le cas 3 doit couper le nœud : une
     // boîte de hauteur 0 afficherait quand même son border-bottom, soit un
     // crochet horizontal orphelin sous une grip repliée.
-    const last = lastRowOf(node);
-    const bar = last && !last.classList.contains('grp-body') ? last.querySelector('.bar-ctx') : null;
+    let last = lastRowOf(node);
+    // L'aperçu posé EN FIN de corps ferme le lot à la place de la dernière
+    // conversation réelle : le trait descend jusqu'à lui (masqué sur sa hauteur
+    // par .mp-rail, qui porte alors le crochet en pointillés), et le coude plein
+    // disparaît le temps du survol. Dès qu'une conversation existante suit
+    // l'aperçu, tout revient à la normale : c'est elle qui ferme.
+    const prevEl = node.body.querySelector(':scope > .master-preview');
+    const closes = !!prevEl && (!last
+      || (prevEl.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_PRECEDING) !== 0);
+    if (closes) last = prevEl;
+    const bar = last && !last.classList.contains('grp-body') && !closes ? last.querySelector('.bar-ctx') : null;
     let footY = null;
     if (bar && bar.offsetParent !== null) {
       const y = topWithin(bar, node.body);
@@ -2967,10 +3349,17 @@ function renderHtml(webview) {
     }
     const height = footY === null ? 0 : Math.max(0, footY + HOOK_W / 2 - top);
 
+    const hookW = Math.max(HOOK_W, HOOK_END - 13);
     node.rail.style.display = height > 0 ? '' : 'none';
     node.rail.style.top = top + 'px';
     node.rail.style.height = height + 'px';
-    node.rail.style.width = Math.max(HOOK_W, HOOK_END - 13) + 'px';
+    node.rail.classList.toggle('no-hook', closes);
+    node.rail.style.width = (closes ? HOOK_W : hookW) + 'px';
+    const mpRail = prevEl ? prevEl.querySelector('.mp-rail') : null;
+    if (mpRail) {
+      mpRail.classList.toggle('hooked', closes);
+      mpRail.style.width = closes ? hookW + 'px' : '';
+    }
   }
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(function () {
@@ -3120,28 +3509,20 @@ function renderHtml(webview) {
     // l'autre (même raison que members/rows — ne pas relancer d'animation).
     // waveCtrl : la zone « ▶ lancer la vague suivante » / bannière, une par
     // groupe, repositionnée juste après la vague courante à chaque rendu.
-    // Ligne fantôme « + nouvelle vague » (plan ajout-tache 2026-07-24) :
-    // présente en fin de groupe, groupe fini compris (décision 2 du design)
-    // — un clic crée la vague max+1, jamais une vague existante. Masquée par
-    // défaut : elle dépose le prompt COURANT du formulaire (activeTasks(),
-    // cf. refreshGhostVisibility) — sans texte à déposer, le clic ne ferait
-    // que rendre le focus au champ (addTaskAtWave), donc rien à proposer ni
-    // à faire briller à l'œil (constat user 2026-08-15). Le rail continue de
-    // mesurer sa hauteur sur ghostRow.offsetTop, jamais masqué lui : ghostRow
-    // reste dans le flux, seuls ses enfants (ghostNew, addRow) basculent.
+    // Repère de fin de corps. Il portait jusqu'au 2026-08-29 les deux
+    // lignes-boutons de vague (« + nouvelle vague », « + cette vague ») ;
+    // depuis que les LIGNES du lot sont les cibles d'insertion, il ne reste
+    // qu'un nœud vide de hauteur nulle — mais il reste : c'est devant lui que
+    // l'aperçu vient se poser quand le bloc va en fin de lot.
     // Lot B densité (2026-08-09) : ghostRow n'est plus la cellule elle-même
     // mais la RANGÉE qui l'accueille — la ligne d'ajout de la dernière vague
     // en file vient s'y ranger à sa gauche (renderGroups) au lieu d'occuper
     // une deuxième rangée pleine largeur juste au-dessus.
     const ghostRow = el('div', 'ghost-line');
-    const ghostNew = el('div', 'wave-ghost wave-new', t('+ new wave'));
-    ghostNew.title = t('Add a task in a new wave after the last one');
-    ghostNew.style.display = 'none';
-    ghostRow.appendChild(ghostNew);
     const node = {
       root, head, chev, label, count, tg, body, members: new Map(), id: g.id,
-      mas, kill, waveHeaders: new Map(), waveAddRows: new Map(), waveCtrl: el('div', 'wave-ctrl'),
-      rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow, ghostNew,
+      mas, kill, waveHeaders: new Map(), waveCtrl: el('div', 'wave-ctrl'),
+      rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow,
       masterHead, masterSlot, masterOut, masterFallback: null,
     };
     head.addEventListener('click', function (e) {
@@ -3171,9 +3552,6 @@ function renderHtml(webview) {
       vscode.postMessage({ type: 'dissolveGroup', id: node.id });
     });
     masterOut.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'unlinkGroupMaster', id: node.id }); });
-    ghostNew.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(node.id, null); });
-    ghostNew.addEventListener('mouseenter', function () { highlightPromptField(true); });
-    ghostNew.addEventListener('mouseleave', function () { highlightPromptField(false); });
     return node;
   }
 
@@ -3250,7 +3628,7 @@ function renderHtml(webview) {
 
     const node = {
       root, slot, foot, note, linkChip, relaunchChip, outChip, move, conv: null,
-      jump, jumpLbl, gid, key, menu: null, wave: null, aloneInWave: false, queuedWaves: [],
+      jump, jumpLbl, gid, key, menu: null, wave: null, aloneInWave: false, queuedWaves: [], runningWave: 0,
     };
     jump.addEventListener('click', function (e) {
       e.stopPropagation();
@@ -3294,17 +3672,19 @@ function renderHtml(webview) {
   }
 
   // Les destinations sont exactement celles que le store accepterait : les
-  // vagues encore EN FILE (une vague déjà partie n'en est pas une — y arriver
-  // reviendrait à être lancé aussitôt), plus « nouvelle vague à la fin ». La
-  // vague courante y figure quand même, marquée « ici » et morte : c'est le
-  // repère qui rend la liste lisible, pas une porte.
+  // vagues encore EN FILE, la vague EN COURS (depuis 2026-08-28 — y aller
+  // ouvre la tâche tout de suite, le libellé le dit), plus « nouvelle vague à
+  // la fin ». La vague du membre lui-même y figure marquée « ici » et morte :
+  // c'est le repère qui rend la liste lisible, pas une porte.
   function paintJumpMenu(mn) {
     if (!mn.menu) return;
     mn.menu.replaceChildren();
     const gid = mn.gid, key = mn.key;
     mn.queuedWaves.forEach(function (w) {
       const cur = w === mn.wave;
-      const b = el('button', cur ? 'cur' : '', cur ? t('Wave {0} (here)', w) : t('Wave {0}', w));
+      const label = cur ? t('Wave {0} (here)', w)
+        : (w === mn.runningWave ? t('Wave {0} (running — starts now)', w) : t('Wave {0}', w));
+      const b = el('button', cur ? 'cur' : '', label);
       b.type = 'button';
       if (cur) { b.disabled = true; mn.menu.appendChild(b); return; }
       b.addEventListener('click', function (e) {
@@ -3724,24 +4104,26 @@ function renderHtml(webview) {
       const curMembers = g.members.filter(function (m) { return m.wave === g.launchedWave; });
       const blockers = curMembers.filter(function (m) { return m.waveStatus === 'stale'; });
       const blocked = blockers.length > 0;
-      // Mode du lot (2026-08-26) : en MANUEL, le bouton ▶ de la vague suivante
-      // n'apparaît QU'UNE FOIS la vague courante terminée — avant, il n'y a
-      // rien à décider et la vague en file garde son séparateur inerte
-      // (« wave n — queued »). Deux nuances, chacune pour ne pas enfermer :
-      //  · une vague BLOQUÉE (une tâche interrompue qui ne finira jamais seule)
-      //    ouvre quand même le bouton : en manuel il est la SEULE porte, la
-      //    cacher laisserait le lot sans issue ;
-      //  · une vague courante VIDE (tous ses membres retirés) compte comme
-      //    faite, pour la même raison.
+      // Mode du lot (2026-08-26, ROUVERT le 2026-08-28) : en MANUEL, le ▶ de
+      // la vague suivante est TOUJOURS offert dès qu'il reste une vague en
+      // file. Le resserrement du 2026-08-27 le réservait à une vague courante
+      // finie ou bloquée — passer en manuel pendant que la vague tourne ne
+      // donnait alors AUCUNE porte, et l'interrupteur semblait mort
+      // (« rien ne se passe quand on passe en manuel », constat user). C'est
+      // aussi ce que dit waves.js canForceLaunch depuis l'origine : forcer un
+      // partiel est le sens même du bouton. Basculer en manuel est déjà un
+      // acte délibéré, le clic sur ▶ en est un second : pas de confirmation.
+      // curDone reste calculé — la zone de contrôle s'en sert plus bas.
       const curDone = curMembers.length === 0
         || curMembers.every(function (m) { return m.waveStatus === 'done'; });
-      const manualReady = curDone || blocked;
       // Le statut CANONIQUE, pas sa projection : stale et unsent-lost
       // suspendent tous deux l'auto (même waveStatus), mais un seul des deux
       // est une mauvaise nouvelle. Un mélange des deux dans la même vague →
       // rouge, la conv interrompue prime.
       const hardBlocked = blockers.some(function (m) { return m.status === 'stale'; });
 
+      node._launchedWave = g.launchedWave;
+      wireRowTargets(node, g.id);
       const keys = new Set();
       // La ligne master (si présente) occupe déjà l'index 0 (placée plus
       // haut) : le reste du corps (en-têtes de vague, membres, ligne fantôme)
@@ -3759,15 +4141,20 @@ function renderHtml(webview) {
             node.waveHeaders.set(w, h);
             return h;
           })();
-          // Séparateur devenu bouton de lancement (lot 4 §2, resserré
-          // 2026-08-27) : en AUTO, plus RIEN de cliquable sur un séparateur,
-          // jamais — la seule porte vers un forçage est l'interrupteur
-          // manuel/auto de l'en-tête. Le style « cliquable » n'existe donc
-          // plus qu'en manuel, et seulement une fois la vague courante prête
-          // (manualReady) : avant, comme après en auto, le séparateur reste
-          // inerte (« wave n — queued »).
-          const isLaunch = manual && w === g.nextWave && manualReady;
-          setText(hdr._label, isLaunch ? t('▶ wave {0}', w) : (w > g.launchedWave ? t('wave {0} — queued', w) : t('wave {0}', w)));
+          // Séparateur devenu bouton de lancement (lot 4 §2) : en AUTO, plus
+          // RIEN de cliquable sur un séparateur, jamais — la seule porte vers
+          // un forçage est l'interrupteur manuel/auto de l'en-tête. En MANUEL,
+          // la vague suivante porte toujours son ▶ : c'est la contrepartie de
+          // l'interrupteur, sans quoi passer en manuel ne donne la main sur
+          // rien (2026-08-28).
+          const isLaunch = manual && w === g.nextWave;
+          // L'état du libellé vit sur le nœud : paintWaveHeader (source unique)
+          // le relit pour renuméroter pendant un survol d'insertion, sans
+          // rejouer le rendu du flux.
+          hdr._w = w;
+          hdr._launch = isLaunch;
+          hdr._queued = w > g.launchedWave;
+          paintWaveHeader(hdr, w + waveShift(g.id, w));
           hdr.classList.toggle('launch', isLaunch);
           hdr.classList.toggle('pri', isLaunch);
           hdr.title = '';
@@ -3779,21 +4166,14 @@ function renderHtml(webview) {
           })(w) : null;
           place(node.body, idx++, hdr);
         }
-        // « + ajouter à cette vague » JAMAIS sur une vague déjà lancée ni la
-        // vague en cours (design du plan ajout-tache) : seule une vague
-        // strictement en file (w > launchedWave) le porte — y ajouter
-        // reviendrait à la lancer aussitôt en mode auto, la surprise interdite.
+        // « + ajouter à cette vague » sur toute vague EN FILE, et depuis
+        // 2026-08-28 sur la vague EN COURS aussi (demande user : glisser un
+        // lot dans la vague qui tourne). Jamais sur une vague PASSÉE : elle
+        // est finie, y déposer une tâche ne veut rien dire. Sur la vague en
+        // cours le dépôt part aussitôt — d'où la confirmation, portée par
+        // addTaskAtWave, et le libellé d'infobulle qui le dit.
         const queued = w > g.launchedWave;
-        const addRow = node.waveAddRows.get(w) || (function () {
-          const r = el('div', 'wave-ghost wave-add-row', t('+ this wave'));
-          r.style.display = 'none';
-          r.addEventListener('click', function (e) { e.stopPropagation(); addTaskAtWave(g.id, w); });
-          r.addEventListener('mouseenter', function () { highlightPromptField(true); });
-          r.addEventListener('mouseleave', function () { highlightPromptField(false); });
-          node.waveAddRows.set(w, r);
-          return r;
-        })();
-        if (queued) addRow.title = t('Fill the prompt field above, then click here to queue it in this wave');
+        const running = w === g.launchedWave && g.launchedWave > 0;
         // Filtre done-closed (étape 11) : un membre fini dont l'onglet est
         // fermé n'a plus de ligne — keys ne le reçoit alors pas, la purge
         // plus bas (node.members.forEach) retire son nœud DOM comme pour un
@@ -3871,7 +4251,12 @@ function renderHtml(webview) {
           const aloneInWave = waveCount.get(w) === 1;
           mn.wave = w;
           mn.aloneInWave = aloneInWave;
-          mn.queuedWaves = waveNums.filter(function (n) { return n > g.launchedWave; });
+          // Destinations proposées = ce que le store accepte (groups.js
+          // setMemberWave) : les vagues en file, PLUS la vague en cours depuis
+          // 2026-08-28 — l'user voulait y basculer un lot pendant qu'elle
+          // tourne, et le menu ne la proposait pas.
+          mn.queuedWaves = waveNums.filter(function (n) { return n >= g.launchedWave; });
+          mn.runningWave = g.launchedWave;
           mn.jump.style.display = canMove ? '' : 'none';
           setText(mn.jumpLbl, t('wave {0} ▾', w));
           mn.jump.title = t('Move this task to another wave');
@@ -3892,27 +4277,14 @@ function renderHtml(webview) {
           if (kids) kids.forEach(function (child) {
             place(node.body, idx++, groupNodes.get(child.id).head);
           });
+          // La ligne porte SA vague : c'est ce qui permet à la délégation de
+          // savoir où l'on vise, sans qu'aucun écouteur ne vive sur la ligne.
+          mn.root.dataset.insWave = String(w);
           place(node.body, idx++, mn.root);
           if (kids) kids.forEach(function (child) {
             place(node.body, idx++, groupNodes.get(child.id).body);
           });
         });
-        // APRÈS le dernier membre de la vague EN FILE (jamais sur vague
-        // lancée/terminée — remplace l'ancien petit « + » du séparateur,
-        // invisible/mal placé).
-        //
-        // Lot B densité (2026-08-09) — la ligne de la DERNIÈRE vague rendue ne
-        // prend plus de rangée à elle : elle rejoint la ligne fantôme finale,
-        // à gauche de « + new wave ». C'est le seul cas fusionnable, et il
-        // couvre celui qu'on voit tout le temps : « queued » vaut
-        // w > launchedWave sur une liste triée, donc dès qu'une vague est en
-        // file la DERNIÈRE l'est aussi — et c'est elle qui se retrouvait
-        // collée sous la ligne fantôme. Les vagues en file intermédiaires
-        // gardent leur rangée : leur ligne d'ajout doit rester au contact des
-        // membres de LEUR vague, pas migrer en fin de groupe.
-        const isLastWave = w === waveNums[waveNums.length - 1];
-        if (queued && isLastWave) place(node.ghostRow, 0, addRow);
-        else if (queued) place(node.body, idx++, addRow);
         if (w === g.launchedWave) { renderWaveCtrl(node, g, blocked, hardBlocked, manual); place(node.body, idx++, node.waveCtrl); ctrlPlaced = true; }
       });
       // launchedWave absente des vagues RENDUES : soit défensif (ne devrait
@@ -3935,21 +4307,6 @@ function renderHtml(webview) {
         if (waveNums.indexOf(w) !== -1 && multiWave) return;
         hdr.remove();
         node.waveHeaders.delete(w);
-      });
-      node.waveAddRows.forEach(function (row, w) {
-        // Miroir du critère de placement (queued, ligne ~1329) : la ligne
-        // n'est posée dans le corps QUE pour une vague strictement en file.
-        // La purger seulement quand sa vague a disparu de waveNums laissait
-        // une orpheline collée à sa dernière position DOM dès qu'une vague en
-        // file passait à lancée (w reste dans waveNums, juste plus queued) —
-        // constat user 2026-08-05. launchedWave ne redescend jamais, une
-        // vague lancée n'a plus jamais besoin de sa ligne d'ajout.
-        // remove() couvre les DEUX parents possibles depuis le lot B densité
-        // (corps du groupe, ou ligne fantôme finale) : le critère de purge est
-        // le même, il ne dépend pas de l'endroit où la ligne est rangée.
-        if (waveNums.indexOf(w) !== -1 && w > g.launchedWave) return;
-        row.remove();
-        node.waveAddRows.delete(w);
       });
       node.members.forEach(function (mn, key) {
         if (keys.has(key)) return;
@@ -4134,54 +4491,66 @@ function renderHtml(webview) {
   // bouton ne connaît qu'UNE vague cible, il ne peut pas honorer la topologie
   // du bloc (pas de télescopage silencieux). Un prompt SIMPLE (une seule
   // tâche active, quelle que soit son origine) garde le comportement d'avant.
-  function multiWaveTransferMessage(gid, tasks) {
-    const waveCount = new Set(tasks.map(function (tk) { return tk.wave; })).size;
-    let msg = t('Add {0} task(s) ({1} wave(s)) after this group?', tasks.length, waveCount);
-    if (form.group) msg += '\\n' + t('The block’s group name “{0}” is ignored — this group keeps its own.', form.group);
-    if (form.masterSession) msg += '\\n' + t('The block’s master conversation token is ignored — this group keeps its own.');
-    return {
-      gid: gid,
-      message: msg,
-      tasks: tasks.map(function (tk) {
-        return { prompt: tk.prompt, model: effectiveModel(tk), effort: effectiveEffort(tk), wave: tk.wave };
-      }),
-    };
+  // Ce que le bloc collé porte et que le groupe CIBLE ne reprend pas. Dit
+  // après coup, en une bannière d'info — plus dans une confirmation à valider :
+  // c'est un constat, pas une décision (et ça n'arrive que sur un bloc nommé).
+  function ignoredBlockFields() {
+    const bits = [];
+    if (form.group) bits.push(t('The block’s group name “{0}” is ignored — this group keeps its own.', form.group));
+    if (form.masterSession) bits.push(t('The block’s master conversation token is ignored — this group keeps its own.'));
+    return bits.join('\\n');
   }
-  function confirmPendingTransfer() {
-    const pending = form.pendingTransfer;
-    if (!pending) return;
-    vscode.postMessage({ type: 'addTasksToGroup', id: pending.gid, tasks: pending.tasks });
-    form = { group: '', tasks: [blankTask(1)] };
-    renderForm();
+  function resolveForTransfer(tasks) {
+    return tasks.map(function (tk) {
+      return { prompt: tk.prompt, model: effectiveModel(tk), effort: effectiveEffort(tk), wave: tk.wave };
+    });
   }
-  function cancelPendingTransfer() {
-    form.pendingTransfer = null;
-    renderForm();
-  }
-  function addTaskAtWave(gid, wave) {
-    const tasks = activeTasks();
-    if (tasks.length > 1) {
-      if (wave != null) {
-        form.errorBanner = t('This is a multi-wave block — use “+ new wave” to add all of it at once.');
-        renderForm();
-        return;
-      }
-      form.pendingTransfer = multiWaveTransferMessage(gid, tasks);
-      renderForm();
-      return;
+  // Dépôt effectif. keepSelectors = cas d'une seule tâche : on ne vide que le
+  // prompt, les sélecteurs modèle/effort restent tels quels pour enchaîner
+  // (comportement d'avant 2026-08-28, conservé).
+  // Le champ mode dit LEQUEL des deux gestes ce clic était ('into' : rejoindre la
+  // vague ; 'before' : s'insérer devant elle). C'est le webview qui l'envoie
+  // parce que c'est lui qui vient de MONTRER le résultat — le store n'a rien
+  // à redeviner.
+  function postTasksToGroup(gid, wave, mode, tasks, keepSelectors) {
+    const note = ignoredBlockFields();
+    vscode.postMessage({ type: 'addTasksToGroup', id: gid, wave: wave, mode: mode || 'into', tasks: tasks });
+    if (keepSelectors && form.tasks[0]) {
+      form.tasks[0].prompt = '';
+      form.errorBanner = null;
+    } else {
+      form = { group: '', tasks: [blankTask(1)], banner: note || null };
     }
-    const first = form.tasks[0];
-    const prompt = (first && first.prompt) || '';
-    if (!prompt.trim()) {
+    renderForm();
+  }
+  // running = la vague visée est DÉJÀ OUVERTE (la vague en cours). C'est le
+  // seul cas qui demande une confirmation : les tâches déposées partent
+  // aussitôt, un lancement ne se défait pas. Un ajout EN FILE, lui, se défait
+  // (menu « vague n ▾ », croix du membre) — il part donc sans rien demander,
+  // et le résultat se voit dans le lot. Le refus des blocs multi-tâches a
+  // disparu : une vague accueille N prompts, et un bloc à plusieurs vagues
+  // s'insère à partir de celle qu'on vise (groups.js addTasks).
+  function addTaskAtWave(gid, wave, running, mode) {
+    const tasks = activeTasks();
+    if (!tasks.length) {
       const ta = promptTextarea();
       if (ta) ta.focus();
       return;
     }
-    const model = resolvedModel();
-    const effort = resolvedEffort(model);
-    vscode.postMessage({ type: 'addTaskToGroup', id: gid, wave: wave, task: { prompt: prompt, model: model, effort: effort } });
-    first.prompt = '';
-    renderForm();
+    // Plus de confirmation pour la vague EN COURS (2026-08-29). Elle
+    // s'affichait dans le formulaire, tout en bas du panneau — loin du bouton
+    // qu'on venait de cliquer : l'user a conclu que le bouton ne faisait
+    // « absolument rien » et est allé cliquer ailleurs. Ce qu'elle protégeait
+    // (« ça va partir tout de suite ») est désormais dit DEUX fois là où le
+    // geste se passe : le libellé du bouton (« — démarre ») et l'aperçu qui
+    // apparaît sous le curseur avant même le clic. Une question posée hors du
+    // champ de vision ne protège personne.
+    // Le decor de survol se demonte PAR SON CHEMIN NORMAL (surbrillance de la
+    // ligne, ruban, renumerotation) : remettre la variable a null suffisait a
+    // le rendre invisible du code, pas de l'ecran — mesure du 2026-08-29, la
+    // ligne restait allumee avec son ruban apres l'insertion.
+    setInsertHover(null, null);
+    postTasksToGroup(gid, wave, mode, resolveForTransfer(tasks), tasks.length === 1);
   }
 
   // Parseur strict du bloc claude-convs (lot 3) — copie du noyau de
@@ -4317,56 +4686,7 @@ function renderHtml(webview) {
     return !m || (m !== 'haiku' && !effectiveEffort(t));
   }
 
-  // Visibilité des lignes fantômes « + new wave » / « + this wave » (2026-08-15) :
-  // les deux déposent le prompt courant du formulaire (addTaskAtWave) — sans
-  // tâche active à déposer, un clic ne fait rien d'autre que rendre le focus
-  // au champ. Les masquer économise l'espace ET n'attire plus l'œil vers un
-  // bouton inutile tant qu'aucun texte n'est tapé. Même critère que Create
-  // (activeTasks().length), pour rester cohérent avec ce qui serait réellement
-  // envoyé. Appelée à chaque changement de saisie (refreshCreateBtn) et à
-  // chaque (re)création de nœud de groupe, où les deux naissent masqués.
-  // Dernier état appliqué, pour ne compenser le scroll QUE sur la bascule
-  // (cf. plus bas) — un push d'état ordinaire ne doit pas déplacer la vue.
-  let ghostsShown = null;
-
-  function refreshGhostVisibility() {
-    const has = activeTasks().length > 0;
-    const flipped = has !== ghostsShown;
-    // Le formulaire est SOUS les lots : faire apparaître une ligne d'ajout dans
-    // chacun d'eux pousse tout ce qui suit, donc la zone de saisie elle-même —
-    // elle fuyait sous le curseur à la première frappe, et le panneau entier
-    // semblait défiler (signalé par l'user, 2026-08-27). On mesure donc où est
-    // le formulaire AVANT, et on rend au défilement ce que la mise en page
-    // vient de prendre : à l'écran, le champ ne bouge pas d'un pixel, c'est le
-    // contenu au-dessus qui glisse. Réserver la place en permanence marcherait
-    // aussi, mais rendrait à chaque lot la hauteur que le masquage à vide
-    // (2026-08-15) lui avait justement fait gagner.
-    const before = flipped ? batchFormEl.getBoundingClientRect().top : 0;
-    groupNodes.forEach(function (node) {
-      node.ghostNew.style.display = has ? '' : 'none';
-      node.ghostNew.classList.toggle('armed', has);
-      node.waveAddRows.forEach(function (r) {
-        r.style.display = has ? '' : 'none';
-        // ARMÉE : le prompt est tapé, ces lignes sont les endroits où il peut
-        // tomber — elles prennent la couleur d'action (cf. .wave-ghost.armed).
-        // Le masquage à vide de 2026-08-15 économisait la place ; il laissait
-        // le reste du temps une cible qu'on ne trouvait qu'au survol, d'où le
-        // détour par « + new wave » puis la remontée à la main.
-        r.classList.toggle('armed', has);
-      });
-    });
-    ghostsShown = has;
-    if (!flipped) return;
-    // getBoundingClientRect force le recalcul : la mesure d'après est celle de
-    // la mise en page déjà à jour, jamais celle d'avant.
-    const delta = batchFormEl.getBoundingClientRect().top - before;
-    if (!delta) return;
-    const sc = document.scrollingElement || document.documentElement;
-    sc.scrollTop += delta;
-  }
-
   function refreshCreateBtn() {
-    refreshGhostVisibility();
     if (!createBtn) return;
     const tasks = activeTasks();
     const n = tasks.length;
@@ -4437,27 +4757,6 @@ function renderHtml(webview) {
     return wrap;
   }
 
-  // Bannière à deux actions (étape 10 du plan repli-auto) — pas une modale
-  // VS Code : la confirmation ne dépend que de ce que le formulaire sait déjà
-  // (nombre de tâches/vagues, nom de bloc ignoré), donc rien à demander à
-  // l'extension avant de la montrer. Multi-ligne (retour à la ligne) affiché tel quel.
-  function confirmBanner(text, confirmLabel, onConfirm, onCancel) {
-    const wrap = el('div', 'banner info');
-    wrap.style.display = 'flex';
-    wrap.style.flexDirection = 'column';
-    wrap.style.gap = '6px';
-    const body = el('div');
-    body.style.whiteSpace = 'pre-line';
-    body.textContent = text;
-    wrap.appendChild(body);
-    const row = el('div', 'form-foot');
-    row.appendChild(el('span', 'spacer'));
-    row.appendChild(button('', t('Cancel'), onCancel));
-    row.appendChild(button('pri', confirmLabel, onConfirm));
-    wrap.appendChild(row);
-    return wrap;
-  }
-
   // Zone unique (2026-07-23) : le champ prompt de chaque tâche EST la zone de
   // collage — il n'y a plus de champ « paste » séparé. Sur paste/change
   // (jamais input, qui volerait le curseur à chaque frappe) : un bloc
@@ -4491,7 +4790,10 @@ function renderHtml(webview) {
         paste: form.masterPaste,
         session: form.masterSession,
       });
-      form.banner = t('claude-convs block recognized — {0} task(s) prefilled (model, effort, waves).', parsed.tasks.length);
+      // Aucune banniere de SUCCES : les taches pre-remplies apparaissent juste
+      // en dessous, la reconnaissance se voit donc toute seule. Seul l'echec a
+      // besoin de mots (banniere d'erreur, plus bas).
+      form.banner = null;
     } else {
       form.masterPaste = null;
       form.masterSession = null;
@@ -4517,7 +4819,15 @@ function renderHtml(webview) {
     ta.placeholder = t('Prompt for this conversation — or paste a /handoffs block');
     // oninput n'appelle PAS renderForm : re-créer le nœud pendant la frappe
     // volerait le curseur. Seul le compteur du bouton Create bouge.
-    ta.addEventListener('input', function () { task.prompt = ta.value; refreshCreateBtn(); });
+    ta.addEventListener('input', function () {
+      const had = !!task.prompt.trim();
+      task.prompt = ta.value;
+      refreshCreateBtn();
+      // Le décor d'insertion (cible surlignée, agrafe, aperçu) ne dépend que
+      // de « reste-t-il au moins un prompt » : on ne le refait qu'au passage
+      // vide ↔ non vide, jamais à chaque frappe (un reflow par caractère).
+      if (had !== !!task.prompt.trim()) renderMasterCue();
+    });
     ta.addEventListener('paste', function () { setTimeout(function () { applyBlockPaste(ta); }, 0); });
     ta.addEventListener('change', function () { applyBlockPaste(ta); });
     const del = el('button', 'xdel', '×');
@@ -4644,13 +4954,10 @@ function renderHtml(webview) {
     // conversation, aucun groupe n'est créé — le champ n'a alors pas lieu
     // d'être affiché du tout (pas seulement son placeholder).
     if (extended) {
-      batchFormEl.appendChild(el('label', 'fld-label', t('Group name (optional)')));
-      const gname = el('input', 'inp');
-      gname.type = 'text';
-      gname.value = form.group || '';
-      gname.placeholder = t('e.g. Payment refactor');
-      gname.addEventListener('input', function () { form.group = gname.value; });
-      batchFormEl.appendChild(gname);
+      // Plus de champ NOM ici (2026-08-30) : deux rangees pour un libelle
+      // facultatif, dans une barre laterale ou le pixel vertical est la
+      // ressource rare. form.group vit toujours — un bloc colle qui porte
+      // « group: » nomme le lot — et un lot se renomme apres coup.
     }
 
     // Dismiss du feedback de collage (lot micro-allègements 2026-07-24) : état
@@ -4658,14 +4965,13 @@ function renderHtml(webview) {
     // referme la bannière courante ; elle se remplace normalement au collage
     // suivant et disparaît déjà au Create/Cancel (form remis à zéro), ce ×
     // n'ajoute qu'un cas de fermeture manuelle anticipée.
+    // UNE bannière à la fois (2026-08-28) : quatre empilées à l'écran, dont
+    // deux qui se contredisaient, ont noyé l'user. Il n'y a plus de
+    // confirmation de transfert depuis le 2026-08-29 — elle vivait ici, à
+    // l'autre bout du panneau par rapport au bouton cliqué ; ce qu'elle disait
+    // est maintenant montré à l'endroit du geste (libellé + aperçu au survol).
     if (form.errorBanner) batchFormEl.appendChild(dismissibleBanner('banner', form.errorBanner, function () { form.errorBanner = null; renderForm(); }));
     if (form.banner) batchFormEl.appendChild(dismissibleBanner('banner info', form.banner, function () { form.banner = null; renderForm(); }));
-    // Transfert multi-vagues en attente (étape 10) : bannière à deux actions,
-    // au-dessus du reste du formulaire (les tâches restent visibles pendant
-    // la confirmation).
-    if (form.pendingTransfer) {
-      batchFormEl.appendChild(confirmBanner(form.pendingTransfer.message, t('Add'), confirmPendingTransfer, cancelPendingTransfer));
-    }
 
     const waves = [...new Set(form.tasks.map(function (t) { return t.wave; }))].sort(function (a, b) { return a - b; });
     waves.forEach(function (w) {
@@ -5017,24 +5323,30 @@ function renderHtml(webview) {
     // filiation, un lot peut recevoir un sous-lot APRÈS avoir été mesuré (rien
     // n'ordonne le parent avant l'enfant dans la liste), et son rail resterait
     // alors à la hauteur d'avant.
-    // Nœuds de groupe (re)créés à l'instant : ghostNew/addRow naissent masqués
-    // (cf. createGroupNode) — les remettre à l'état courant du champ, sinon un
-    // groupe qui apparaît pendant que l'user a déjà tapé un prompt affiche des
-    // boutons masqués à tort jusqu'à la prochaine frappe.
-    refreshGhostVisibility();
     // « seen » est rempli par renderGroups juste au-dessus : il porte les convs
     // qu'un lot vient RÉELLEMENT de rendre. D'où la seconde branche (lot 3) —
     // un membre de lot TERMINÉ dont l'onglet est fermé est retiré de sa vague
     // (statut done-closed, filtre de renderGroups) et il était jusqu'ici
     // retiré de la liste plate par son groupId : marqué « à relire », il
     // disparaissait donc des deux vues à la fois, très exactement le geste que
-    // la marque doit empêcher. Le test porte sur ce que le DOM a reçu, pas sur
-    // un statut re-déduit ici : l'invariant « UN nœud de conversation, UN
-    // endroit du DOM » tient par construction, une conv rendue dans son lot ne
-    // pouvant pas entrer dans « flat ».
+    // la marque doit empêcher.
+    // L'invariant « UN nœud de conversation, UN endroit du DOM » NE tenait PAS
+    // par construction (2026-08-30, mesuré au CDP sur instrument-flat-leak.js) :
+    // \`!c.groupId\` re-dérive une seconde source pour la même question que
+    // \`seen\` vient déjà de trancher. Un membre encore \`done\` (onglet ouvert,
+    // pas \`done-closed\`) dont la conv n'a jamais reçu \`c.groupId\` passait donc
+    // le filtre plate — et comme \`rowFor(c)\` met en cache UN SEUL nœud DOM par
+    // conv, \`place()\` plus bas dans layoutFlow le RÉ-EXTRAIT de \`mn.slot\` (déjà
+    // posé par renderGroups) pour le planter dans la liste plate : la ligne
+    // quittait visuellement son lot tant que l'onglet restait ouvert, et n'y
+    // « revenait » qu'en fermant l'onglet — la seule condition qui coupe alors
+    // le membre du rendu entièrement (étape 11). \`seen\` étant déjà la
+    // conséquence de ce que renderGroups a RÉELLEMENT posé (rowOwner compris,
+    // filiation comprise), c'est lui qui tranche ; \`c.groupId\` ne reste qu'une
+    // ceinture pour une conv jamais passée par un lot rendu.
     const flat = convs.filter(function (c) {
       if (c.pinned && !seen.has(c.id)) return true;
-      return !c.groupId && !masterIds.has(c.id);
+      return !seen.has(c.id) && !c.groupId && !masterIds.has(c.id);
     });
     layoutFlow(blocks, flat, convs, order, seen);
     // … ici, et pas avant : les blocs viennent seulement d'être posés dans le

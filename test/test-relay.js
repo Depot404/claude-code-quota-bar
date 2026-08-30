@@ -72,10 +72,17 @@ async function run() {
   if (raise) console.log(`       → PowerShell a répondu : ${raise.msg.replace('[QuotaBar] raise: ', '')}`);
 
   console.log('\n4. Requête fraîche mais conv INCONNUE de cette instance → pas de réponse');
+  // Ce qui se teste ici est l'absence d'ACTE (aucun onglet révélé, aucune fenêtre
+  // remontée). Les journaux de repli ne sont pas des actes : depuis 2.90.0,
+  // focus.js dit au journal quand la photo du memento est refusée et qu'il
+  // retombe sur les libellés — ce stub n'ayant pas de memento, ce repli est le
+  // chemin NORMAL du test, et le compter pour une réaction rendait le banc rouge
+  // sur son propre montage.
   n = events.length;
   write({ title: 'Conv qui n’existe nulle part', session_id: 's4', ts: Date.now(), origin_pid: 999999 });
   await wait(900);
-  check('aucune réaction', since(n).length === 0, JSON.stringify(since(n)));
+  const acts = since(n).filter((e) => e.event === 'command' || (e.event === 'log' && /raise:/.test(e.msg)));
+  check('aucune réaction', acts.length === 0, JSON.stringify(since(n)));
 
   child.kill();
   try { fs.unlinkSync(REQUEST_PATH); } catch {}

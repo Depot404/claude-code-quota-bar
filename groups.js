@@ -240,7 +240,11 @@ function createGroupStore(deps = {}) {
     return true;
   }
 
-  return {
+  // Nommé (au lieu d'un littéral rendu directement) parce qu'une méthode en
+  // appelle une autre : `addTask` délègue à `addTasks` pour que le seuil de
+  // vague n'existe qu'à un seul endroit, et `this` ne survivrait pas à un
+  // appel déstructuré.
+  const store = {
     all() { return groups; },
     get: find,
 
@@ -387,6 +391,13 @@ function createGroupStore(deps = {}) {
       const pivot = m.wave;
       if (g.members.filter((x) => x.wave === pivot).length === 1) {
         const target = pivot + d;
+        // Seuil INCHANGÉ ici, volontairement (2026-08-28) : un cran est un
+        // geste implicite — le même clic ne fait pas la même chose selon la
+        // vague de départ, et rien ne demande confirmation. Les deux portes
+        // qui, elles, acceptent désormais la vague EN COURS (addTasks, le menu
+        // setMemberWave) sont des DÉSIGNATIONS explicites, confirmées côté
+        // panneau avant de lancer quoi que ce soit. Ce geste-ci n'est d'ailleurs
+        // plus câblé à l'UI depuis 2026-08-27 (remplacé par le menu).
         if (target <= launchedWaveOf(g)) return false;
         if (!g.members.some((x) => x.wave === target)) return false;
         m.wave = target;
@@ -423,8 +434,10 @@ function createGroupStore(deps = {}) {
     //
     // Quatre refus, chacun le miroir d'une règle déjà tenue ailleurs :
     //   · membre déjà lancé (comme moveQueuedMember) — il est parti ;
-    //   · vague <= launchedWave (même seuil qu'addTask) — y arriver reviendrait
-    //     à être lancé aussitôt, la surprise que le design interdit ;
+    //   · vague STRICTEMENT sous launchedWave (même seuil qu'addTasks) — une
+    //     vague passée est terminée, y arriver ne veut rien dire ; la vague EN
+    //     COURS, elle, EST une destination depuis 2026-08-28 (le membre y part
+    //     aussitôt, extension.js s'en charge) ;
     //   · vague inexistante (> max) — ce serait fabriquer un trou depuis un
     //     état périmé ; « nouvelle vague » a sa propre valeur, `null` ;
     //   · tout ce qui ne changerait RIEN : la vague courante, et « nouvelle
@@ -443,7 +456,9 @@ function createGroupStore(deps = {}) {
         target = maxWave + 1;
       } else {
         const n = Number(wave);
-        if (!Number.isInteger(n) || n <= launchedWaveOf(g) || n > maxWave) return false;
+        // Même seuil qu'addTasks/moveQueuedMember : la vague EN COURS est une
+        // destination (le membre y part aussitôt), une vague PASSÉE non.
+        if (!Number.isInteger(n) || n < 1 || n < launchedWaveOf(g) || n > maxWave) return false;
         if (n === m.wave) return false;
         target = n;
       }
@@ -530,41 +545,99 @@ function createGroupStore(deps = {}) {
       return true;
     },
 
-    // Ajout d'une tâche EN FILE dans un groupe déjà créé (plan ajout-tache
-    // 2026-07-24) — le « + » par vague du panneau, ou sa ligne fantôme
+    // Ajout de tâches dans un groupe déjà créé (plan ajout-tache 2026-07-24,
+    // étendu 2026-08-28) — le « + » par vague du panneau, ou sa ligne fantôme
     // « nouvelle vague ». Fabrique IDENTIQUE à celle du Create (memberOfTask)
-    // pour la cohérence des champs ; AUCUN lancement (launchedAt forcé à
+    // pour la cohérence des champs ; AUCUN lancement ici (launchedAt forcé à
     // null, y compris pour une vague 1 encore vide : memberOfTask ne le sait
-    // pas faire tout seul, lui qui sert aussi create()). `wave` explicite
-    // (vague déjà en file) ou `null` = nouvelle vague, calculée ICI (max des
-    // vagues existantes + 1 — le store est seul à jour, pas le webview).
-    // Refuse une vague déjà lancée ou en cours (même seuil que
-    // moveQueuedMember : `target <= lw`) — y ajouter reviendrait à la lancer
-    // aussitôt, la surprise que le design interdit.
-    addTask(id, task, wave) {
+    // pas faire tout seul, lui qui sert aussi create()) — c'est extension.js
+    // qui ouvre ce qui atterrit dans une vague DÉJÀ OUVERTE, voir plus bas.
+    //
+    // `wave` explicite ou `null` = nouvelle vague à la fin, calculée ICI (max
+    // des vagues existantes + 1 — le store est seul à jour, pas le webview).
+    // Seuil (2026-08-28) : `n < lw` refusé, `n === lw` ACCEPTÉ. Une vague
+    // PASSÉE n'accepte plus rien (elle est finie, y poser une tâche ne veut
+    // rien dire) ; la vague EN COURS, si — demande explicite de l'user, qui
+    // veut glisser un lot dans la vague qui tourne. Ce n'est plus une
+    // « surprise » : le clic qui l'amène ici est confirmé côté webview.
+    //
+    // Les tâches portent des vagues RELATIVES (1..K, contiguës — garanties
+    // par batch.js normalizeTasks).
+    //
+    // DEUX GESTES, JAMAIS UN SEUL QUI DEVINE (2026-08-29). Jusqu'ici, poser un
+    // bloc « à partir de » la vague visée fondait sa première vague DANS elle
+    // et insérait les suivantes derrière : sur un bloc à 4 vagues déposé en
+    // vague 2, la tâche existante de la vague 2 se retrouvait à côté d'une
+    // nouvelle et le reste du lot était repoussé de 3 — mesuré, et signalé par
+    // l'user (« ça me fait un rendu archaïque… un gros bazar »). Le mélange
+    // n'était pas un bug de calcul : c'était l'ambiguïté d'un geste unique
+    // pour deux intentions. Elles sont désormais nommées par l'appelant :
+    //   · mode 'into'   — les tâches rejoignent la vague `wave` (elle existe
+    //     déjà). Réservé à un bloc qui tient en UNE vague : une vague ne peut
+    //     pas absorber une topologie, et l'aplatir en silence perdrait
+    //     l'ordonnancement voulu. K > 1 est donc refusé ici.
+    //   · mode 'before' — les K vagues du bloc s'insèrent AVANT la vague
+    //     `wave`, qui est repoussée avec toutes ses suivantes. Rien ne
+    //     fusionne, la topologie du bloc arrive intacte.
+    // `wave == null` (« + nouvelle vague ») reste le troisième cas : à la fin,
+    // le mode n'a alors rien à trancher.
+    // Rend la liste des clés créées (vide = rien fait).
+    addTasks(id, tasks, wave, mode) {
       const g = find(id);
-      if (!g) return false;
-      const prompt = typeof (task && task.prompt) === 'string' ? task.prompt.trim() : '';
-      if (!prompt) return false;
+      if (!g) return [];
+      const list = (Array.isArray(tasks) ? tasks : [])
+        .map((t) => ({
+          prompt: typeof (t && t.prompt) === 'string' ? t.prompt.trim() : '',
+          model: t && t.model,
+          effort: t && t.effort,
+          wave: Number.isInteger(t && t.wave) && t.wave > 0 ? t.wave : 1,
+        }))
+        .filter((t) => t.prompt);
+      if (!list.length) return [];
       const lw = launchedWaveOf(g);
-      let targetWave;
+      const rel = [...new Set(list.map((t) => t.wave))].sort((a, b) => a - b);
+      const insert = wave != null && mode === 'before';
+      let target;
       if (wave == null) {
-        targetWave = g.members.reduce((max, m) => Math.max(max, m.wave), 0) + 1;
+        target = g.members.reduce((max, m) => Math.max(max, m.wave), 0) + 1;
       } else {
         const n = Number(wave);
-        if (!Number.isInteger(n) || n < 1 || n <= lw) return false;
-        targetWave = n;
+        if (!Number.isInteger(n) || n < 1 || n < lw) return [];
+        // Une vague DÉJÀ OUVERTE accueille encore ce qu'on lui donne (demande
+        // du 2026-08-28), mais on ne peut pas se glisser DEVANT elle : ce qui
+        // atterrit sous `launchedWave` part aussitôt (extension.js
+        // openMembersInLaunchedWaves), donc insérer K vagues en amont les
+        // ouvrirait toutes d'un coup — exactement l'ordonnancement que le bloc
+        // demandait d'éviter. Le refus vaut mieux qu'un lancement en rafale.
+        if (insert && n <= lw) return [];
+        // Un bloc à plusieurs vagues ne rentre pas DANS une vague.
+        if (!insert && rel.length > 1) return [];
+        target = n;
       }
+      const offsetOf = new Map(rel.map((w, i) => [w, i]));
+      // Insertion : la vague visée est repoussée elle aussi (>=), sans quoi sa
+      // tâche existante se retrouverait mêlée à la première vague du bloc.
+      if (insert) g.members.forEach((m) => { if (m.wave >= target) m.wave += rel.length; });
       const used = new Set(g.members.map((m) => m.key));
+      const added = [];
       let i = g.members.length + 1;
-      while (used.has(`m${i}`)) i++;
-      const key = `m${i}`;
-      const member = memberOfTask({ prompt, model: task && task.model, effort: task && task.effort, wave: targetWave }, key, now());
-      member.launchedAt = null;
-      g.members.push(member);
+      for (const t of list) {
+        while (used.has(`m${i}`)) i++;
+        const key = `m${i}`;
+        used.add(key);
+        const member = memberOfTask({ prompt: t.prompt, model: t.model, effort: t.effort, wave: target + offsetOf.get(t.wave) }, key, now());
+        member.launchedAt = null;
+        g.members.push(member);
+        added.push(key);
+      }
       persist();
-      return true;
+      return added;
     },
+
+    // Compat d'appel (une tâche, verdict booléen) — même chemin, jamais une
+    // seconde implémentation : le seuil de vague ne doit exister qu'à un seul
+    // endroit.
+    addTask(id, task, wave, mode) { return store.addTasks(id, [task], wave, mode).length > 0; },
 
     attach,
 
@@ -655,6 +728,8 @@ function createGroupStore(deps = {}) {
       return before - groups.length;
     },
   };
+
+  return store;
 }
 
 module.exports = { createGroupStore, hueOf, sanitizeGroup };

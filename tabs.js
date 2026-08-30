@@ -245,6 +245,14 @@ function createTabTracker(handlers = {}) {
   // `createVerdictFilter` (ack-journal.js).
   let seq = 0;
   let actReport = null;             // { label, at } | null
+  // IDENTITÉ de l'onglet activé par le dernier acte (2026-08-29). Un acte ne
+  // portait jusqu'ici qu'un LIBELLÉ — inutilisable quand deux conversations en
+  // partagent un, c'est-à-dire exactement le cas que le focus par identité vient
+  // de résoudre côté clic. Sans ce canal, un clic exact laisserait le surlignage
+  // MUET (state.js refuse désormais de désigner au hasard) : l'onglet serait
+  // bon, la ligne surlignée nulle part. Ne vaut que tant que l'onglet actif est
+  // bien celui de l'acte — cf. son exposition dans getTabs.
+  let actIdentity = null;           // { label, sessionId } | null
   let lastTabsEventAt = 0;
   let frozen = false;
   let freezeTimer = null;
@@ -548,7 +556,12 @@ function createTabTracker(handlers = {}) {
     // Journalisé à CHAQUE appel, divergent ou non : c'est la seule vue qui dit
     // si l'acte confirmait déjà ce que l'API voit (fresh === label, rien à
     // armer) ou divergeait dès le départ (canal gelé, ou fenêtre sans focus).
-    logEvent('act-posted', { label, origin, isTrusted, fresh });
+    logEvent('act-posted', { label, origin, isTrusted, fresh, sessionId: (opts && opts.sessionId) || null });
+    // Identité de l'acte : posée AVANT toute sortie anticipée ci-dessous — le
+    // cas `label === fresh` (l'onglet visé était déjà l'actif) est justement
+    // celui d'un clic sur la conversation déjà à l'écran, où le surlignage doit
+    // pouvoir se poser sur la bonne sœur.
+    actIdentity = (opts && opts.sessionId) ? { label, sessionId: opts.sessionId } : null;
     // Porte de sortie n°1 de la quarantaine (lot C, 2026-08-27) : le clic sur
     // la ligne du panneau est le geste humain par excellence — il lève la
     // quarantaine de cet onglet AVANT toute écriture du souvenir, sinon
@@ -862,6 +875,11 @@ function createTabTracker(handlers = {}) {
       return {
         known: true, labels: allLabels(), activeLabel, activeIndex, frozen,
         source, windowFocused, sinceFocusMs: Date.now() - lastFocusGainedAt,
+        // Identité du dernier acte, servie UNIQUEMENT si l'onglet actif est
+        // toujours celui qu'il désignait : dès que l'actif change, l'acte ne
+        // dit plus rien de la sœur affichée et se tait (state.js retombe alors
+        // sur ses autres preuves d'identité, jamais sur un tirage au sort).
+        actSessionId: (actIdentity && actIdentity.label === activeLabel) ? actIdentity.sessionId : null,
         // Instant du dernier changement de valeur du souvenir — la référence
         // que l'arbitre « le renderer est le juge » (state.js) compare au
         // flush du memento renderer. Cf. sa déclaration en tête de tracker.

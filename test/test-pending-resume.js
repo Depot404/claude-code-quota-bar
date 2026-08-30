@@ -206,6 +206,34 @@ console.log('\n3. effectiveState : done + reprise autonome à venir = busy (si v
     effectiveState(entry, T0, NOW, false, T0, pending) === 'done');
   check('sans thunk (banc, reader nu) → comportement d\'avant', effectiveState(entry, T0, NOW, true, T0) === 'done');
 
+  // Plafond de fraîcheur (2026-08-28) — l'autre moitié appariée du spinner
+  // éternel : le lancement est là, la notification ne viendra jamais. Mesuré
+  // en réel sur la session 935cae15 (tâche à 02:07, entrée hooks `done` depuis
+  // 10:30, spinner toujours en rotation à 10:49). Au-delà du plafond, on
+  // retombe sur l'état ÉCRIT ; en deçà, rien ne change.
+  const oldPending = () => ({ pendingTask: true, pendingTaskAt: NOW - (61 * 60 * 1000), wakeupAt: null });
+  const freshPending = () => ({ pendingTask: true, pendingTaskAt: NOW - (59 * 60 * 1000), wakeupAt: null });
+  check('done + tâche de fond lancée il y a > 1 h sans notification → done (plus de spinner éternel)',
+    effectiveState(entry, T0, NOW, true, T0, oldPending) === 'done');
+  check('… la même à 59 min : encore busy (une tâche vraiment en vol n\'est pas coupée)',
+    effectiveState(entry, T0, NOW, true, T0, freshPending) === 'busy');
+  check('… signal non datable (0) : comportement d\'avant, jamais de coupe',
+    effectiveState(entry, T0, NOW, true, T0, () => ({ pendingTask: true, pendingTaskAt: 0, wakeupAt: null })) === 'busy');
+
+  // Signe de vie (2026-08-28, DEUXIEME signalement du meme symptome) : le
+  // plafond d'une heure ne suffisait pas. Cas reel mesure - commande de fond
+  // lancee a 11:45, tour termine a 11:53 (done ECRIT par le hook), transcript
+  // fige ensuite, spinner encore en rotation a 12:01 sur une conversation qui
+  // attendait une reponse de l'utilisateur. Une tache qui se termine vraiment
+  // ECRIT ; un transcript fige ne decrit pas un travail en cours.
+  const justLaunched = () => ({ pendingTask: true, pendingTaskAt: NOW - 60000, wakeupAt: null });
+  check('done + tache de fond recente + transcript qui bouge encore -> busy (le cas que la regle protege)',
+    effectiveState(entry, T0, NOW, true, NOW - 30000, justLaunched) === 'busy');
+  check('done + tache de fond recente mais transcript FIGE depuis 8 min -> done (plus de spinner sur une conv qui attend)',
+    effectiveState(entry, T0, NOW, true, NOW - 8 * 60 * 1000, justLaunched) === 'done');
+  check('... et si la notification finit par arriver, l ecriture rallume le busy toute seule',
+    effectiveState(entry, T0, NOW, true, NOW - 1000, justLaunched) === 'busy');
+
   // Le thunk ne doit PAS être tiré quand isResuming a déjà tranché (perf : pas
   // de scan 4 Mo pendant qu'une conv écrit).
   let called = 0;

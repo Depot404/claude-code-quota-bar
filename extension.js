@@ -24,7 +24,7 @@ const { installBatchPhilosophy: applyBatchPhilosophy, PHILOSOPHY_FILE: BATCH_PHI
 // globale). Il vit ici, et non dans le moteur d'état, parce que la ligne de
 // quota le consulte hors de tout snapshot.
 const { createCostReader } = require('./cost.js');
-const { focusConversation, createFocusRelay, setOpenSessionIdsSource } = require('./focus');
+const { focusConversation, createFocusRelay, setOpenSessionIdsSource, setSessionLocationsSource, sessionsWithTabHere } = require('./focus');
 const { createTabTracker, localActiveLabel } = require('./tabs');
 const { createAckTracker } = require('./ack');
 // Journal d'instrumentation du chemin d'ack (étape 18 phase 1, 5e récidive des
@@ -378,7 +378,14 @@ function activate(context) {
       });
       focusConversation(msg).then((label) => {
         if (label && tabTracker) {
-          tabTracker.reportActivation(label, { origin: 'panel-click', isTrusted: !!(msg && msg.isTrusted) });
+          // `sessionId` (2026-08-29) : l'acte porte désormais l'IDENTITÉ visée,
+          // pas seulement le libellé activé — sans quoi un clic exact sur l'une
+          // de deux sœurs homonymes laisserait le surlignage sans rien à
+          // désigner (state.js ne tranche plus au hasard). Cf. tabs.js
+          // `actIdentity`.
+          tabTracker.reportActivation(label, {
+            origin: 'panel-click', isTrusted: !!(msg && msg.isTrusted), sessionId,
+          });
         }
         if (stateEngine) stateEngine.refresh();
       }).catch(() => {});
@@ -508,6 +515,15 @@ function activate(context) {
   // jamais à l'aveugle, cf. focus.js `tryOfficialFocus`.
   const openSessionIds = createOpenSessionIds(stateDbPath);
   setOpenSessionIdsSource(() => openSessionIds.get());
+  // POSITION de l'onglet de chaque session (2026-08-29), lue dans le MÊME
+  // memento : c'est elle qui permet au clic de révéler l'onglet exact d'une
+  // conversation dont le libellé est partagé avec une autre — sans jamais
+  // appeler une commande capable d'ouvrir. Cf. focus.js `focusByIdentity`.
+  // `freshLocations` et non `locations` : un clic est rare, et il doit viser
+  // juste. La cadence de 30 s qui protège les dizaines de lectures par seconde
+  // du moteur deviendrait ici une source de positions périmées, alors même que
+  // le fichier a déjà été flushé sur disque.
+  setSessionLocationsSource(() => openSessionIds.freshLocations());
   // Vérité du RENDERER (refactor surlignage 2026-08-27, « le renderer est le
   // juge ») : l'éditeur ACTIF de cette fenêtre par IDENTITÉ, écrit par le
   // processus qui peint l'écran — la copie miroir tabGroups de l'hôte
@@ -543,6 +559,11 @@ function activate(context) {
     // non un fait observé.
     pinnedSessions: () => new Set(pinStore ? pinStore.list() : []),
     tabs: () => tabTracker.getTabs(),
+    // Instant d'activation de CETTE fenêtre : state.js s'en sert pour ne pas
+    // conclure « onglet fermé » pendant que les CLI respawnés par un reload
+    // republient leurs libellés (cf. ACTIVATION_GRACE_MS). Figé une fois, pas
+    // un thunk : c'est une date, pas un état.
+    activatedAt: Date.now(),
     sessionTitles: () => sessionTitles.get(),
     // Source de vérité de la présence (lot « présence par identifiant »,
     // 2026-08-26) : même Set que focus.js `tryOfficialFocus`, réutilisé ici
@@ -664,8 +685,12 @@ function activate(context) {
   // `focusConv` ci-dessus — c'est ICI, dans la fenêtre qui possède réellement
   // l'onglet, que l'acte doit être rapporté à SON tracker.
   context.subscriptions.push(createFocusRelay({
-    onActivated: (label, isTrusted) => {
-      if (tabTracker) tabTracker.reportActivation(label, { origin: 'relay', isTrusted: !!isTrusted });
+    onActivated: (label, isTrusted, sessionId) => {
+      if (tabTracker) {
+        tabTracker.reportActivation(label, {
+          origin: 'relay', isTrusted: !!isTrusted, sessionId: sessionId || null,
+        });
+      }
       if (stateEngine) stateEngine.refresh();
     },
   }));
@@ -911,25 +936,82 @@ const DEMO_GROUPS = [{
 //  2) removeSession : purge de sessions-state.json — sinon l'entrée `busy`
 //     ressusciterait la conv au prochain snapshot, ET les AUTRES fenêtres, qui
 //     n'ont pas notre marque de fermeture, continueraient de l'afficher.
-function closeConversations(labels) {
+function closeConversations(labels, isRetry) {
   if (!stateEngine || !labels || !labels.length) return;
   const convs = stateEngine.getSnapshot().conversations;
   const ids = [];
+  // Libellés ambigus que l'identité n'a pas encore pu départager, faute d'une
+  // disposition à jour sur disque. Un seul nouvel essai, court : VS Code
+  // réécrit `workbench.parts.editor` quand la grille d'éditeurs change (vérifié
+  // le 2026-08-30 — l'onglet fermé en avait bien disparu), mais rien ne garantit
+  // que ce soit fait à l'instant précis où l'événement nous parvient.
+  const unresolved = [];
+  // Sessions qui ont ENCORE un onglet ici, par identité (positions du memento
+  // validées contre l'état frais). `null` = photo inutilisable → on s'en tient
+  // au libellé, comme avant.
+  const stillOpen = sessionsWithTabHere();
   for (const l of labels) {
     const matches = convs.filter((c) => convMatchesLabel(l, c));
+    if (matches.length === 1) { ids.push(matches[0].sessionId); continue; }
     // Libellé ambigu (deux titres voisins tronqués sur le même préfixe, cf.
-    // labelMatches) : impossible de savoir laquelle des deux a VRAIMENT fermé
-    // son onglet — fermer les deux purgerait une conversation encore ouverte
-    // ailleurs. Même invariant que tabs.js : le doute profite à l'affichage,
-    // on ne ferme AUCUNE des deux plutôt qu'une mauvaise.
-    if (matches.length !== 1) continue;
-    ids.push(matches[0].sessionId);
+    // labelMatches). Le libellé ne PEUT pas dire laquelle des deux a fermé, et
+    // fermer les deux purgerait une conversation encore ouverte : on s'abstenait
+    // donc, et la ligne survivait jusqu'à ce que le verdict de présence finisse
+    // par conclure — plusieurs secondes, pendant lesquelles le membre d'un lot
+    // affichait « interrompue — jamais terminée » (signalé le 2026-08-30).
+    // L'identité, elle, sait : celle des deux qui n'a plus d'onglet ICI est
+    // celle qui vient de fermer. Une seule candidate ⇒ retrait immédiat ;
+    // sinon on garde l'abstention d'avant, jamais un pari.
+    if (matches.length < 2) continue;
+    const gone = stillOpen ? matches.filter((c) => !stillOpen.has(c.sessionId)) : [];
+    if (gone.length === 1) ids.push(gone[0].sessionId);
+    else unresolved.push(l);
+  }
+  if (unresolved.length && !isRetry) {
+    setTimeout(() => { try { closeConversations(unresolved, true); } catch {} }, 700);
   }
   if (!ids.length) return;
   stateEngine.markClosed(ids);
   for (const id of ids) {
     try { removeSession(id); } catch {}
   }
+  dissolveBatchesOfClosedMaster(labels, ids);
+}
+
+// Fermer l'onglet d'une conversation MAÎTRESSE dissout les lots qu'elle pilote
+// (demande user, 2026-08-29). L'intention est sans ambiguïté — « si je ferme la
+// conv de cadrage, c'est que le lot, je veux le dissoudre » — et le geste
+// coûtait jusqu'ici TROIS manipulations : fermer l'onglet, puis ⤴ sur la ligne
+// maîtresse, puis ⤴ sur chaque conversation restée dans le lot.
+//
+// Rien n'est fermé ni interrompu pour autant : `dissolve` ne touche QUE les
+// métadonnées (groups.js), les conversations encore ouvertes redeviennent des
+// lignes plates du panneau. C'est très exactement l'effet du ✕ de la poignée,
+// déclenché par un geste que l'utilisateur faisait déjà.
+//
+// POURQUOI BRANCHÉ ICI, et jamais sur la présence d'onglet : ce qu'on lit est
+// l'ÉVÉNEMENT de fermeture reçu par un hôte d'extension VIVANT, déjà filtré
+// deux fois en amont — tabs.js écarte l'onglet simplement déplacé (150 ms de
+// confirmation) et compare à l'union de TOUTES les fenêtres ; le libellé qui
+// matcherait deux conversations est refusé juste au-dessus. Le verdict de
+// présence « plus aucun onglet ne porte ce nom », lui, devient faux pour tout
+// le monde pendant quelques dizaines de secondes après un rechargement de
+// fenêtre (CLAUDE.md, 2026-08-28) : il ne doit JAMAIS pouvoir détruire de
+// métadonnées.
+//
+// GARDE DU RECHARGEMENT — un seul onglet dans la rafale. Un reload ou un
+// « Fermer tout » emporte tous les onglets ensemble ; l'utilisateur qui clique
+// une croix n'en ferme qu'un (deux clics successifs font deux rafales, séparées
+// par bien plus que les 150 ms de tabs.js). Une rafale multiple ne dissout donc
+// rien — même doctrine que l'ambiguïté de libellé : le doute ne détruit pas.
+function dissolveBatchesOfClosedMaster(labels, ids) {
+  if (!groupStore || labels.length !== 1) return;
+  const closed = new Set(ids);
+  // `.filter` copie : `all()` rend le tableau interne, que `dissolve` modifie.
+  const doomed = groupStore.all().filter((g) => g.masterSessionId && closed.has(g.masterSessionId));
+  let n = 0;
+  for (const g of doomed) if (groupStore.dissolve(g.id)) n++;
+  if (n) pushPanelState();
 }
 
 // L'ACCUSÉ DE LECTURE N'EST PLUS JAMAIS AUTOMATIQUE (décision user, 2026-08-06).
@@ -2268,6 +2350,27 @@ async function handleLaunchWave(msg) {
   await launchWaveForGroup(msg && msg.id, waveNumber, { auto: false });
 }
 
+// Un membre POSÉ dans une vague déjà ouverte (2026-08-28 : ajout « + cette
+// vague » sur la vague en cours, ou menu « vague n ▾ » qui la désigne) n'a
+// personne pour l'ouvrir — le moteur de vagues, lui, ne regarde QUE le passage
+// à la vague suivante (waveToAutoLaunch), et une vague qui contient un membre
+// `queued` n'est de toute façon jamais « done ». Sans ce chemin, la tâche
+// resterait en file pour toujours dans une vague partie : exactement le
+// blocage que ces deux gestes cherchent à lever.
+// Point unique, appelé APRÈS toute mutation qui peut déposer un membre sous
+// launchedWave — un second endroit qui le déduirait divergerait (cf. règle
+// « un fait d'affichage doit avoir UNE source »). launchWaveForGroup ne prend
+// que les `launchedAt == null` : rien de déjà parti ne peut repartir.
+async function openMembersInLaunchedWaves(id) {
+  const g = groupStore && groupStore.get(id);
+  if (!g) return;
+  const lw = g.members.reduce((max, m) => (m.launchedAt != null && m.wave > max ? m.wave : max), 0);
+  if (!lw) return;
+  const waves = [...new Set(g.members.filter((m) => m.launchedAt == null && m.wave <= lw).map((m) => m.wave))]
+    .sort((a, b) => a - b);
+  for (const w of waves) await launchWaveForGroup(id, w, { auto: false });
+}
+
 // Appelé à chaque recompute de state.js (transitions busy→done incluses) :
 // pour chaque groupe EN MODE AUTO dont la vague courante vient de se terminer
 // ENTIÈREMENT — et de façon PROUVÉE, cf. la garde plus bas — ouvre la suivante.
@@ -2356,15 +2459,20 @@ function maybeAdvanceWaves() {
 // Menu « vague n ▾ » d'une tâche EN FILE : le SEUL geste de déplacement offert
 // par le panneau depuis 2026-08-27, où il a remplacé les flèches ◂/▸ (un CRAN,
 // dont aucun nombre de clics ne pouvait exprimer une destination — cf. groups.js
-// setMemberWave). `wave` absent/null = « nouvelle vague à la fin ». Ce geste ne
-// lance rien et ne peut pas vider une vague déjà ouverte (seuls les membres en
-// file bougent) : pas de maybeAdvanceWaves, un simple push suffit.
-function setMemberWave(msg) {
+// setMemberWave). `wave` absent/null = « nouvelle vague à la fin ». Seuls des
+// membres EN FILE bougent, donc aucune vague ouverte ne peut se vider : pas de
+// maybeAdvanceWaves. Une seule chose peut partir d'ici — la destination
+// DÉSIGNÉE est la vague en cours (autorisée depuis 2026-08-28) : le membre y
+// est alors ouvert tout de suite, sinon il resterait en file dans une vague
+// déjà partie.
+async function setMemberWave(msg) {
   if (!groupStore) return;
   const raw = msg && msg.wave;
   const wave = raw == null ? null : Number(raw);
   if (wave != null && !Number.isInteger(wave)) return;
-  if (groupStore.setMemberWave(msg && msg.id, msg && msg.key, wave)) pushPanelState();
+  if (!groupStore.setMemberWave(msg && msg.id, msg && msg.key, wave)) return;
+  pushPanelState();
+  await openMembersInLaunchedWaves(msg && msg.id);
 }
 
 // ── Actions de groupe (lot 2) ───────────────────────────────────────────────
@@ -2447,19 +2555,7 @@ function removeMember(id, key) {
 // `queued`, cas déjà normal du moteur (waveToAutoLaunch/launchWaveForGroup
 // l'ouvriront à son tour).
 function addTaskToGroup(msg) {
-  if (!groupStore) return;
-  const id = msg && msg.id;
-  if (!groupStore.get(id)) return;
-  const kept = normalizeTasks([msg && msg.task], readInheritSettings());
-  if (!kept.length) return;
-  const wave = msg && msg.wave != null ? Number(msg.wave) : null;
-  if (wave != null && !Number.isInteger(wave)) return;
-  if (!groupStore.addTask(id, kept[0], wave)) return;
-  // Même raison que linkMember (rattachement manuel) : une vague déjà `done`
-  // en entier ne se relance JAMAIS toute seule sans ce recompute — sans lui,
-  // la tâche ajoutée à un groupe auto terminé reste `queued` pour toujours.
-  maybeAdvanceWaves();
-  pushPanelState();
+  return addTasksToGroup({ id: msg && msg.id, wave: msg && msg.wave, mode: msg && msg.mode, tasks: [msg && msg.task] });
 }
 
 // Transfert d'un bloc claude-convs multi-tâches DANS un groupe existant (plan
@@ -2470,25 +2566,39 @@ function addTaskToGroup(msg) {
 // `session:` du bloc y sont déjà ignorés, le groupe cible a les siens) ; il
 // envoie des vagues RELATIVES (1..M, contiguës, mêmes garanties que
 // createBatch) — normalizeTasks les redéfend (modèle/effort, jamais la vague :
-// une suite déjà contiguë depuis 1 ne bouge pas sous son renumérotage), puis
-// appendTasksAfterWave les décale sur le SEUL état à jour du groupe (le
-// webview a pu recevoir un state périmé entre son rendu et ce clic).
-function addTasksToGroup(msg) {
+// une suite déjà contiguë depuis 1 ne bouge pas sous son renumérotage), et
+// c'est groupStore.addTasks qui les pose sur le SEUL état à jour du groupe (le
+// webview a pu recevoir un state périmé entre son rendu et ce clic) : à partir
+// de `msg.wave`, ou à la suite du groupe quand elle est nulle.
+//
+// Chemin UNIQUE de l'ajout (2026-08-28) : `addTaskToGroup` (une tâche) n'est
+// plus qu'un appel d'ici. Avant, les deux messages avaient chacun leur
+// implémentation — et le refus des blocs multi-tâches sur « + cette vague »
+// venait de là, d'une seule des deux (constat user : « les boutons n'ajoutent
+// rien dès que j'ai plusieurs prompts prêts »).
+async function addTasksToGroup(msg) {
   if (!groupStore) return;
   const id = msg && msg.id;
   const g = groupStore.get(id);
   if (!g) return;
   const kept = normalizeTasks(msg && msg.tasks, readInheritSettings());
   if (!kept.length) return;
-  const appendAfter = g.members.reduce((max, m) => Math.max(max, m.wave), 0);
-  const remapped = appendTasksAfterWave(kept, appendAfter);
-  let added = false;
-  for (const task of remapped) {
-    if (groupStore.addTask(id, task, task.wave)) added = true;
-  }
-  if (!added) return;
+  const wave = msg && msg.wave != null ? Number(msg.wave) : null;
+  if (wave != null && !Number.isInteger(wave)) return;
+  // `mode` (2026-08-29) dit LEQUEL des deux gestes le clic était : rejoindre
+  // la vague visée, ou s'insérer devant elle. Le webview l'envoie parce que
+  // c'est lui qui a montré l'aperçu — le store ne doit rien redeviner. Absent
+  // (message d'une version antérieure) ⇒ 'into', le comportement d'avant.
+  const mode = msg && msg.mode === 'before' ? 'before' : 'into';
+  if (!groupStore.addTasks(id, kept, wave, mode).length) return;
+  // Même raison que linkMember (rattachement manuel) : une vague déjà `done`
+  // en entier ne se relance JAMAIS toute seule sans ce recompute — sans lui,
+  // la tâche ajoutée à un groupe auto terminé reste `queued` pour toujours.
   maybeAdvanceWaves();
   pushPanelState();
+  // Cible = la vague EN COURS : elle est déjà ouverte, personne d'autre ne
+  // viendra chercher ce membre.
+  await openMembersInLaunchedWaves(id);
 }
 
 // Conversations du panneau qui n'appartiennent à aucun groupe — la matière des

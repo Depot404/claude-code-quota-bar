@@ -338,11 +338,64 @@ function run() {
   check('groupe inconnu : sans effet', s13.addTask('nope', { prompt: 'x' }, 1) === false);
   check('persisté', st13.raw()[0].members.length === 4);
 
-  // Vague déjà lancée / en cours : jamais de dépôt (design du plan — y ajouter
-  // reviendrait à la lancer aussitôt en mode auto). m1 (vague 1) est lancé DÈS
-  // la création (comme le Create), lw vaut donc déjà 1 sans rien de plus à faire.
-  check('vague déjà lancée (1) : refusée', s13.addTask('ga0', { prompt: 'y' }, 1) === false);
-  check('le nombre de membres n\'a pas bougé', s13.get('ga0').members.length === 4);
+  // Vague EN COURS : ACCEPTÉE depuis 2026-08-28 (demande user — glisser un lot
+  // dans la vague qui tourne). m1 (vague 1) est lancé DÈS la création (comme le
+  // Create), lw vaut donc déjà 1 sans rien de plus à faire. Le membre naît
+  // quand même `queued` ici : c'est extension.js qui l'ouvre juste après.
+  check('vague EN COURS (1) : acceptée', s13.addTask('ga0', { prompt: 'y' }, 1) === true);
+  const withY = s13.get('ga0');
+  check('… déposée dans la vague 1, et queued dans le store',
+    withY.members.length === 5 && withY.members[4].wave === 1 && withY.members[4].launchedAt === null,
+    JSON.stringify(withY.members.map((m) => m.key + ':' + m.wave)));
+
+  // Vague PASSÉE : refusée. Elle est terminée, y poser une tâche ne veut rien
+  // dire — et rien ne viendrait jamais l'ouvrir.
+  const st13b = fakeStorage();
+  let s13bSeq = 0;
+  const s13b = createGroupStore({ load: st13b.load, save: st13b.save, now: () => 5000, newId: () => 'gb' + (s13bSeq++) });
+  s13b.create('Passe', [{ prompt: 'a', wave: 1 }, { prompt: 'b', wave: 2 }]);
+  s13b.markLaunched('gb0', 'm2', 6000);   // la vague 2 est partie : lw = 2
+  check('vague PASSÉE (1, alors que la 2 est lancée) : refusée', s13b.addTask('gb0', { prompt: 'z' }, 1) === false);
+  check('le nombre de membres n\'a pas bougé', s13b.get('gb0').members.length === 2);
+
+  // addTasks : N prompts d'un coup, et DEUX gestes nommés depuis le
+  // 2026-08-29 — 'into' (rejoindre la vague visée) et 'before' (s'insérer
+  // devant elle). Avant, un geste unique fondait la première vague du bloc
+  // dans la vague visée et intercalait les suivantes : sur un bloc à 4 vagues,
+  // l'user obtenait une vague existante mélangée à une nouvelle et le reste du
+  // lot repoussé (« un gros bazar », capture du 2026-08-29).
+  const st13c = fakeStorage();
+  let s13cSeq = 0;
+  const s13c = createGroupStore({ load: st13c.load, save: st13c.save, now: () => 5000, newId: () => 'gc' + (s13cSeq++) });
+  s13c.create('Bloc', [{ prompt: 'a', wave: 1 }, { prompt: 'b', wave: 2 }, { prompt: 'c', wave: 3 }]);
+  check('into, bloc mono-vague : les 2 tâches atterrissent DANS la vague visée, rien d\'autre ne bouge',
+    s13c.addTasks('gc0', [{ prompt: 'x', wave: 1 }, { prompt: 'y', wave: 1 }], 2, 'into').length === 2
+    && shape(s13c, 'gc0') === '1:m1 | 2:m2,m4,m5 | 3:m3', shape(s13c, 'gc0'));
+  check('into, bloc à 2 vagues : REFUSÉ — une vague ne peut pas tenir une topologie',
+    s13c.addTasks('gc0', [{ prompt: 'p', wave: 1 }, { prompt: 'q', wave: 2 }], 3, 'into').length === 0
+    && shape(s13c, 'gc0') === '1:m1 | 2:m2,m4,m5 | 3:m3', shape(s13c, 'gc0'));
+  // 'before' : le bloc arrive INTACT devant la vague visée, qui est repoussée
+  // avec ses suivantes. C'est le cas qui produisait le mélange.
+  check('before : les 2 vagues du bloc s\'insèrent en 3 et 4, l\'ancienne vague 3 devient 5',
+    s13c.addTasks('gc0', [{ prompt: 'p', wave: 1 }, { prompt: 'q', wave: 2 }], 3, 'before').length === 2
+    && shape(s13c, 'gc0') === '1:m1 | 2:m2,m4,m5 | 3:m6 | 4:m7 | 5:m3', shape(s13c, 'gc0'));
+  // Se glisser DEVANT la vague en cours ouvrirait d'un coup tout ce qu'on
+  // insère (extension.js openMembersInLaunchedWaves) : c'est justement
+  // l'ordonnancement que le bloc demandait d'éviter.
+  const st13d = fakeStorage();
+  let s13dSeq = 0;
+  const s13d = createGroupStore({ load: st13d.load, save: st13d.save, now: () => 5000, newId: () => 'gd' + (s13dSeq++) });
+  s13d.create('Devant', [{ prompt: 'a', wave: 1 }, { prompt: 'b', wave: 2 }]);
+  check('before sur la vague EN COURS : refusé', s13d.addTasks('gd0', [{ prompt: 'z', wave: 1 }], 1, 'before').length === 0
+    && shape(s13d, 'gd0') === '1:m1 | 2:m2', shape(s13d, 'gd0'));
+  check('into sur la vague EN COURS : toujours accepté (elle est ouverte, le membre part aussitôt)',
+    s13d.addTasks('gd0', [{ prompt: 'z', wave: 1 }], 1, 'into').length === 1
+    && shape(s13d, 'gd0') === '1:m1,m3 | 2:m2', shape(s13d, 'gd0'));
+  check('before sur une vague EN FILE : accepté', s13d.addTasks('gd0', [{ prompt: 'w', wave: 1 }], 2, 'before').length === 1
+    && shape(s13d, 'gd0') === '1:m1,m3 | 2:m4 | 3:m2', shape(s13d, 'gd0'));
+  check('liste vide ou prompts blancs : rien, et aucune clé rendue',
+    s13c.addTasks('gc0', [], 1).length === 0 && s13c.addTasks('gc0', [{ prompt: '  ' }], 2).length === 0);
+  check('groupe inconnu : sans effet', s13c.addTasks('nope', [{ prompt: 'x' }], 1).length === 0);
 
   console.log('\n13. rearm : réarmer un lien MORT-NÉ (plan lien-mort-né 2026-08-04)');
   const st14 = fakeStorage();
@@ -427,10 +480,21 @@ function run() {
   check('la vague COURANTE d\'un membre : REFUSÉE (le menu la marque « ici », non cliquable)',
     s16.setMemberWave('gd0', 'm4', 3) === false);
 
-  // Les trois seuils, les mêmes qu'addTask et moveQueuedMember — le menu ne
-  // doit jamais offrir une porte que le store refuserait en silence.
-  check('vague déjà lancée : REFUSÉE (y arriver reviendrait à être lancé aussitôt)',
-    s16.setMemberWave('gd0', 'm4', 1) === false);
+  // Les seuils, les mêmes qu'addTasks et moveQueuedMember — le menu ne doit
+  // jamais offrir une porte que le store refuserait en silence, ni en refuser
+  // une que le store accepterait.
+  //
+  // La vague EN COURS est une DESTINATION depuis 2026-08-28 (demande user :
+  // « lot 11, j'aimerais pouvoir le mettre en vague 2 qui vient de commencer,
+  // ce n'est pas proposé »). Le store la prend ; c'est extension.js
+  // (openMembersInLaunchedWaves) qui ouvre le membre juste après, une vague
+  // déjà partie n'ayant personne d'autre pour venir le chercher.
+  check('vague EN COURS : ACCEPTÉE (le membre part aussitôt, côté extension)',
+    s16.setMemberWave('gd0', 'm4', 1) === true && shape(s16, 'gd0') === '1:m1,m2,m4 | 2:m3,m5', shape(s16, 'gd0'));
+  check('… et il reste queued DANS le store (aucun lancement ici)',
+    s16.get('gd0').members.find((m) => m.key === 'm4').launchedAt === null);
+  // Remis en file pour la suite des refus (et pour retrouver trois vagues).
+  check('retour en nouvelle vague à la fin', s16.setMemberWave('gd0', 'm4', null) === true);
   check('vague inexistante (> max) : REFUSÉE (jamais de trou depuis un état périmé)',
     s16.setMemberWave('gd0', 'm4', 9) === false);
   check('numéro non entier ou négatif : REFUSÉ',
