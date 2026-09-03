@@ -1,23 +1,26 @@
-// Banc de l'arbitre « LE RENDERER EST LE JUGE » (refactor surlignage,
-// 2026-08-27) — state.js buildSnapshot, aval du verdict par libellés.
+// Banc du JUGE RENDERER — state.js buildSnapshot, aval du verdict par libellés.
 //
-// L'incident fondateur (journal 2026-08-27, fenêtre « 142 modifications ») :
-// la copie miroir tabGroups adopte une bascule fantôme fenêtre SANS focus,
-// puis plus AUCUN événement ne vient jamais la corriger — surlignage faux 14
-// minutes, réparé par rien. Pendant tout ce temps, le memento
-// workbench.parts.editor du state.vscdb (écrit par le RENDERER, le processus
-// qui peint l'écran) disait vrai, par identité. Ce banc prouve le contrat qui
-// ferme la classe entière :
-//   §1 vérité renderer FRAÎCHE et divergente → elle gagne (correction visible,
-//      journalisée, publiée au panneau) ;
-//   §2 le même épisode ne se journalise qu'UNE fois (l'arbitrage, lui, se
-//      réapplique à chaque recompute) ;
-//   §3 vérité PLUS VIEILLE que le dernier avis du tracker → elle ne
-//      rétrograde JAMAIS un choix frais ;
-//   §4 vérité = verdict → aucun épisode ;
-//   §5 vérité hors liste, ou actif non-Claude → l'arbitre se tait ;
-//   §6 tabs sans labelChangedAt (bancs/appelants d'avant ce lot) → inactif ;
-//   §7 l'épisode publié expire (le bandeau ne vit pas éternellement).
+// Ce que le juge fait depuis 2.106.0, et RIEN d'autre depuis 2.110.0 : il COMBLE
+// un surlignage vide. Un miroir d'onglets honnête donne le bon LIBELLÉ, jamais
+// une IDENTITÉ ; quand ce libellé ne correspond à aucune conversation listée
+// (onglet renommé avec le début du prompt de sa tâche — mesuré le 2026-09-02,
+// signalé par l'user), il ne reste rien et la ligne de l'onglet regardé ne
+// s'allume plus. Le memento `workbench.parts.editor` du state.vscdb, écrit par
+// le RENDERER, nomme la session affichée : c'est lui qui remplit ce vide.
+//
+// Ce qu'il ne fait PLUS (retiré en 2.110.0 avec le bug qui le motivait —
+// microsoft/vscode#331914, corrigé dans VS Code 1.135) : ÉCRASER un choix déjà
+// posé pour corriger un mensonge de la copie miroir. Avec cette branche sont
+// partis la marge longue de 45 s, les épisodes `highlight-reconciled`, le
+// bandeau du panneau et `reconcileMemory`.
+//
+//   §1 verdict par libellés MUET + memento frais → la ligne s'allume, marge
+//      courte (3 s), rien à rétrograder ;
+//   §2 un choix DÉJÀ posé n'est jamais écrasé, si vieux soit-il ;
+//   §3 juge inutilisable (memento en retard, actif non-Claude, session hors
+//      liste, tabs sans labelChangedAt) → il se tait ;
+//   §4 onglet RENOMMÉ + positions du memento validées → la ligne s'allume TOUT
+//      DE SUITE par identité, sans attendre aucun flush (2026-09-03).
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -53,227 +56,118 @@ writeTranscript('b', 'Conv B', 10);
 
 const DEFAULT_JOURNAL = path.join(SANDBOX, '.claude', 'quotabar-ack-journal.jsonl');
 const lines = () => journal.readJournal(DEFAULT_JOURNAL);
-const reconciles = () => lines().filter((l) => l.event === 'highlight-reconciled');
 const verdicts = () => lines().filter((l) => l.event === 'highlight-verdict');
 
-// Les marges réelles restent en place — 45 s pour écraser un choix
-// (QUOTABAR_TRUTH_MARGIN_MS, dimensionnée sur la latence mesurée du memento),
-// 3 s pour combler un vide (QUOTABAR_TRUTH_FILL_MARGIN_MS) : les timestamps
-// fabriqués ci-dessous les encadrent largement des deux côtés.
+// La marge réelle reste en place — 3 s (QUOTABAR_TRUTH_FILL_MARGIN_MS) : les
+// timestamps fabriqués ci-dessous l'encadrent largement des deux côtés.
 const NOW = Date.now();
-const tabsWith = (labelChangedAt) => () => ({
-  known: true, labels: ['Conv A', 'Conv B'], activeLabel: 'Conv A', frozen: false,
-  source: 'fresh', windowFocused: true, sinceFocusMs: 42, labelChangedAt,
-});
-function snapshot(rendererActive, labelChangedAt, memory) {
-  const reader = state.createTranscriptReader();
-  return state.buildSnapshot({
+const reader = state.createTranscriptReader();
+// `activeLabel` qui ne matche AUCUNE conversation listée : c'est LA condition
+// d'entrée du juge — le verdict par libellés est muet, il n'y a aucun choix.
+const NO_MATCH = 'Rétablis une surface visible pour une conv…';
+function build(tabsPatch, rendererActive, extra) {
+  return state.buildSnapshot(Object.assign({
     workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: tabsWith(labelChangedAt),
-    rendererActive: () => rendererActive,
-    reconcileMemory: memory,
-  }, reader);
-}
-
-console.log('\n1. Vérité renderer fraîche et divergente → correction immédiate, alerte différée');
-{
-  const mem = {};
-  // Tracker : dernier avis il y a 60 s (le fantôme adopté) ; renderer : flush
-  // il y a 1 s, actif = Conv B. flushedAt - marge > labelChangedAt → arbitrage.
-  const snap = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  const b = snap.conversations.find((c) => c.sessionId === 'b');
-  const a = snap.conversations.find((c) => c.sessionId === 'a');
-  check('la conv désignée par le renderer est surlignée', b && b.isActive === true,
-    JSON.stringify(snap.conversations.map((c) => [c.sessionId, c.isActive])));
-  check('… et une seule (l\'ancienne s\'éteint)', a && a.isActive === false);
-  check('le verdict journalisé porte via:renderer-truth',
-    verdicts().length > 0 && verdicts()[verdicts().length - 1].via === 'renderer-truth',
-    JSON.stringify(verdicts()[verdicts().length - 1]));
-  check('l\'épisode highlight-reconciled est journalisé avec les deux identités',
-    reconciles().length === 1 && reconciles()[0].wasSessionId === 'a' && reconciles()[0].nowSessionId === 'b'
-    && reconciles()[0].wasTitle === 'Conv A' && reconciles()[0].nowTitle === 'Conv B',
-    JSON.stringify(reconciles()[0]));
-  check('… mais PAS de bandeau immédiat : l\'alerte attend la grâce',
-    !snap.highlightReconcile, JSON.stringify(snap.highlightReconcile));
-
-  console.log('\n2. Même épisode, recomputes suivants : arbitrage réappliqué, journal muet');
-  const snap2 = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('le surlignage reste corrigé au recompute suivant',
-    snap2.conversations.find((c) => c.sessionId === 'b').isActive === true);
-  check('aucune seconde ligne highlight-reconciled', reconciles().length === 1, String(reconciles().length));
-  check('toujours pas de bandeau avant la grâce', !snap2.highlightReconcile);
-
-  console.log('\n2bis. La divergence persiste au-delà de la grâce → bandeau promu');
-  process.env.QUOTABAR_RECONCILE_GRACE_MS = '0';
-  const snap3 = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  delete process.env.QUOTABAR_RECONCILE_GRACE_MS;
-  check('bandeau publié, daté du DÉBUT de l\'épisode',
-    snap3.highlightReconcile && snap3.highlightReconcile.nowSessionId === 'b'
-    && snap3.highlightReconcile.at === reconciles()[0].at,
-    JSON.stringify(snap3.highlightReconcile));
-  check('la promotion laisse une ligne highlight-banner',
-    lines().filter((l) => l.event === 'highlight-banner').length === 1);
-  check('… et toujours une seule ligne highlight-reconciled', reconciles().length === 1);
-}
-
-console.log('\n3. Vérité PLUS VIEILLE que le dernier avis du tracker → jamais de rétrogradation');
-{
-  const mem = {};
-  // Clic tout frais (labelChangedAt il y a 1 s) ; memento flushé il y a 70 s.
-  const snap = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 70 * 1000 }, NOW - 1000, mem);
-  check('le verdict par libellés (Conv A) reste intact',
-    snap.conversations.find((c) => c.sessionId === 'a').isActive === true
-    && snap.conversations.find((c) => c.sessionId === 'b').isActive === false,
-    JSON.stringify(snap.conversations.map((c) => [c.sessionId, c.isActive])));
-  check('aucun épisode fabriqué', !snap.highlightReconcile && reconciles().length === 1);
-}
-
-console.log('\n4. Vérité = verdict → concordance silencieuse');
-{
-  const mem = {};
-  const snap = snapshot({ sessionId: 'a', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('surlignage inchangé, aucun épisode',
-    snap.conversations.find((c) => c.sessionId === 'a').isActive === true
-    && !snap.highlightReconcile && reconciles().length === 1);
-}
-
-console.log('\n5. Vérité inutilisable → l\'arbitre se tait');
-{
-  const mem = {};
-  const snapUnknown = snapshot({ sessionId: 'zz-hors-liste', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('sessionId hors liste → verdict par libellés conservé, jamais de surlignage invisible',
-    snapUnknown.conversations.find((c) => c.sessionId === 'a').isActive === true && !snapUnknown.highlightReconcile);
-  const snapFile = snapshot({ sessionId: null, claude: false, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('actif non-Claude (fichier) → repli-souvenir conservé',
-    snapFile.conversations.find((c) => c.sessionId === 'a').isActive === true && !snapFile.highlightReconcile);
-}
-
-console.log('\n6. Appelant d\'avant ce lot (tabs sans labelChangedAt) → arbitre inactif');
-{
-  const reader = state.createTranscriptReader();
-  const snap = state.buildSnapshot({
-    workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: () => ({ known: true, labels: ['Conv A', 'Conv B'], activeLabel: 'Conv A', frozen: false, source: 'fresh', windowFocused: true, sinceFocusMs: 42 }),
-    rendererActive: () => ({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }),
-    reconcileMemory: {},
-  }, reader);
-  check('sans référence temporelle, jamais d\'arbitrage (comportement d\'avant)',
-    snap.conversations.find((c) => c.sessionId === 'a').isActive === true && !snap.highlightReconcile);
-}
-
-console.log('\n7. L\'épisode publié expire');
-{
-  const mem = {};
-  process.env.QUOTABAR_RECONCILE_GRACE_MS = '0';
-  snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  const promoted = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  delete process.env.QUOTABAR_RECONCILE_GRACE_MS;
-  check('épisode promu (grâce 0, deux recomputes)', !!promoted.highlightReconcile);
-  // On vieillit l'épisode mémorisé au-delà du TTL : la publication cesse, le
-  // journal garde sa trace (c'est son rôle).
-  mem.last.at = Date.now() - 11 * 60 * 1000;
-  const snap = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('après 10 min, highlightReconcile n\'est plus publié',
-    !snap.highlightReconcile, JSON.stringify(snap.highlightReconcile));
-  check('… mais l\'arbitrage, lui, continue de s\'appliquer',
-    snap.conversations.find((c) => c.sessionId === 'b').isActive === true);
-}
-
-console.log('\n8. Un surlignage VIDE comblé n\'est jamais une alerte (les deux faux positifs du 2026-08-27)');
-{
-  const mem = {};
-  // Verdict par libellés muet : l'onglet actif ne matche AUCUNE conv (état
-  // transitoire « Claude Code » / renommage) et pas d'active-session de repli
-  // pour cette liste — wasSessionId sera null.
-  const reader = state.createTranscriptReader();
-  const tabsNoMatch = () => ({
-    known: true, labels: ['Conv A', 'Conv B'], activeLabel: 'Aucun onglet ne matche…', frozen: false,
-    source: 'fresh', windowFocused: true, sinceFocusMs: 42, labelChangedAt: NOW - 60 * 1000,
-  });
-  const args = {
-    workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: tabsNoMatch,
-    rendererActive: () => ({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }),
-    reconcileMemory: mem,
-  };
-  process.env.QUOTABAR_RECONCILE_GRACE_MS = '0';
-  const s1 = state.buildSnapshot(args, reader);
-  const s2 = state.buildSnapshot(args, reader);
-  delete process.env.QUOTABAR_RECONCILE_GRACE_MS;
-  check('le vide est comblé (la conv du renderer est surlignée)',
-    s2.conversations.find((c) => c.sessionId === 'b').isActive === true);
-  check('mais aucun bandeau, même la grâce écoulée',
-    !s1.highlightReconcile && !s2.highlightReconcile,
-    JSON.stringify(s2.highlightReconcile));
-}
-
-console.log('\n9. Un transitoire résorbé avant la grâce s\'éteint sans bandeau');
-{
-  const mem = {};
-  const before = reconciles().length;
-  snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('épisode en observation journalisé', reconciles().length === before + 1);
-  // Le tracker se réaligne (vérité = verdict) : l'observation s'annule.
-  const aligned = snapshot({ sessionId: 'a', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('résorbé avant la grâce → aucun bandeau', !aligned.highlightReconcile && !mem.pending && !mem.last);
-  // Une re-divergence repart de zéro : nouvelle observation, pas de bandeau
-  // hérité de la précédente.
-  const again = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 1000 }, NOW - 60 * 1000, mem);
-  check('la re-divergence repart de zéro (nouvelle observation, pas de bandeau immédiat)',
-    reconciles().length === before + 2 && !again.highlightReconcile,
-    `${reconciles().length - before} épisodes`);
-}
-
-console.log('\n10. Le juge ne rétrograde pas un clic frais avec un memento en RETARD (les 4 faux épisodes du 2026-08-27)');
-{
-  // Reconstitution à l'échelle réelle de l'épisode 18:02:15 → 18:02:23 : clic
-  // panneau isTrusted il y a 7 s (labelChangedAt), state.vscdb flushé il y a
-  // 0,4 s — mais ce flush ne portait PAS le clic (la clé workbench.parts.editor
-  // met jusqu'à 27 s à le refléter, mesuré). Avec l'ancienne marge de 3 s,
-  // l'arbitre corrigeait ; il doit maintenant se taire.
-  const mem = {};
-  const before = reconciles().length;
-  const deferred = () => lines().filter((l) => l.event === 'highlight-truth-deferred');
-  // Le §3 en a déjà produit une (même garde, autre scénario) : on compte le
-  // DELTA de cet épisode-ci, pas le total du banc.
-  const beforeDeferred = deferred().length;
-  const snap = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 400 }, NOW - 7000, mem);
-  check('le clic de 7 s reste surligné (aucune rétrogradation)',
-    snap.conversations.find((c) => c.sessionId === 'a').isActive === true
-    && snap.conversations.find((c) => c.sessionId === 'b').isActive === false,
-    JSON.stringify(snap.conversations.map((c) => [c.sessionId, c.isActive])));
-  check('aucun épisode journalisé', reconciles().length === before);
-  check('… mais le refus, lui, laisse une trace mesurable',
-    deferred().length === beforeDeferred + 1, JSON.stringify(deferred().slice(beforeDeferred)));
-  check('… une seule fois pour le même épisode retenu',
-    (snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 400 }, NOW - 7000, mem),
-     deferred().length === beforeDeferred + 1), String(deferred().length - beforeDeferred));
-  // Le même avis du tracker, jugé par un memento assez vieux pour l'avoir vu :
-  // le filet universel doit rester capable de corriger un vrai mensonge.
-  const late = snapshot({ sessionId: 'b', claude: true, flushedAt: NOW - 400 }, NOW - 60 * 1000, mem);
-  check('mensonge DURABLE (avis du tracker vieux de 60 s) → le filet joue encore',
-    late.conversations.find((c) => c.sessionId === 'b').isActive === true,
-    JSON.stringify(late.conversations.map((c) => [c.sessionId, c.isActive])));
-}
-
-console.log('\n11. Combler un VIDE garde la marge courte (rien à rétrograder)');
-{
-  const mem = {};
-  const reader = state.createTranscriptReader();
-  // Verdict par libellés muet ET clic tout frais (5 s) : le juge n'écrase
-  // aucun choix, il remplit — la marge de 45 s ne s'applique pas ici.
-  const snap = state.buildSnapshot({
-    workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: () => ({
-      known: true, labels: ['Conv A', 'Conv B'], activeLabel: 'Aucun onglet ne matche…', frozen: false,
+    tabs: () => Object.assign({
+      known: true, labels: ['Conv A', 'Conv B'], activeLabel: NO_MATCH,
       source: 'fresh', windowFocused: true, sinceFocusMs: 42, labelChangedAt: NOW - 5000,
-    }),
-    rendererActive: () => ({ sessionId: 'b', claude: true, flushedAt: NOW - 400 }),
-    reconcileMemory: mem,
-  }, reader);
-  check('le vide est comblé tout de suite',
-    snap.conversations.find((c) => c.sessionId === 'b').isActive === true,
-    JSON.stringify(snap.conversations.map((c) => [c.sessionId, c.isActive])));
+    }, tabsPatch),
+    rendererActive: () => rendererActive,
+  }, extra || {}), reader);
+}
+const activeOf = (snap) => snap.conversations.filter((c) => c.isActive).map((c) => c.sessionId);
+
+console.log('\n1. Verdict par libellés MUET + memento frais → la ligne s\'allume (marge courte)');
+{
+  // Le cas signalé par l'user sur VS Code 1.135 : ses onglets ont été renommés
+  // avec le début du PROMPT de leur tâche pendant que le panneau garde le titre
+  // — donc `activeLabel` ne correspond à aucune ligne (matches:0, via:none) et
+  // plus rien ne s'allume quand on focuse l'onglet. Combler n'écrase aucun
+  // choix : la marge de 3 s suffit (ici, clic vieux de 5 s, flush de 0,4 s).
+  const snap = build({}, { sessionId: 'b', claude: true, flushedAt: NOW - 400 });
+  check('la ligne de l\'onglet réellement affiché s\'allume, alors qu\'aucun libellé ne matche',
+    JSON.stringify(activeOf(snap)) === '["b"]', JSON.stringify(activeOf(snap)));
+  const v = verdicts()[verdicts().length - 1];
+  check('… et le journal dit d\'où vient ce verdict : via:renderer-truth, matches:0',
+    v && v.via === 'renderer-truth' && v.matches === 0, JSON.stringify(v));
+}
+
+console.log('\n2. Un choix DÉJÀ posé n\'est JAMAIS écrasé (le juge ne corrige plus rien)');
+{
+  // Même memento frais qu'au §1, mais cette fois le libellé actif désigne bien
+  // une conversation : le verdict par libellés a tranché, et il tient — même si
+  // le memento nomme l'autre. C'est `judgeAllowed = !highlightSessionId`.
+  const snap = build({ activeLabel: 'Conv A' }, { sessionId: 'b', claude: true, flushedAt: NOW - 400 });
+  check('le verdict par libellés (Conv A) reste, le memento ne le contredit pas',
+    JSON.stringify(activeOf(snap)) === '["a"]', JSON.stringify(activeOf(snap)));
+  // Et même avec un avis de tracker très ancien : ce qui garde la main n'est
+  // pas la fraîcheur, c'est le fait qu'une preuve a DÉJÀ désigné une ligne.
+  const old = build({ activeLabel: 'Conv A', labelChangedAt: NOW - 10 * 60 * 1000 },
+    { sessionId: 'b', claude: true, flushedAt: NOW - 400 });
+  check('… y compris quand l\'avis du tracker date de 10 minutes',
+    JSON.stringify(activeOf(old)) === '["a"]', JSON.stringify(activeOf(old)));
+}
+
+console.log('\n3. Juge inutilisable → il se tait, personne n\'est surligné au hasard');
+{
+  const late = build({}, { sessionId: 'b', claude: true, flushedAt: NOW - 4000 });
+  check('memento PLUS VIEUX que le dernier avis du tracker → rien (il n\'apprend rien)',
+    activeOf(late).length === 0, JSON.stringify(activeOf(late)));
+
+  const onFile = build({}, { sessionId: null, claude: false, flushedAt: NOW - 400 });
+  check('actif non-Claude (l\'utilisateur est sur un fichier) → rien',
+    activeOf(onFile).length === 0, JSON.stringify(activeOf(onFile)));
+
+  const unknown = build({}, { sessionId: 'zz-hors-liste', claude: true, flushedAt: NOW - 400 });
+  check('session hors liste → rien (jamais de surlignage sur de l\'invisible)',
+    activeOf(unknown).length === 0, JSON.stringify(activeOf(unknown)));
+
+  const noClock = build({ labelChangedAt: undefined }, { sessionId: 'b', claude: true, flushedAt: NOW - 400 });
+  check('tabs sans labelChangedAt (appelant d\'avant ce lot) → juge inactif',
+    activeOf(noClock).length === 0, JSON.stringify(activeOf(noClock)));
+
+  const noJudge = build({}, null);
+  check('rendererActive absent (base illisible) → juge inactif, aucune erreur',
+    activeOf(noJudge).length === 0, JSON.stringify(activeOf(noJudge)));
+}
+
+console.log('\n4. Onglet RENOMMÉ, positions du memento validées → la ligne s\'allume TOUT DE SUITE, par identité (2026-09-03)');
+{
+  // §1 comble par le juge — donc à la cadence des flushs du renderer (~5 s
+  // mesurées le 2026-09-03, et à zéro à chaque changement d'onglet en
+  // attendant le flush suivant). Or la TABLE des positions, validée en bloc,
+  // nommait déjà la session à l'index actif ; elle était écartée parce que le
+  // libellé trouvé là (« ok go », dernier prompt) ne matchait pas le titre.
+  // Un libellé qui ne nomme PERSONNE ne contredit pas l'identité (labels.js
+  // `labelNamesAnother`) : la position s'adopte, l'index actif désigne la ligne,
+  // sans attendre aucun juge.
+  const positions = () => ({
+    byId: new Map([
+      ['a', { viewColumn: 1, index: 0, flatIndex: 0 }],
+      ['b', { viewColumn: 1, index: 1, flatIndex: 1 }],
+    ]),
+    activeFlatIndex: 1,
+  });
+  const snap = build(
+    { labels: ['Conv A', 'ok go'], activeLabel: 'ok go', activeIndex: 1, labelChangedAt: NOW - 100 },
+    { sessionId: null, claude: false, flushedAt: null },   // juge MUET : rien à combler
+    { sessionTabLocations: positions });
+  check('la conversation dont l\'onglet a été renommé « ok go » est surlignée sans aucun flush du renderer',
+    JSON.stringify(activeOf(snap)) === '["b"]', JSON.stringify(activeOf(snap)));
+  const v = verdicts()[verdicts().length - 1];
+  check('… et le journal dit d\'où vient ce verdict : via:identity, matches:0',
+    v && v.via === 'identity' && v.matches === 0, JSON.stringify(v));
+
+  // L'autre monde : même photo, mais les onglets ont été RÉORDONNÉS depuis le
+  // flush — à l'index 1 on trouve « Conv A », qui NOMME la conversation a. La
+  // position de b est donc périmée : écartée, et c'est a (le libellé actif) qui
+  // s'allume, par libellé comme avant.
+  const snap2 = build(
+    { labels: ['Conv B', 'Conv A'], activeLabel: 'Conv A', activeIndex: 1, labelChangedAt: NOW - 100 },
+    { sessionId: null, claude: false, flushedAt: null },
+    { sessionTabLocations: positions });
+  check('onglets réordonnés : le libellé à la position nomme a → la position de b est écartée, a s\'allume',
+    JSON.stringify(activeOf(snap2)) === '["a"]', JSON.stringify(activeOf(snap2)));
 }
 
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}

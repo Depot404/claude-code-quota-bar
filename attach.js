@@ -173,7 +173,11 @@ function pendingForRelink(groups, truthOf) {
 const HEIR_WINDOW_MS = 60000;
 // Marge sous launchedAt : startedAt vient de l'horloge du CLI, launchedAt de
 // la nôtre — même machine, mais l'écriture du fichier peut précéder de peu.
-const HEIR_SLACK_MS = 5000;
+// UNE SEULE définition de cette marge pour tout le projet (2026-09-01) :
+// launcher.js juge la même grandeur (« ce process a-t-il démarré après mon
+// appel ? ») et deux valeurs divergentes rendraient l'étage 1 et l'étage 1bis
+// contradictoires sur la même session.
+const CLI_CLOCK_SLACK_MS = 5000;
 
 // members  : [{ groupId, key, launchedAt }]   (pendingForRelink)
 // sessions : [{ sessionId, startedAt }]
@@ -185,7 +189,7 @@ function matchHeirs(members, sessions) {
   const pairs = [];
   for (const m of mem) {
     for (const s of ses) {
-      if (s.startedAt < m.launchedAt - HEIR_SLACK_MS) continue;
+      if (s.startedAt < m.launchedAt - CLI_CLOCK_SLACK_MS) continue;
       if (s.startedAt > m.launchedAt + HEIR_WINDOW_MS) continue;
       pairs.push({ m, s });
     }
@@ -207,6 +211,7 @@ function matchHeirs(members, sessions) {
 }
 
 module.exports = {
-  matchPending, pendingForRelink, matchHeirs, HEIR_WINDOW_MS, looksLikeSamePrompt, identifiesConversation,
+  matchPending, pendingForRelink, matchHeirs, HEIR_WINDOW_MS, CLI_CLOCK_SLACK_MS,
+  looksLikeSamePrompt, identifiesConversation,
   normalizeForMatch, MIN_PREFIX, CMP_LEN,
 };

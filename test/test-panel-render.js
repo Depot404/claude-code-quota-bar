@@ -795,8 +795,11 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // manuel/auto de l'en-tête (couvert plus bas).
     check('avec 2 vagues en AUTO, la vague 2 (prochaine à lancer) reste inerte « — queued »',
       waveHdrTexts.indexOf('wave 2 — queued') !== -1, waveHdrTexts);
-    check('membre en attente de sa vague : « queued » dans le titre, pas « pas encore lié »',
-      await cdp.evaluate(`(document.querySelector('.m-pending')||{}).title`) === 'Queued — opens when this wave starts.');
+    // Infobulle (2026-09-02, §d) : le prompt COMPLET d'abord, l'explication
+    // d'état en dessous — jamais plus le hint seul (.m-prompt est tronqué en
+    // CSS, c'était le seul endroit pour relire un prompt coincé).
+    check('membre en attente de sa vague : prompt + « queued » dans l\'infobulle, pas « pas encore lié »',
+      await cdp.evaluate(`(document.querySelector('.m-pending')||{}).title`) === 'Pas encore lancée\n\nQueued — opens when this wave starts.');
     check('aucun bouton ▶ dédié en bas de vague (supprimé, lot 4)',
       await cdp.evaluate(`!Array.from(document.querySelectorAll('#flow button')).some(b => b.textContent.includes('Launch wave'))`) === true);
     check('AUCUN séparateur cliquable en AUTO, vague non bloquée (plus de style "launch")',
@@ -1603,23 +1606,65 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
 
-    console.log('\n10ter. Bloc de PLUSIEURS prompts : deux gestes nommes + apercu au survol (2026-08-29)');
-    // Un bloc a K vagues ne rentre dans AUCUNE vague : les lignes d'ajout
+    console.log('\n10ter. Plusieurs prompts : deux gestes nommes + apercu au survol (2026-08-29)');
+    // Un formulaire a K vagues ne rentre dans AUCUNE vague : les lignes d'ajout
     // changent alors de sens ET de nom (« + insert here »), et le clic envoie
     // mode:'before'. Avant le 2026-08-29, un geste unique fondait la premiere
     // vague du bloc dans la vague visee et intercalait les suivantes — d'ou le
     // melange signale par l'user (une tache existante a cote d'une nouvelle).
     // Le survol, lui, MONTRE le resultat sans rien envoyer.
+    //
+    // FORMULAIRE CONSTRUIT A LA MAIN (2026-09-01), plus par collage : un bloc
+    // colle designe une conversation maitresse, et depuis le verrouillage il
+    // REFUSE toute cible d'insertion (mesure en 10quater). Le geste d'insertion
+    // vit desormais uniquement sur un formulaire SANS maitresse — c'est lui
+    // qu'on mesure ici, avec les memes cibles et les memes envois qu'avant.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
-    const multiBlock = '```claude-convs\nmodel: sonnet\neffort: medium\nstage: 1\nPremiere tache\n[---]\nmodel: opus\neffort: high\nstage: 2\nDeuxieme tache\n```';
-    const monoBlock = '```claude-convs\nmodel: sonnet\neffort: medium\nstage: 1\nPremiere tache\n[---]\nmodel: opus\neffort: high\nstage: 1\nDeuxieme tache\n```';
     const pasteBlock = async function (txt) {
       await cdp.evaluate(`(() => {
         const ta = document.querySelector('.task-top textarea.inp');
         ta.value = ${JSON.stringify(txt)};
         ta.dispatchEvent(new Event('change'));
       })()`);
+      await sleep(80);
+    };
+    const clickFormBtn = function (label) {
+      return `(() => {
+        const b = Array.from(document.querySelectorAll('#batchForm button'))
+          .find(function (x) { return x.textContent.indexOf(${JSON.stringify(label)}) !== -1; });
+        if (b) b.click();
+        return !!b;
+      })()`;
+    };
+    // Deux taches : meme vague (« + Add task ») ou deux vagues (« + Add wave
+    // divider »). Cancel d'abord — le formulaire garde l'etat du scenario
+    // precedent, et c'est le seul geste qui le remet vraiment a zero.
+    // Modele/effort choisis PAR TACHE, au selecteur (chaque bouton porte sa
+    // valeur en title) : c'est ce que le bloc colle apportait avant, et ce que
+    // le depot doit continuer de transporter tel quel.
+    const pickPerTask = async function (i, model, effort) {
+      await cdp.evaluate(`document.querySelectorAll('#batchForm .task')[${i}].querySelector('button[title=${JSON.stringify(model)}]').click()`);
+      await sleep(60);
+      await cdp.evaluate(`document.querySelectorAll('#batchForm .task')[${i}].querySelector('button[title=${JSON.stringify(effort)}]').click()`);
+      await sleep(60);
+    };
+    const handTasks = async function (split) {
+      await cdp.evaluate(clickFormBtn('Cancel'));
+      await sleep(80);
+      await cdp.evaluate(`(() => {
+        const ta = document.querySelector('#batchForm .task textarea.inp');
+        ta.value = 'Premiere tache'; ta.dispatchEvent(new Event('input'));
+      })()`);
+      await cdp.evaluate(clickFormBtn(split ? 'Add wave divider' : 'Add task'));
+      await sleep(100);
+      await cdp.evaluate(`(() => {
+        const ta = document.querySelectorAll('#batchForm .task textarea.inp')[1];
+        ta.value = 'Deuxieme tache'; ta.dispatchEvent(new Event('input'));
+      })()`);
+      await sleep(100);
+      await pickPerTask(0, 'sonnet', 'medium');
+      await pickPerTask(1, 'opus', 'high');
       await sleep(80);
     };
     const rowOfWave = function (w) {
@@ -1636,8 +1681,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       })()`);
       await sleep(160);
     };
-    await pasteBlock(multiBlock);
-    check('bloc reconnu : 2 taches preremplies (mode etendu)',
+    await handTasks(true);
+    check('formulaire a DEUX vagues construit a la main (mode etendu)',
       await cdp.evaluate(`document.querySelectorAll('#batchForm .task').length`) === 2);
 
     // SURVOL de la ligne de la vague 1 : le bloc se pose DERRIERE elle, donc
@@ -1713,7 +1758,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // vague pose le bloc derriere elle, donc apres tout le lot.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
-    await pasteBlock(multiBlock);
+    await handTasks(true);
     await hoverWave(2);
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`${rowOfWave(2)}.click()`);
@@ -1724,7 +1769,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       && afterLastWave[0].mode === 'before' && afterLastWave[0].tasks.length === 2,
       JSON.stringify(afterLastWave));
 
-    // Bloc MONO-vague : le geste redevient « rejoindre la vague », y compris la
+    // Formulaire MONO-vague : le geste redevient « rejoindre la vague », y compris la
     // vague EN COURS — et le depot part DIRECTEMENT. La confirmation qui
     // existait pour ce cas a ete retiree le 2026-08-29 : elle s'affichait dans
     // le formulaire, a l'autre bout du panneau, et l'user en concluait que le
@@ -1732,9 +1777,9 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // disait est maintenant sur le ruban de la ligne visee.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
-    await pasteBlock(monoBlock);
+    await handTasks(false);
     await hoverWave(1);
-    check('bloc mono-vague sur la vague EN COURS : le ruban dit « starts now »',
+    check('formulaire mono-vague sur la vague EN COURS : le ruban dit « starts now »',
       /starts now/.test(await cdp.evaluate(`(function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : ''; })()`)),
       await cdp.evaluate(`(function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : ''; })()`));
     await cdp.evaluate(`window.__sent = []`);
@@ -1747,23 +1792,411 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… aucune banniere de confirmation ne subsiste dans le formulaire',
       await cdp.evaluate(`!Array.from(document.querySelectorAll('#batchForm .banner')).some(function (b) { return /already running/i.test(b.textContent); })`) === true);
 
-    // group:/session: du bloc : signalés APRÈS le dépôt, en bannière d'info —
-    // ils ne sont plus une question à valider, seulement un constat.
+    console.log('\n10quater. Bloc AVEC maitresse MEMBRE d\'un lot vivant : defaut SOEUR, imbrication explicite au survol (2026-09-02)');
+    // Decision deleguee a Claude, §9(a) de NOTES_audit_simplification_harmonisation
+    // (commit dd620926) : un bloc /handoffs colle avec « session: » DEVIENT par
+    // defaut une SOEUR — les taches rejoignent le lot de la maitresse, en
+    // nouvelle(s) vague(s) juste apres la sienne (addTasksToGroup), au lieu de
+    // fonder un sous-lot IMBRIQUE en silence (2026-09-01, constat user a
+    // captures a l'appui). L'imbrication reste possible, mais seulement au
+    // survol EXPLICITE de la ligne de la maitresse elle-meme. Le survol des
+    // AUTRES lignes de son propre lot redevient une cible ORDINAIRE ; celui
+    // d'un AUTRE lot reste refuse (ruban reformule).
+    const twoLots = JSON.parse(JSON.stringify(grouped));
+    twoLots.groups.push({
+      id: 'g2', name: 'Autre chantier', hue: 90, collapsed: false,
+      launchedWave: 1, nextWave: 2, waveNotice: null,
+      members: [
+        { key: 'y1', prompt: 'Tache independante', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, note: '', hint: '' },
+      ],
+    });
+    // effort: explicite sur les deux sections — le lot precedent (batchState)
+    // n'a jamais recu de « inherit », un modele sans effort resterait
+    // « unresolved » et desactiverait le bouton Create, faussant les
+    // scenarios de clic ci-dessous.
+    const masterBlock = '```claude-convs\nsession: fake-token\nmodel: sonnet\neffort: medium\nstage: 1\nSeule tache\n[---]\nmodel: opus\neffort: high\nstage: 2\nAutre tache\n```';
+    const rowOfPrompt = function (text) {
+      return `(function () {
+        return Array.from(document.querySelectorAll('#flow [data-ins-wave]'))
+          .find(function (r) {
+            const t = r.querySelector('.conv .title, .m-pending .m-prompt');
+            return t && t.textContent === ${JSON.stringify(text)};
+          });
+      })()`;
+    };
+    const hoverEl = async function (exprStr) {
+      await cdp.evaluate(`(() => {
+        const r = ${exprStr};
+        if (!r) return;
+        (r.querySelector('.conv, .m-pending') || r).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      })()`);
+      await sleep(160);
+    };
+    // Recharge twoLots, colle le bloc et le fait resoudre vers c1 — MEMBRE de
+    // g1 (m1, vague 1, vague EN COURS). Chaque scenario reprend a zero depuis
+    // ce meme point : un clic/Create abouti vide le formulaire.
+    const pasteAndResolve = async function () {
+      await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: twoLots })}, '*')`);
+      await sleep(150);
+      await pasteBlock(masterBlock);
+      // Le numero de la question posee a l'extension au collage : c'est lui
+      // que la reponse doit porter, sinon le webview la jette (recherche perimee).
+      const seq = await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'resolveMasterPaste'; }).pop().seq`);
+      await cdp.evaluate(`window.postMessage({ type: 'masterResolved', seq: ${seq}, sessionId: 'c1', title: 'Conv au travail', matches: 1, reason: 'session' }, '*')`);
+      await sleep(200);
+    };
+
+    // AVANT resolution : verrouille comme AVANT ce lot — la condition porte
+    // sur ce qui est ECRIT dans le formulaire, jamais sur une maitresse encore
+    // inconnue (sinon la cible s'ouvrirait puis se fermerait au retour de la
+    // reponse). Comportement INCHANGE, meme ruban qu'en 2.100.0.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: twoLots })}, '*')`);
+    await sleep(150);
+    await pasteBlock(masterBlock);
+    await cdp.evaluate(`window.__sent = []`);
+    await hoverWave(2);
+    const stillLocked = await cdp.evaluate(`(() => ({
+      tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+      refusedStyle: !!document.querySelector('.ins-tag.no'),
+      zones: document.querySelectorAll('.ins-zone').length,
+    }))()`);
+    check('avant resolution de la maitresse : verrouille comme avant (ruban « sets the place »)',
+      !!stillLocked.tag && /master conversation sets the place/.test(stillLocked.tag)
+      && stillLocked.refusedStyle === true && stillLocked.zones === 0, JSON.stringify(stillLocked));
+    await cdp.evaluate(`${rowOfWave(2)}.click()`);
+    await sleep(120);
+    check('… le clic est inerte tant que la maitresse n est pas resolue',
+      await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'addTasksToGroup'; }).length`) === 0);
+
+    // DEFAUT, rien survole : l'apercu est SOEUR, a PLAT dans le corps de g1 —
+    // vague de la maitresse (1) + 1, donc vagues 2 et 3 pour ce bloc a 2 vagues.
+    await pasteAndResolve();
+    const sisterDefault = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      if (!prev) return { present: false };
+      return {
+        present: true,
+        nested: prev.classList.contains('nested'),
+        parentIsBody: !!prev.parentElement && prev.parentElement.classList.contains('grp-body'),
+        waves: Array.from(prev.querySelectorAll('.wave-hdr-label')).map(function (n) { return n.textContent; }),
+      };
+    })()`);
+    check('rien survole : apercu SOEUR present, a PLAT dans le corps du lot (jamais .nested)',
+      sisterDefault.present === true && sisterDefault.nested === false && sisterDefault.parentIsBody === true,
+      JSON.stringify(sisterDefault));
+    check('… ses vagues sont deja les DEFINITIVES (2 et 3 — juste apres la vague 1 de la maitresse)',
+      sisterDefault.waves.join('|') === 'wave 2 — queued|wave 3 — queued', JSON.stringify(sisterDefault));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(120);
+    const sentDefault = await cdp.evaluate(`window.__sent`);
+    check('Create SANS survol -> addTasksToGroup dans g1, vague 2, mode before (jamais createBatch)',
+      Array.isArray(sentDefault) && sentDefault.length === 1 && sentDefault[0].type === 'addTasksToGroup'
+      && sentDefault[0].id === 'g1' && sentDefault[0].wave === 2 && sentDefault[0].mode === 'before'
+      && sentDefault[0].tasks.length === 2, JSON.stringify(sentDefault));
+
+    // SURVOL D'UNE AUTRE LIGNE DU MEME LOT (m2, soeur de la maitresse dans g1,
+    // meme vague EN COURS) : cible ORDINAIRE, memes regles qu'un bloc sans
+    // maitresse — plus jamais refusee.
+    await pasteAndResolve();
+    await cdp.evaluate(`window.__sent = []`);
+    await hoverEl(rowOfPrompt('Terminée jamais lue'));
+    const sisterHover = await cdp.evaluate(`(() => ({
+      tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+      refusedStyle: !!document.querySelector('.ins-tag.no'),
+      zones: document.querySelectorAll('.ins-zone').length,
+    }))()`);
+    check('survol d\'une AUTRE ligne du lot de la maitresse : ACCEPTE (plus refuse)',
+      sisterHover.refusedStyle === false && sisterHover.zones === 1
+      && !!sisterHover.tag && /insert after this wave/.test(sisterHover.tag), JSON.stringify(sisterHover));
+    await cdp.evaluate(`${rowOfPrompt('Terminée jamais lue')}.click()`);
+    await sleep(120);
+    const sentSisterHover = await cdp.evaluate(`window.__sent`);
+    check('… et le clic depose bien addTasksToGroup dans g1 (jamais createBatch)',
+      Array.isArray(sentSisterHover) && sentSisterHover.length === 1
+      && sentSisterHover[0].type === 'addTasksToGroup' && sentSisterHover[0].id === 'g1', JSON.stringify(sentSisterHover));
+
+    // SURVOL D'UN AUTRE LOT (g2) : toujours refuse, ruban REFORMULE (« batch »,
+    // plus « place ») puisqu'une place par defaut existe deja ailleurs.
+    await pasteAndResolve();
+    await cdp.evaluate(`window.__sent = []`);
+    await hoverEl(rowOfPrompt('Tache independante'));
+    const otherLot = await cdp.evaluate(`(() => ({
+      tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+      refusedStyle: !!document.querySelector('.ins-tag.no'),
+      zones: document.querySelectorAll('.ins-zone').length,
+    }))()`);
+    check('survol d\'un AUTRE lot : refuse, ruban reformule « the master conversation sets the batch »',
+      otherLot.refusedStyle === true && otherLot.zones === 0
+      && !!otherLot.tag && /master conversation sets the batch/.test(otherLot.tag), JSON.stringify(otherLot));
+    await cdp.evaluate(`${rowOfPrompt('Tache independante')}.click()`);
+    await sleep(120);
+    check('… le clic est inerte : aucun autre lot ne peut recevoir la maitresse',
+      await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'addTasksToGroup'; }).length`) === 0);
+
+    // SURVOL DE LA LIGNE DE LA MAITRESSE ELLE-MEME : SEUL geste qui produit
+    // encore l'imbrication (comportement de 2.98.0/2.100.0, plus jamais en silence).
+    await pasteAndResolve();
+    await cdp.evaluate(`window.__sent = []`);
+    await hoverEl(rowOfPrompt('Conv au travail'));
+    const nestedHoverTag = await cdp.evaluate(`(() => ({
+      tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+      refusedStyle: !!document.querySelector('.ins-tag.no'),
+    }))()`);
+    check('survol de la ligne de la maitresse elle-meme : « nested under this conversation »',
+      nestedHoverTag.refusedStyle === false && !!nestedHoverTag.tag
+      && /nested under this conversation/.test(nestedHoverTag.tag), JSON.stringify(nestedHoverTag));
+    const nest = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      if (!prev) return { present: false };
+      const member = prev.previousElementSibling;
+      const rail = prev.querySelector('.mp-rail');
+      return {
+        present: true,
+        nested: prev.classList.contains('nested'),
+        parentIsBody: !!prev.parentElement && prev.parentElement.classList.contains('grp-body'),
+        prevIsHostMember: !!member && member.classList.contains('member')
+          && !!member.querySelector('.conv .title') && member.querySelector('.conv .title').textContent === 'Conv au travail',
+        indent: Math.round(prev.getBoundingClientRect().left - (member ? member.getBoundingClientRect().left : 0)),
+        railHooked: !!rail && rail.classList.contains('hooked'),
+      };
+    })()`);
+    check('… l\'apercu bascule en imbrique, pose juste sous la ligne d accueil, decale comme un vrai corps de sous-lot',
+      nest.present === true && nest.nested === true && nest.parentIsBody === true
+      && nest.prevIsHostMember === true && nest.indent >= 20, JSON.stringify(nest));
+    check('… son rail ferme son propre bloc, comme celui du sous-lot a naitre',
+      nest.railHooked === true, JSON.stringify(nest));
+
+    // (b) 2026-09-02 : pendant la composition, le ⤴ des lignes n'est plus un
+    // controle — celui de la ligne d'accueil, juste au-dessus de l'apercu,
+    // etait cliquable, et un clic sur une cible refusee le traversait.
+    const outWhileComposing = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      const host = prev && prev.previousElementSibling;
+      const out = host && host.querySelector('.m-out');
+      return {
+        composing: document.body.classList.contains('composing'),
+        hostOutDisplay: out ? getComputedStyle(out).display : null,
+        anyVisible: Array.from(document.querySelectorAll('.m-out')).some(function (b) { return getComputedStyle(b).display !== 'none'; }),
+      };
+    })()`);
+    check('pendant la composition, le corps porte .composing et aucun ⤴ n est cliquable (ligne d accueil comprise)',
+      outWhileComposing.composing === true && outWhileComposing.hostOutDisplay === 'none' && outWhileComposing.anyVisible === false,
+      JSON.stringify(outWhileComposing));
+    // (c) 2026-09-02 : la × qui vide le formulaire emporte le ruban avec elle
+    // (seul le chemin « pointeur sorti de la ligne » le retirait) — verifie ici
+    // sur la cible IMBRIQUEE (non refusee), l'autre moitie du decor.
+    await cdp.evaluate(`Array.from(document.querySelectorAll('#batchForm .xdel')).forEach(function (b) { b.click(); })`);
+    await sleep(120);
+    const afterDelete = await cdp.evaluate(`(() => ({
+      tag: !!document.querySelector('.ins-tag'),
+      hot: document.querySelectorAll('.ins-hot').length,
+      composing: document.body.classList.contains('composing'),
+      outBack: Array.from(document.querySelectorAll('.m-out')).some(function (b) { return getComputedStyle(b).display !== 'none'; }),
+    }))()`);
+    check('… la × du formulaire retire le ruban, la vague eclairee et .composing (le ⤴ revient)',
+      afterDelete.tag === false && afterDelete.hot === 0 && afterDelete.composing === false && afterDelete.outBack === true,
+      JSON.stringify(afterDelete));
+
+    // CLIC (ou Create) PENDANT LE SURVOL IMBRIQUE -> createBatch, exactement
+    // comme avant ce lot (jamais addTasksToGroup, jamais une deuxieme fondation
+    // silencieuse).
+    await pasteAndResolve();
+    await cdp.evaluate(`window.__sent = []`);
+    await hoverEl(rowOfPrompt('Conv au travail'));
+    await cdp.evaluate(`${rowOfPrompt('Conv au travail')}.click()`);
+    await sleep(120);
+    const sentNestedClick = await cdp.evaluate(`window.__sent`);
+    check('clic sur la ligne de la maitresse en survol imbrique -> createBatch (jamais addTasksToGroup)',
+      Array.isArray(sentNestedClick) && sentNestedClick.length === 1 && sentNestedClick[0].type === 'createBatch',
+      JSON.stringify(sentNestedClick));
+
+    console.log('\n10septies. Le CLIC désigne — ou retire — la maîtresse (MOCKUP_refus_maitresse, 2026-09-02)');
+    // Un bloc collé SANS ligne session: se rattachait quand même à la conv qui
+    // l'a écrit (master.js, recherche par texte) sans aucun moyen de le
+    // refuser AVANT Create. Ligne PLATE (hors lot) : le clic désigne, ou
+    // détache si elle est déjà la maîtresse — le choix EXPLICITE de l'user
+    // prime sur toute résolution serveur.
+    const flatRowOf = function (text) {
+      return `(function () {
+        return Array.from(document.querySelectorAll('#flow > .conv'))
+          .find(function (r) { const t = r.querySelector('.title'); return t && t.textContent === ${JSON.stringify(text)}; });
+      })()`;
+    };
+    // Bloc SANS session: — aucune recherche automatique n'a de quoi conclure,
+    // et ce n'est délibérément pas nécessaire : composingMasterPick() ne
+    // dépend que de form.masterPaste, jamais d'une résolution aboutie.
+    const plainBlock = '```claude-convs\nmodel: sonnet\neffort: medium\nUne tache\n```';
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: grouped })}, '*')`);
     await sleep(150);
-    const namedBlock = '```claude-convs\ngroup: Nom du bloc\nsession: fake-token\nmodel: sonnet\nstage: 1\nSeule tache\n[---]\nmodel: opus\nstage: 2\nAutre tache\n```';
-    await pasteBlock(namedBlock);
-    await hoverWave(1);
+    await pasteBlock(plainBlock);
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`${rowOfWave(1)}.click()`);
-    const namedNote = await cdp.evaluate(`document.querySelector('#batchForm .banner.info')?.textContent || ''`);
-    check('group: présent dans le bloc → signalé comme ignoré, après le dépôt',
-      /ignored/i.test(namedNote) && /Nom du bloc/.test(namedNote), namedNote);
-    check('… et le dépôt a bien eu lieu (pas de question posée)',
-      await cdp.evaluate(`window.__sent.length`) === 1);
-    // Referme la bannière d'info pour ne pas polluer la suite du banc.
-    await cdp.evaluate(`document.querySelector('#batchForm .banner.info .xdel')?.click()`);
 
+    // Ligne plate (« Sans état hooks », c4 — jamais rattachée à g1) : survol →
+    // ruban « set as the master conversation ».
+    await hoverEl(flatRowOf('Sans état hooks'));
+    const designateHover = await cdp.evaluate(`(() => ({
+      tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+      refusedStyle: !!document.querySelector('.ins-tag.no'),
+      zones: document.querySelectorAll('.ins-zone').length,
+    }))()`);
+    check('ligne plate, pas encore la maîtresse : ruban « set as the master conversation »',
+      designateHover.refusedStyle === false && designateHover.zones === 1
+      && !!designateHover.tag && /set as the master conversation/.test(designateHover.tag), JSON.stringify(designateHover));
+    // Une ligne MEMBRE d'un lot (m1, « Conv au travail ») : jamais désignable
+    // ici, quoi qu'elle affiche par ailleurs — rowInsertTarget garde la main
+    // (guard structurel !closest('.grp-body'), pas une question de résolution :
+    // sans maîtresse résolue le ruban dit encore « sets the place », comme
+    // avant ce lot — 10quater le couvre déjà en détail une fois résolue).
+    await hoverEl(rowOfPrompt('Conv au travail'));
+    const memberStillOrdinary = await cdp.evaluate(`(() => {
+      const t = document.querySelector('.ins-tag');
+      return t ? t.textContent : null;
+    })()`);
+    check('… une ligne DANS un lot ignore TOUJOURS ce ruban, même sans session: (rowInsertTarget garde la main)',
+      !!memberStillOrdinary && !/set as the master conversation|detach from this conversation/.test(memberStillOrdinary),
+      JSON.stringify(memberStillOrdinary));
+
+    // Clic sur la ligne plate : aucun message envoyé (choix purement local
+    // jusqu'à Create), et le survol suivant le confirme désignée.
+    await hoverEl(flatRowOf('Sans état hooks'));
+    await cdp.evaluate(`${flatRowOf('Sans état hooks')}.click()`);
+    await sleep(120);
+    check('le clic de désignation n\'envoie RIEN à l\'extension (choix local jusqu\'à Create)',
+      (await cdp.evaluate(`window.__sent`)).length === 0);
+    await hoverEl(flatRowOf('Sans état hooks'));
+    const detachHover = await cdp.evaluate(`(() => {
+      const t = document.querySelector('.ins-tag');
+      return t ? t.textContent : null;
+    })()`);
+    check('… la MÊME ligne, survolée à nouveau : ruban « detach from this conversation »',
+      !!detachHover && /detach from this conversation/.test(detachHover), JSON.stringify(detachHover));
+
+    // Create : le choix EXPLICITE voyage tel quel (createBatch, jamais un
+    // second addTasksToGroup — cette maîtresse n'a pas de lot vivant).
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(120);
+    const sentDesignate = await cdp.evaluate(`window.__sent`);
+    check('Create transporte master: {explicit:true, sessionId:<id de la ligne cliquée>}',
+      Array.isArray(sentDesignate) && sentDesignate.length === 1 && sentDesignate[0].type === 'createBatch'
+      && !!sentDesignate[0].master && sentDesignate[0].master.explicit === true
+      && typeof sentDesignate[0].master.sessionId === 'string' && sentDesignate[0].master.sessionId.length > 0,
+      JSON.stringify(sentDesignate));
+
+    // DÉTACHER : même ligne désignée deux fois (2ᵉ clic = détachement), Create
+    // doit alors transporter sessionId NUL — jamais relancer sa propre recherche.
+    await pasteBlock(plainBlock);
+    await cdp.evaluate(`window.__sent = []`);
+    await hoverEl(flatRowOf('Sans état hooks'));
+    await cdp.evaluate(`${flatRowOf('Sans état hooks')}.click()`);
+    await sleep(120);
+    await cdp.evaluate(`${flatRowOf('Sans état hooks')}.click()`);
+    await sleep(160);
+
+    // LOT AUTONOME — signalé par l'user sur la 2.102.0 : détacher la maîtresse
+    // faisait disparaître TOUT l'aperçu, alors que c'est le seul endroit qui
+    // montre ce que « Créer » va produire. La maquette validée le pose sous
+    // l'en-tête « New conversation » ; il doit vivre DANS le corps de la
+    // section (c'est lui qui porte le repli), jamais à côté.
+    const detachedDecor = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      const chip = document.querySelector('.master-chip');
+      return {
+        preview: !!prev,
+        inNewConvBody: !!prev && !!prev.closest('#newConvBody'),
+        nested: !!prev && prev.classList.contains('nested'),
+        firstOfBody: !!prev && prev.parentElement.firstElementChild === prev,
+        prompts: prev ? Array.from(prev.querySelectorAll('.m-prompt')).map(function (n) { return n.textContent; }) : [],
+        masterTargets: document.querySelectorAll('.conv.master-target').length,
+        cue: document.querySelectorAll('.mcue-v, .mcue-tip').length,
+        chipSign: chip ? (chip.querySelector('.sign') || {}).textContent : null,
+        chipWho: chip ? (chip.querySelector('.who') || {}).textContent : null,
+      };
+    })()`);
+    check('maîtresse détachée : l\'aperçu des futures conversations EXISTE toujours',
+      detachedDecor.preview === true, JSON.stringify(detachedDecor));
+    check('… posé en tête du CORPS de « New conversation » (il suit donc le repli de la section)',
+      detachedDecor.inNewConvBody === true && detachedDecor.firstOfBody === true, JSON.stringify(detachedDecor));
+    check('… à plat, jamais imbriqué (le lot naît autonome, à la racine)',
+      detachedDecor.nested === false && detachedDecor.prompts.length === 1, JSON.stringify(detachedDecor));
+    check('… plus AUCUNE ligne ne respire (plus de maîtresse désignée)',
+      detachedDecor.masterTargets === 0, JSON.stringify(detachedDecor));
+    check('… et AUCUNE agrafe : elle dit la filiation, il n\'y en a plus',
+      detachedDecor.cue === 0, JSON.stringify(detachedDecor));
+    check('… la pastille dit le GESTE (⤴ détachée), jamais un échec de recherche (⚠ aucune trouvée)',
+      detachedDecor.chipSign === '⤴' && /detached/i.test(detachedDecor.chipWho || ''), JSON.stringify(detachedDecor));
+
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(120);
+    const sentDetach = await cdp.evaluate(`window.__sent`);
+    check('deux clics (désigner puis détacher) : Create transporte master: {explicit:true, sessionId:null}',
+      Array.isArray(sentDetach) && sentDetach.length === 1 && sentDetach[0].type === 'createBatch'
+      && !!sentDetach[0].master && sentDetach[0].master.explicit === true && sentDetach[0].master.sessionId === null,
+      JSON.stringify(sentDetach));
+
+    // MÊME MANQUE, AUTRE PORTE (capture user du 2026-09-02) : la recherche
+    // n'a rien trouvé — « No master conversation found · standalone batch ».
+    // Aucun clic n'est en cause, et l'aperçu doit être là pour la même raison.
+    await pasteBlock(plainBlock);
+    const seqNone = await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'resolveMasterPaste'; }).pop().seq`);
+    await cdp.evaluate(`window.postMessage({ type: 'masterResolved', seq: ${seqNone}, sessionId: null, title: '', matches: 0, reason: 'not-found' }, '*')`);
+    await sleep(200);
+    const noMasterDecor = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      const chip = document.querySelector('.master-chip');
+      return {
+        preview: !!prev && !!prev.closest('#newConvBody'),
+        chipSign: chip ? (chip.querySelector('.sign') || {}).textContent : null,
+        chipWho: chip ? (chip.querySelector('.who') || {}).textContent : null,
+      };
+    })()`);
+    check('recherche sans résultat : l\'aperçu est là aussi, au même endroit',
+      noMasterDecor.preview === true, JSON.stringify(noMasterDecor));
+    check('… et la pastille garde son ⚠ « aucune trouvée » (là, c\'est bien un échec)',
+      noMasterDecor.chipSign === '⚠' && /No master conversation found/i.test(noMasterDecor.chipWho || ''),
+      JSON.stringify(noMasterDecor));
+    await cdp.evaluate(clickFormBtn('Cancel'));
+    await sleep(120);
+
+    console.log('\n10octies. Défaut SŒUR : jamais une vague déjà LANCÉE (correctif 2026-09-02, §b)');
+    // Cas réel qui motive ce correctif : la maîtresse a fini sa vague (1), le
+    // lot-hôte est déjà à la vague 2 — host.wave + 1 (= 2) visait une vague
+    // DÉJÀ lancée, refusée en silence par le store (groups.js addTasks) ; ni
+    // l'aperçu ni le clic Create ne devaient plus jamais proposer ce numéro.
+    const laggingHost = JSON.parse(JSON.stringify(STATE));
+    laggingHost.conversations[0].groupId = 'g3';   // c1 → membre de g3, vague 1 (finie)
+    laggingHost.groups = [{
+      id: 'g3', name: 'Lot déjà avancé', hue: 40, collapsed: false,
+      launchedWave: 2, nextWave: 3, waveNotice: null,
+      members: [
+        { key: 'n1', prompt: 'Conv au travail', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'c1', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '✓ done · closed', hint: '' },
+        { key: 'n2', prompt: 'Vague 2 en cours', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'not-linked', waveStatus: 'launched', canLink: true, canClose: false, canRelaunch: true, note: 'not linked yet', hint: '' },
+      ],
+    }];
+    const soloBlock = '```claude-convs\nsession: fake-token\nmodel: sonnet\neffort: medium\nUne tache seule\n```';
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: laggingHost })}, '*')`);
+    await sleep(150);
+    await pasteBlock(soloBlock);
+    const seqLagging = await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'resolveMasterPaste'; }).pop().seq`);
+    await cdp.evaluate(`window.postMessage({ type: 'masterResolved', seq: ${seqLagging}, sessionId: 'c1', title: 'Conv au travail', matches: 1, reason: 'session' }, '*')`);
+    await sleep(200);
+    const laggingPreview = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      return prev ? Array.from(prev.querySelectorAll('.wave-hdr-label')).map(function (n) { return n.textContent; }) : null;
+    })()`);
+    check('aperçu SŒUR : vague 3 (max(vague maîtresse + 1, launchedWave + 1)), JAMAIS vague 2 (déjà lancée)',
+      Array.isArray(laggingPreview) && laggingPreview.join('|') === 'wave 3 — queued', JSON.stringify(laggingPreview));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(120);
+    const sentLagging = await cdp.evaluate(`window.__sent`);
+    check('Create SANS survol -> addTasksToGroup vague 3 (jamais 2, jamais un dépôt refusé en silence)',
+      Array.isArray(sentLagging) && sentLagging.length === 1 && sentLagging[0].type === 'addTasksToGroup'
+      && sentLagging[0].id === 'g3' && sentLagging[0].wave === 3 && sentLagging[0].mode === 'before',
+      JSON.stringify(sentLagging));
+
+    await cdp.evaluate(clickFormBtn('Cancel'));
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
 
@@ -1808,8 +2241,9 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       fresh.err === false);
     check('aucun Link… proposé (les membres SONT liés, la vue ne les connaît juste pas encore)',
       fresh.links.every((d) => d === 'none'), JSON.stringify(fresh.links));
-    check('infobulle de la ligne en attente : celle de la table de vérité',
-      fresh.pendingTitle === 'Tab open with the prompt inserted — press Enter to start it.', fresh.pendingTitle);
+    // Prompt COMPLET + hint de la table de vérité en dessous (2026-09-02, §d).
+    check('infobulle de la ligne en attente : prompt + hint de la table de vérité',
+      fresh.pendingTitle === 'Tâche A\n\nTab open with the prompt inserted — press Enter to start it.', fresh.pendingTitle);
 
     console.log('\n12. Lot 10 (livrable secondaire) + lot 12 — lanceur toujours visible, en-têtes de vague');
     // Lot 12 : plus de bouton « + New batch » à cliquer — le formulaire (une
@@ -3785,33 +4219,6 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… et son ⌂ redevient proposable (re-lier fera rebasculer la tête vers lui)',
       !!cededShape && cededShape.homeVisible === true, JSON.stringify(cededShape));
 
-    console.log('\n21. Bandeau de gel des onglets (plan gel-tabs 2026-08-17) — état d\'erreur, jamais dans les captures de fiche');
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
-    await sleep(120);
-    check('état nominal (tabsFrozen absent) : bandeau masqué',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('#tabsFrozenNotice')).display`) === 'none');
-    const frozenState = Object.assign({}, STATE, { tabsFrozen: true });
-    for (const scheme of ['dark', 'light']) {
-      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
-      await sleep(80);
-      await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: frozenState })}, '*')`);
-      await sleep(120);
-      const shot = await cdp.evaluate(`(() => {
-        const n = document.querySelector('#tabsFrozenNotice');
-        const cs = getComputedStyle(n);
-        return { display: cs.display, color: cs.color, text: n.textContent };
-      })()`);
-      check(`thème ${scheme} : tabsFrozen:true → bandeau visible avec son texte`,
-        shot.display === 'block' && shot.text.length > 0, JSON.stringify(shot));
-      check(`thème ${scheme} : couleur résolue non transparente (${shot.color})`,
-        !!shot.color && shot.color !== 'rgba(0, 0, 0, 0)' && shot.color !== 'transparent');
-    }
-    await cdp.send('Emulation.setEmulatedMedia', { features: [] });
-    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
-    await sleep(120);
-    check('retour à tabsFrozen:false → bandeau remasqué (pas de rémanence)',
-      await cdp.evaluate(`getComputedStyle(document.querySelector('#tabsFrozenNotice')).display`) === 'none');
-
     console.log('\n22. Coût estimé ($) sur la ligne — cumul affiché, couleur au DERNIER TOUR (plan coût-conv 2026-08-17 + plan coût-fenêtre 2026-08-18 lot 2, B3)');
     // Ce que cette section garde : le montant s'affiche à droite du TITRE, il
     // ne coûte pas un pixel à la barre de contexte — l'invariant du §16, qui a
@@ -4190,7 +4597,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // gel 900 ms) : ce script d'injection s'exécute APRÈS celui du début de
     // banc (ordre d'ajout), il écrase donc la neutralisation. La mécanique
     // testée est le vrai code du webview, seules les constantes de temps
-    // changent — même compromis que QUOTABAR_FREEZE_DETECT_MS pour tabs.js.
+    // changent.
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `window.QUOTABAR_STALE_TUNING = { tickMs: 150, pullAfterMs: 400, frozenAfterMs: 900 };`,
     });
@@ -4430,6 +4837,72 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       orphanProbe.markedFlat === 1 && orphanProbe.markedInGroup === 0, JSON.stringify(orphanProbe));
     check('le membre encore ouvert, lui, reste DANS son lot (aucun effet de bord)',
       orphanProbe.open === 1 && orphanProbe.openInGroup === 1, JSON.stringify(orphanProbe));
+
+    console.log('\n28. Lot solo (1 membre, sans maîtresse) — grip RÉDUITE, jamais la ligne (2026-09-02, régression 9554162b)');
+    // L'invariant du CLAUDE.md de ce dossier : après un « Create », la tâche
+    // lancée a TOUJOURS une surface à l'écran. Un jour, shouldCreateGroup
+    // (extension.js) a refusé de fonder le lot d'une tâche solo pour un
+    // simple nom de groupe — avant le premier Entrée le transcript n'existe
+    // pas encore (la liste plate exige transcript + onglet), donc RIEN
+    // n'apparaissait. Revenu sur ce refus (extension.js, test-batch-notice.js
+    // §16) ; ce banc-ci prouve l'autre moitié, côté rendu : la grip peut
+    // perdre son chrome (chevron, interrupteur, compteur, ⌂) sur un lot à un
+    // seul membre sans maîtresse, mais jamais la LIGNE de la tâche elle-même.
+    const soloState = JSON.parse(JSON.stringify(STATE));
+    soloState.conversations = [];
+    soloState.groups = [{
+      id: 'g-solo', name: 'Refonte paiement', hue: 150, collapsed: false, stamp: '20:19',
+      launchedWave: 1, nextWave: null, waveNotice: null, done: false,
+      nestedUnder: null, master: null,
+      members: [
+        { key: 'a', prompt: 'Tâche solo tout juste créée', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 's-solo', status: 'inserted', waveStatus: 'launched', canLink: false, canClose: false, note: 'press Enter in the tab', hint: 'Tab open with the prompt inserted — press Enter to start it.' },
+      ],
+    }];
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: soloState })}, '*')`);
+    await sleep(150);
+    const soloGrip = await cdp.evaluate(`(() => {
+      const grp = document.querySelector('#flow .grp');
+      const head = grp && grp.querySelector('.grp-head');
+      const disp = (sel) => { const n = head && head.querySelector(sel); return n ? getComputedStyle(n).display : 'ABSENT'; };
+      const pending = grp && grp.querySelector('.m-pending');
+      return {
+        blocks: document.querySelectorAll('#flow .grp').length,
+        pendingPrompt: pending ? pending.querySelector('.m-prompt').textContent : null,
+        chevDisp: disp('.chevron'),
+        tgDisp: disp('.tg'),
+        countDisp: disp('.grp-count'),
+        masDisp: disp('.gbtn:not(.g-kill)'),
+        labelText: head ? head.querySelector('.grp-label').textContent : null,
+        killDisp: disp('.g-kill'),
+      };
+    })()`);
+    check('la tâche solo a TOUJOURS une surface à l\'écran : sa ligne « en attente » avec son prompt',
+      soloGrip.blocks === 1 && soloGrip.pendingPrompt === 'Tâche solo tout juste créée', JSON.stringify(soloGrip));
+    check('… mais la grip a perdu chevron, interrupteur manuel/auto, compteur et ⌂ (chrome sans raison sur 1 membre sans maîtresse)',
+      soloGrip.chevDisp === 'none' && soloGrip.tgDisp === 'none' && soloGrip.countDisp === 'none' && soloGrip.masDisp === 'none',
+      JSON.stringify(soloGrip));
+    check('… il ne reste que l\'identité du lot (label visible) et le ✕ de dissolution (présent, pas display:none)',
+      soloGrip.labelText === 'batch ' + soloState.groups[0].stamp && soloGrip.killDisp !== 'none', JSON.stringify(soloGrip));
+
+    console.log('       28a. le clic sur la grip solo ne replie rien (pas de chevron à faire mentir)');
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('#flow .grp .grp-head').click()`);
+    await sleep(50);
+    const soloClick = await cdp.evaluate(`window.__sent`);
+    check('aucun toggleGroupCollapse posté', Array.isArray(soloClick) && soloClick.length === 0, JSON.stringify(soloClick));
+
+    console.log('       28b. dès qu\'une maîtresse se résout, la grip retrouve tout son chrome (la réduction ne vaut QUE le cas solo sans maîtresse)');
+    const soloMastered = JSON.parse(JSON.stringify(soloState));
+    soloMastered.groups[0].master = { convId: 'm1', title: 'Conv de cadrage', listed: false, status: 'busy' };
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: soloMastered })}, '*')`);
+    await sleep(150);
+    const mastered = await cdp.evaluate(`(() => {
+      const head = document.querySelector('#flow .grp .grp-head');
+      const disp = (sel) => { const n = head.querySelector(sel); return n ? getComputedStyle(n).display : 'ABSENT'; };
+      return { chevDisp: disp('.chevron'), tgDisp: disp('.tg'), countDisp: disp('.grp-count') };
+    })()`);
+    check('1 membre + maîtresse → chevron/interrupteur/compteur redeviennent visibles',
+      mastered.chevDisp !== 'none' && mastered.tgDisp !== 'none' && mastered.countDisp !== 'none', JSON.stringify(mastered));
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(120);

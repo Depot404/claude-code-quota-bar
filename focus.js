@@ -3,8 +3,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { norm, convMatchesLabel, isClaudeTab } = require('./labels');
+const { norm, convMatchesLabel, isClaudeTab, labelNamesAnother } = require('./labels');
 const { validatePositions } = require('./tab-positions');
+// Instrumentation du clic (2026-09-03, PLAN_titre_onglet_divergent_2026-09-02.md
+// fait 2 : « le clic vise le mauvais onglet », cause non établie faute de
+// capture assez détaillée). Même journal que focus-click/highlight-verdict —
+// un `grep` autour de l'heure signalée doit suffire, cf. règle « le JOURNAL
+// tranche » du CLAUDE.md. Observateur seul : aucune décision ci-dessous n'en
+// dépend.
+const { logEvent } = require('./ack-journal');
 
 // ============================================================================
 // Clic sur une conversation du panneau → focus de son onglet, où qu'il soit.
@@ -106,6 +113,17 @@ function setSessionLocationsSource(fn) {
   getSessionLocations = typeof fn === 'function' ? fn : () => null;
 }
 
+// Les conversations LISTÉES par le panneau ({ sessionId, title, tabTitle }),
+// injectées par extension.js depuis le snapshot du moteur. Elles ne servent
+// qu'à UNE question (labels.js `labelNamesAnother`) : le libellé trouvé à la
+// position que l'identité désigne nomme-t-il une AUTRE conversation ? Sans
+// source (bancs, moteur pas encore prêt) : personne d'autre n'est nommé, et
+// l'identité garde la main — c'est le sens par défaut voulu.
+let getListedConversations = () => [];
+function setListedConversationsSource(fn) {
+  getListedConversations = typeof fn === 'function' ? fn : () => [];
+}
+
 // L'état FRAIS des onglets de cette fenêtre, dans le comptage qu'attend
 // tab-positions.js : combien d'onglets Claude, et à quel rang est l'actif —
 // rang parmi les onglets Claude, groupes enchaînés dans l'ordre, exactement
@@ -127,6 +145,24 @@ function worldTabs() {
   return out;
 }
 
+// Photo de TOUS les onglets Claude de cette fenêtre (groupe, index, libellé) —
+// coûte une seule traversée de l'API temps réel, jamais du memento. Sert
+// uniquement à l'instrumentation ci-dessous : voir d'un coup d'œil, au moment
+// exact d'un clic, si un AUTRE onglet que celui visé porte un libellé qui
+// pourrait expliquer une confusion (ex. un onglet redevenu un prompt, cf. NOTES
+// « Pourquoi un onglet redevient un PROMPT »).
+function claudeTabsSnapshot() {
+  const out = [];
+  try {
+    for (const g of vscode.window.tabGroups.all) {
+      for (const t of (g && g.tabs) || []) {
+        if (isClaudeTab(t)) out.push({ viewColumn: g.viewColumn, label: t.label });
+      }
+    }
+  } catch { return null; }
+  return out;
+}
+
 // Voie principale du clic : révéler l'onglet dont le memento dit qu'il porte CE
 // sessionId, en le SÉLECTIONNANT à sa position — jamais en demandant à qui que
 // ce soit de l'ouvrir.
@@ -141,38 +177,68 @@ function worldTabs() {
 //   1. le groupe existe encore ;
 //   2. il porte exactement autant d'onglets Claude que le memento en comptait —
 //      une fermeture ou une ouverture depuis le flush se voit d'abord là ;
-//   3. l'onglet à cette position est bien un onglet Claude, et son libellé
-//      correspond à la conversation cliquée.
+//   3. l'onglet à cette position est bien un onglet Claude, et son libellé ne
+//      NOMME PAS UNE AUTRE conversation listée (labels.js `labelNamesAnother`).
+//      ⚠️ Ce n'était pas ça avant le 2026-09-03 : le contrôle exigeait que le
+//      libellé corresponde à la conversation cliquée, et le journal a montré
+//      (00:59:53, `focus-identity outcome:label-mismatch`, loc juste, libellé
+//      réel « ok go ») qu'il annulait une identité exacte au seul motif que
+//      l'extension officielle avait renommé l'onglet avec le dernier prompt —
+//      d'où un clic sans effet sur la conversation qu'on vient de recharger.
+//      Un texte qui ne matche PERSONNE n'est pas une preuve contre l'identité ;
+//      un texte qui nomme QUELQU'UN D'AUTRE, si (onglets réordonnés depuis le
+//      flush). Qui porte donc la garde du memento périmé désormais : le compte
+//      en bloc (1-2) et ce contrôle-ci sous sa forme positive.
 // Un seul contrôle qui échoue ⇒ `null`, repli. On ne devine jamais une position.
-async function focusByIdentity(sessionId, conv) {
-  if (!sessionId) return null;
+//
+// `origin` (2026-09-03, instrumentation fait 2) : 'click' ou 'relay' — juste de
+// quoi distinguer au journal QUI a appelé, jamais lu par la logique.
+async function focusByIdentity(sessionId, conv, origin) {
+  const done = (outcome, extra) => {
+    logEvent('focus-identity', {
+      origin: origin || 'unknown', sessionId, title: conv && conv.title, tabTitle: conv && conv.tabTitle,
+      outcome, ...extra,
+    });
+  };
+  if (!sessionId) { done('no-session-id'); return null; }
   // La photo du memento est validée EN BLOC contre l'état frais des onglets
   // (tab-positions.js) — même juge que le surlignage, au même instant.
   let byId = null;
   try {
     byId = validatePositions(getSessionLocations(), worldTabs());
-  } catch { return null; }
+  } catch { done('validate-threw'); return null; }
   if (!byId) {
     log('identity focus: tab positions stale — falling back to labels');
+    done('positions-stale');
     return null;
   }
   const loc = byId.get(sessionId);
-  if (!loc || typeof loc.index !== 'number') return null;
+  if (!loc || typeof loc.index !== 'number') { done('no-loc', { tabs: claudeTabsSnapshot() }); return null; }
 
   let group = null;
   try {
     group = vscode.window.tabGroups.all.find((g) => g.viewColumn === loc.viewColumn) || null;
-  } catch { return null; }
-  if (!group || !Array.isArray(group.tabs)) return null;
+  } catch { done('group-lookup-threw', { loc }); return null; }
+  if (!group || !Array.isArray(group.tabs)) { done('no-group', { loc }); return null; }
 
   const tab = group.tabs[loc.index];
-  if (!tab || !isClaudeTab(tab)) return null;
-  if (!convMatchesLabel(tab.label, conv)) {
-    log('identity focus: label at index %d is "%s", not this conversation — falling back', loc.index, tab.label);
+  if (!tab || !isClaudeTab(tab)) {
+    done('no-tab-at-index', { loc, labelThere: tab ? tab.label : null, tabs: claudeTabsSnapshot() });
     return null;
+  }
+  const labelMatched = convMatchesLabel(tab.label, conv);
+  if (!labelMatched) {
+    let others = [];
+    try { others = getListedConversations() || []; } catch { others = []; }
+    if (labelNamesAnother(tab.label, { sessionId, title: conv && conv.title, tabTitle: conv && conv.tabTitle }, others)) {
+      log('identity focus: label at index %d is "%s", which names another conversation — falling back', loc.index, tab.label);
+      done('label-names-another', { loc, labelThere: tab.label, tabs: claudeTabsSnapshot() });
+      return null;
+    }
   }
 
   await focusTab({ group, index: loc.index, label: tab.label });
+  done('resolved', { loc, resolvedLabel: tab.label, labelMatched });
   return tab.label;
 }
 
@@ -303,14 +369,14 @@ function createFocusRelay(handlers = {}) {
     // LES DEUX à la même requête, et la dernière servie emportait le focus.
     // `ownsSession` ne peut être vrai que dans une seule fenêtre.
     if (req.action !== 'close') {
-      const label = await focusByIdentity(req.session_id, { title: req.title, tabTitle: req.tab_title });
+      const label = await focusByIdentity(req.session_id, { title: req.title, tabTitle: req.tab_title }, 'relay');
       if (label) {
         raiseWindow(label);
-        // 3e argument : l'identité activée, connue ici avec certitude (c'est
+        // 2e argument : l'identité activée, connue ici avec certitude (c'est
         // par elle qu'on a révélé l'onglet). Le chemin par libellé plus bas ne
         // peut pas la fournir — il ne sait justement pas quelle sœur il a
         // désignée.
-        try { onActivated(label, !!req.isTrusted, req.session_id || null); } catch {}
+        try { onActivated(label, req.session_id || null); } catch {}
         return;
       }
     }
@@ -325,7 +391,7 @@ function createFocusRelay(handlers = {}) {
       else {
         await focusTab(match);
         raiseWindow(match.label);
-        try { onActivated(match.label, !!req.isTrusted); } catch {}
+        try { onActivated(match.label, null); } catch {}
       }
     } catch (e) {
       log('relay %s failed: %s', req.action || 'focus', e && e.message);
@@ -364,7 +430,7 @@ async function focusConversation(msg) {
   // ouvre quoi que ce soit, elle le referme et rend `null`. Le contrat « le
   // panneau n'ouvre jamais d'onglet » (décision user 2026-08-26) est donc tenu
   // par vérification de l'effet, plus par l'abstinence.
-  const byIdentity = await focusByIdentity(sessionId, { title, tabTitle });
+  const byIdentity = await focusByIdentity(sessionId, { title, tabTitle }, 'click');
   if (byIdentity) return byIdentity;
 
   // 2. REPLI PAR LIBELLÉ — inchangé, et toujours nécessaire : identité inconnue
@@ -372,6 +438,17 @@ async function focusConversation(msg) {
   // commande). Ne peut pas départager des homonymes, par construction.
   const match = findTab(title, tabTitle);
   if (match) {
+    // Journalisé (2026-09-03, instrumentation fait 2) : c'est CE chemin — celui
+    // qui apparie par TEXTE au lieu de l'identité — qui peut viser un onglet
+    // sans rapport si son libellé matche par coïncidence (ex. un onglet
+    // renommé avec un prompt qui cite le titre visé). `tabs` = tout ce que
+    // cette fenêtre voyait au même instant, pour vérifier après coup si un
+    // autre onglet portait déjà ce libellé.
+    logEvent('focus-label-fallback', {
+      sessionId, title, tabTitle,
+      resolvedLabel: match.label, resolvedViewColumn: match.group.viewColumn, resolvedIndex: match.index,
+      tabs: claudeTabsSnapshot(),
+    });
     await focusTab(match);
     return match.label;
   }
@@ -381,16 +458,13 @@ async function focusConversation(msg) {
   // titre complet côté panneau) — un clic sans effet ET sans trace est invisible.
   log('no tab here for "%s" (claude tabs: %j) — relaying to the other windows', title,
     vscode.window.tabGroups.all.flatMap((g) => g.tabs.filter(isClaudeTab).map((t) => t.label)));
+  logEvent('focus-not-here', { sessionId, title, tabTitle, tabs: claudeTabsSnapshot() });
   writeRequest({
     title,
     tab_title: tabTitle,
     session_id: (msg && msg.id) || null,
     ts: Date.now(),
     origin_pid: process.pid,
-    // 2026-08-27, lot A/B surlignage : relayé jusqu'à la fenêtre qui possède
-    // réellement l'onglet, pour qu'elle sache si l'acte qu'elle va poser sur
-    // SON tracker vient d'un vrai geste humain (cf. tabs.js reportActivation).
-    isTrusted: !!(msg && msg.isTrusted),
   });
   return null;
 }
@@ -420,7 +494,7 @@ function sessionsWithTabHere() {
 
 module.exports = {
   focusConversation, createFocusRelay, findTab,
-  setOpenSessionIdsSource, setSessionLocationsSource,
+  setOpenSessionIdsSource, setSessionLocationsSource, setListedConversationsSource,
   focusByIdentity, sessionsWithTabHere,
   REQUEST_PATH, REQUEST_TTL_MS,
 };

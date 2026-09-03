@@ -47,15 +47,15 @@ const lines = () => journal.readJournal(DEFAULT_JOURNAL);
 const verdicts = () => lines().filter((l) => l.event === 'highlight-verdict');
 function resetJournal() { try { fs.rmSync(DEFAULT_JOURNAL, { force: true }); } catch {} }
 
-function snapshot(tabsProvider) {
+function snapshot(tabsProvider, extra) {
   const reader = state.createTranscriptReader();
-  return state.buildSnapshot({
+  return state.buildSnapshot(Object.assign({
     workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12, tabs: tabsProvider,
-  }, reader);
+  }, extra || {}), reader);
 }
 
 const tabsFresh = (label) => () => ({
-  known: true, labels: ['Conv A', 'Conv B'], activeLabel: label, frozen: false,
+  known: true, labels: ['Conv A', 'Conv B'], activeLabel: label,
   source: 'fresh', windowFocused: true, sinceFocusMs: 42,
 });
 
@@ -68,7 +68,7 @@ check('trois recomputes identiques → une seule ligne', verdicts().length === 1
 check('… avec les champs promis (matches, via, source, focus)', (() => {
   const v = verdicts()[0];
   return v.activeLabel === 'Conv A' && v.sessionId === 'a' && v.matches === 1
-    && v.via === 'label' && v.source === 'fresh' && v.frozen === false
+    && v.via === 'label' && v.source === 'fresh'
     && v.windowFocused === true && v.sinceFocusMs === 42;
 })(), JSON.stringify(verdicts()[0]));
 
@@ -117,17 +117,34 @@ check('… sans identifiant vrai (active-session.json), PERSONNE n\'est surlign�
 check('… le verdict journalisé porte via:none, pas via:label au hasard',
   verdicts()[verdicts().length - 1].via === 'none', JSON.stringify(verdicts()[verdicts().length - 1]));
 
-// active-session.json (identifiant VRAI) désigne 'd' : c'est elle, et
-// seulement elle, qui doit être surlignée — pas l'appariement arbitraire.
+// active-session.json (la conv du DERNIER PROMPT SOUMIS) ne départage PLUS ce
+// groupe ambigu depuis 2.110.0 : écrire dans une conversation ne dit pas quel
+// onglet est AFFICHÉ — on peut soumettre dans l'une des sœurs puis aller lire
+// l'autre, et le surlignage restait faux sans recours. Il reste écrit au
+// journal (champ activeSessionId), il ne décide plus rien.
 fs.writeFileSync(ACTIVE_SESSION_PATH, JSON.stringify({ session_id: 'd' }));
-const snapSister = snapshot(() => ({
-  known: true, labels: ['Conv B', collisionLabel], activeLabel: collisionLabel, frozen: false,
+const snapStillMute = snapshot(() => ({
+  known: true, labels: ['Conv B', collisionLabel], activeLabel: collisionLabel,
   source: 'fresh', windowFocused: true, sinceFocusMs: 42,
 }));
-check('… active-session.json désigne une sœur → c\'est ELLE qui est surlignée',
-  snapSister.conversations.find((c) => c.sessionId === 'd').isActive === true
-  && snapSister.conversations.filter((c) => c.isActive).length === 1,
-  JSON.stringify(snapSister.conversations.map((c) => [c.sessionId, c.isActive])));
+check('… active-session.json ne départage plus : personne n\'est surligné',
+  snapStillMute.conversations.every((c) => c.isActive === false),
+  JSON.stringify(snapStillMute.conversations.map((c) => [c.sessionId, c.isActive])));
+check('… mais il reste PUBLIÉ par le snapshot (jeton /handoffs, diagnostic)',
+  snapStillMute.activeSessionId === 'd', String(snapStillMute.activeSessionId));
+
+// QUI PORTE L'INFORMATION À SA PLACE, et c'est une preuve exacte : se taire
+// laisse `highlightSessionId` nul, donc le juge renderer (memento du renderer,
+// IDENTITÉ de l'éditeur affiché) comble — il désigne 'c', la sœur réellement à
+// l'écran, pas celle où le dernier prompt a été soumis.
+const snapJudged = snapshot(() => ({
+  known: true, labels: ['Conv B', collisionLabel], activeLabel: collisionLabel,
+  source: 'fresh', windowFocused: true, sinceFocusMs: 42, labelChangedAt: Date.now() - 60000,
+}), { rendererActive: () => ({ sessionId: 'c', claude: true, flushedAt: Date.now() }) });
+check('… le juge renderer comble par IDENTITÉ (la sœur affichée, pas celle du dernier prompt)',
+  snapJudged.conversations.find((c) => c.sessionId === 'c').isActive === true
+  && snapJudged.conversations.filter((c) => c.isActive).length === 1,
+  JSON.stringify(snapJudged.conversations.map((c) => [c.sessionId, c.isActive])));
 try { fs.rmSync(ACTIVE_SESSION_PATH, { force: true }); } catch {}
 
 console.log('\n4. QUOTABAR_ACK_JOURNAL=off coupe tout sans rien casser');

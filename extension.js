@@ -24,7 +24,7 @@ const { installBatchPhilosophy: applyBatchPhilosophy, PHILOSOPHY_FILE: BATCH_PHI
 // globale). Il vit ici, et non dans le moteur d'état, parce que la ligne de
 // quota le consulte hors de tout snapshot.
 const { createCostReader } = require('./cost.js');
-const { focusConversation, createFocusRelay, setOpenSessionIdsSource, setSessionLocationsSource, sessionsWithTabHere } = require('./focus');
+const { focusConversation, createFocusRelay, setOpenSessionIdsSource, setSessionLocationsSource, setListedConversationsSource, sessionsWithTabHere } = require('./focus');
 const { createTabTracker, localActiveLabel } = require('./tabs');
 const { createAckTracker } = require('./ack');
 // Journal d'instrumentation du chemin d'ack (étape 18 phase 1, 5e récidive des
@@ -39,8 +39,8 @@ const { createSoundPlayer } = require('./sounds');
 const { createBootSettler } = require('./warmup');
 // Création groupée de conversations (lot 1) : le métier est en Node pur dans
 // batch.js, l'orchestration du lancement dans launcher.js — ici, que du câblage.
-const { normalizeTasks, appendTasksAfterWave, conflictingEnvVars, createIntentStore, mismatchOf, intentConfirmed, readInheritSettings, MODELS, EFFORTS } = require('./batch');
-const { createBatchLauncher, samePath, OPEN_COMMAND: LAUNCH_OPEN_COMMAND, NEW_CONVERSATION_COMMAND: LAUNCH_NEW_CONVERSATION_COMMAND } = require('./launcher');
+const { normalizeTasks, appendTasksAfterWave, conflictingEnvVars, createIntentStore, mismatchOf, readInheritSettings, MODELS, EFFORTS } = require('./batch');
+const { createBatchLauncher, samePath, OPEN_COMMAND: LAUNCH_OPEN_COMMAND, NEW_CONVERSATION_COMMAND: LAUNCH_NEW_CONVERSATION_COMMAND, SESSION_WAIT_MS } = require('./launcher');
 // Recalcul du message de « Create » (lot 6, correctif §3) : un membre lancé
 // mais dont aucun hook n'a encore tiré n'a pas d'entrée dans le snapshot de
 // state.js (le premier hook n'écrit qu'au premier Entrée) — le seul signal
@@ -383,9 +383,7 @@ function activate(context) {
           // de deux sœurs homonymes laisserait le surlignage sans rien à
           // désigner (state.js ne tranche plus au hasard). Cf. tabs.js
           // `actIdentity`.
-          tabTracker.reportActivation(label, {
-            origin: 'panel-click', isTrusted: !!(msg && msg.isTrusted), sessionId,
-          });
+          tabTracker.reportActivation(label, { sessionId });
         }
         if (stateEngine) stateEngine.refresh();
       }).catch(() => {});
@@ -524,6 +522,13 @@ function activate(context) {
   // du moteur deviendrait ici une source de positions périmées, alors même que
   // le fichier a déjà été flushé sur disque.
   setSessionLocationsSource(() => openSessionIds.freshLocations());
+  // Les conversations listées (2026-09-03) : ce dont focus.js a besoin pour
+  // savoir si le libellé trouvé à la position de l'identité NOMME une autre
+  // conversation (photo périmée) ou personne (onglet renommé — l'identité
+  // gagne). Cf. labels.js `labelNamesAnother`.
+  setListedConversationsSource(() => (stateEngine
+    ? stateEngine.getSnapshot().conversations.map((c) => ({ sessionId: c.sessionId, title: c.title, tabTitle: c.tabTitle || null }))
+    : []));
   // Vérité du RENDERER (refactor surlignage 2026-08-27, « le renderer est le
   // juge ») : l'éditeur ACTIF de cette fenêtre par IDENTITÉ, écrit par le
   // processus qui peint l'écran — la copie miroir tabGroups de l'hôte
@@ -578,11 +583,7 @@ function activate(context) {
     // Ce que les GROUPES affichent, ajouté à la clé de changement du moteur
     // (cf. state.js `extraKey`) : sans elle, une bascule de statut qui ne
     // touche aucune conversation de la liste n'était jamais poussée au webview.
-    // Le gel des onglets (2026-08-17) rejoint la même clé, MÊME RAISON : ni la
-    // liste ni les groupes ne bougent quand le canal RPC des onglets meurt ou
-    // reparle — sans lui ici, la bascule gel/dégel ne pousserait qu'au
-    // prochain changement sans rapport.
-    extraKey: () => groupsRenderKey() + '|' + tabsFrozenKey(),
+    extraKey: () => groupsRenderKey(),
     // L'ack APRÈS le push : la conv apparaît terminée tout de suite, l'accusé
     // suit. Ici passe le cas « l'onglet était déjà sous les yeux quand Claude a
     // fini » — aucune bascule d'onglet ne se produira, c'est donc l'arrivée du
@@ -637,6 +638,16 @@ function activate(context) {
     const known = new Set(stateEngine.getSnapshot().conversations.map((c) => c.sessionId));
     const dropped = groupStore.prune(GROUP_MAX_AGE_MS, known);
     if (dropped) console.log('[QuotaBar] pruned %d stale conversation group(s) from workspace storage', dropped);
+    // Avant de réamorcer les intentions : défaire les liens que le registre
+    // PROUVE faux (garde d'identité du launcher, 2026-09-01, appliquée à ce qui
+    // a été écrit avant elle). Sans ça, un badge d'écart posé sur une
+    // conversation jamais lancée par le lot survit à tous les reloads.
+    const startedAt = new Map(liveSessionEntries().map((e) => [e.sessionId, e.startedAt]));
+    const unlinked = groupStore.dropMisattachedIntents(
+      (sid) => (startedAt.has(sid) ? startedAt.get(sid) : null),
+      SESSION_WAIT_MS,
+    );
+    if (unlinked) console.log('[QuotaBar] dropped %d misattached member link(s) (session older than its launch)', unlinked);
     for (const i of groupStore.intents()) intentStore.record(i.sessionId, i);
   }
   batchLauncher = createBatchLauncher({
@@ -685,12 +696,8 @@ function activate(context) {
   // `focusConv` ci-dessus — c'est ICI, dans la fenêtre qui possède réellement
   // l'onglet, que l'acte doit être rapporté à SON tracker.
   context.subscriptions.push(createFocusRelay({
-    onActivated: (label, isTrusted, sessionId) => {
-      if (tabTracker) {
-        tabTracker.reportActivation(label, {
-          origin: 'relay', isTrusted: !!isTrusted, sessionId: sessionId || null,
-        });
-      }
+    onActivated: (label, sessionId) => {
+      if (tabTracker) tabTracker.reportActivation(label, { sessionId: sessionId || null });
       if (stateEngine) stateEngine.refresh();
     },
   }));
@@ -1074,20 +1081,10 @@ function maybeFetchOnTransition(snapshot) {
         // 2026-08-27, lot A surlignage : corréler transitions ↔ bascules de
         // surlignage sans avoir à recouper les deux journaux à la main.
         logAckEvent('conv-transition', { sessionId: c.sessionId, to: c.state });
-        // Lot C anti-vol d'onglet (2026-08-27) : c'est ICI, et nulle part
-        // ailleurs, qu'on sait qu'une conversation vient de changer d'état
-        // par une source étrangère à la copie miroir des onglets. Le tracker
-        // en fait une quarantaine : l'activation fantôme qui suit le `done`
-        // d'une conv d'arrière-plan (mesurée à +117 ms) n'est plus une preuve.
-        if (tabTracker && tabTracker.noteConvTransition) tabTracker.noteConvTransition(c);
       }
     }
   }
   lastConvStates = next;
-  // Hors de la boucle ET avant tout retour anticipé : le basculement de
-  // `activeSessionId` (dernier prompt utilisateur) est une porte de SORTIE de
-  // quarantaine, il n'a rien à voir avec le fetch de quota ci-dessous.
-  if (tabTracker && tabTracker.noteActiveSession) tabTracker.noteActiveSession(snapshot.activeSessionId);
   if (!transitioned) return;
   if (panelProvider && !panelProvider.isVisible()) return;
   const now = Date.now();
@@ -1181,17 +1178,21 @@ function conversationsState() {
     // VÉRITÉ AFFICHÉE = TRANSCRIPT (décision 6 du plan). `model`/`effort` sont
     // ce qui tourne réellement ; `asked`/`mismatch` ne sont qu'un commentaire
     // posé dessus quand on a lancé la conv nous-mêmes ET que le réel diffère.
-    let intent = intentStore ? intentStore.get(c.sessionId) : null;
+    const intent = intentStore ? intentStore.get(c.sessionId) : null;
     const real = { modelId: c.modelId, effort: c.effort };
-    // L'intention n'a qu'un rôle : vérifier que le lancement a honoré ce qui
-    // était demandé. Une fois cette preuve obtenue, elle est oubliée — sinon
-    // un changement de réglage plus tard, DANS la conversation (sélecteur
-    // natif hors de portée de l'extension), continuerait à être accusé comme
-    // un écart alors qu'il n'en est plus un (cf. intentConfirmed, batch.js).
-    if (intentStore && intent && intentConfirmed(intent, real)) {
-      intentStore.forget(c.sessionId);
-      intent = null;
-    }
+    // L'intention est CONSERVÉE tant que la conversation vit — l'avertissement
+    // doit pouvoir se rallumer à tout moment (demande user 2026-08-31, après
+    // avoir constaté qu'une conversation avait dérivé sans que rien ne le dise).
+    // La version 2.78.2 l'oubliait dès que le LANCEMENT l'avait honorée, au
+    // motif qu'un changement de réglage plus tard, dans la conversation, n'est
+    // pas un écart mais une nouvelle volonté. Ce motif tenait pour le MODÈLE
+    // (le sélecteur natif le change vraiment) ; il ne tient pas pour l'EFFORT
+    // d'une conversation de lot, où `CLAUDE_CODE_EFFORT_LEVEL` est prioritaire
+    // et IMMUABLE (doc code.claude.com/docs/en/model-config + issue #39846) :
+    // le sélecteur y annonce une valeur qu'il n'applique pas, et c'est
+    // exactement ce que le badge est là pour rendre visible. Le prix assumé,
+    // énoncé à l'user : après un changement délibéré de modèle, le badge
+    // rappelle ce que le lot avait demandé.
     return {
       id: c.sessionId,
       title: c.title,
@@ -1397,15 +1398,6 @@ function groupsRenderKey() {
       g.members.map((m) => [m.key, m.convId, m.status, m.canLink, m.canRelaunch]),
     ]));
   } catch { return ''; }
-}
-
-// Signature du gel des onglets (2026-08-17, plan gel-tabs) — même doctrine que
-// `groupsRenderKey` ci-dessus : `renderKey` (state.js) ne décrit que la liste
-// des conversations, or le bandeau de gel (panel.js) est à l'écran sans être
-// dérivé d'AUCUNE conv. La MÊME lecture que buildPanelState enverra
-// (`tabTracker.getTabs().frozen`), jamais une résolution « équivalente ».
-function tabsFrozenKey() {
-  return tabTracker && tabTracker.getTabs().frozen ? 'F' : '';
 }
 
 // Pointeur vers la conv maîtresse d'un groupe (lot 11). `null` quand aucune
@@ -1649,16 +1641,8 @@ function buildPanelState() {
       costThresholds: cfg.costThresholds,
       costTurnThresholds: cfg.costTurnThresholds,
     },
-    // Refactor surlignage 2026-08-27 : dernier épisode « le renderer a corrigé
-    // le surlignage » — bandeau warning du webview (cf. panel.js
-    // renderTruthBanner). Null hors épisode frais : le bandeau se cache.
-    highlightNotice: (stateEngine && stateEngine.getSnapshot().highlightReconcile) || null,
     // Lot 13 §1 : indicateur discret, jamais de popup — voir checkTabCanary().
     canary: canaryActive,
-    // Plan gel-tabs (2026-08-17) : canal RPC des onglets mort pour CETTE
-    // fenêtre — cf. tabs.js `reportActivation`/`noteTabsEventReceived`. Lu à
-    // chaque push, jamais mis en cache (même doctrine que `canary` ci-dessus).
-    tabsFrozen: !!(tabTracker && tabTracker.getTabs().frozen),
     // Formulaire de création groupée (lot 1). `notice` est recalculé à CHAQUE
     // push (lot 6, correctif §3) plutôt que figé au moment du « Create » : sans
     // ça, le message restait affiché après que tous les onglets aient été
@@ -1835,6 +1819,17 @@ function computeLastChoiceFromTasks(tasks) {
 // tâche unique, un groupe ne naît que s'il a une RAISON (décision 5 du plan
 // isolée) : nom de groupe explicite, ou maîtresse résolue. Une tâche unique
 // tapée à la main sans l'un ou l'autre reste une ligne plate.
+// RÉTABLI le 2026-09-02 (règle CLAUDE.md « RETIRER = NOMMER qui porte
+// l'information à sa place ») : une version d'un jour retirait `!!groupName`
+// au motif que le nom n'est affiché nulle part (la grip montre l'heure de
+// création). Vrai, mais la régression n'était pas la où on la cherchait —
+// AVANT le premier Entrée dans l'onglet, le transcript n'existe pas encore
+// (la liste plate exige transcript + onglet), donc le LOT était le SEUL
+// porteur d'état de cette tâche. Lui refuser de naître laissait la tâche
+// lancée sans AUCUNE surface à l'écran — l'invariant que ce fichier doit
+// tenir. Le vrai grief (chrome pour un nom invisible) se traite dans le
+// rendu du panneau (panel.js, grip réduite pour un lot à un seul membre sans
+// maîtresse), jamais en refusant au lot le droit d'exister.
 function shouldCreateGroup(taskCount, groupName, hasMasterCandidate) {
   if (taskCount > 1) return true;
   if (taskCount !== 1) return false;
@@ -1891,7 +1886,14 @@ async function createBatch(msg) {
   // A). Le webview ne transmet le texte collé QUE lorsqu'il a reconnu un bloc
   // claude-convs valide (plan : « au collage d'un bloc VALIDE ») ; sans lui,
   // aucune recherche n'a lieu.
-  const masterCandidate = resolveMasterCandidate(msg && msg.paste, msg && msg.session);
+  //
+  // CHOIX EXPLICITE (2026-09-02, MOCKUP_refus_maitresse) : un clic sur une
+  // ligne du panneau prime sur cette recherche — msg.master, quand présent,
+  // dit TEL QUEL qui est la maîtresse (sessionId) ou qu'il n'y en a AUCUNE
+  // (sessionId nul), sans que resolveMasterCandidate ne rejoue sa recherche
+  // par texte : c'est exactement ce qui manquait pour refuser un rattachement
+  // par recherche que l'user vient de désigner ailleurs.
+  const masterCandidate = explicitMasterCandidate(msg && msg.master, msg && msg.paste, msg && msg.session);
 
   // Lot 3 (plan gel-tabs, 2026-08-17) : une maîtresse déjà en tête d'un
   // groupe VIVANT n'en fonde jamais un second, concurrent — c'est ce que
@@ -1974,11 +1976,22 @@ async function createBatch(msg) {
   for (let i = 0; i < result.launched.length; i++) {
     const r = result.launched[i];
     if (!r.sessionId) continue;
-    intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort });
     // Étage 1 : launcher.js rend ses résultats dans l'ordre des tâches de la
     // vague 1, qui sont aussi les premiers membres du groupe (normalizeTasks
     // trie par vague — la vague 1 est toujours en tête).
-    if (group) groupStore.attachByIndex(group.id, i, r.sessionId);
+    //
+    // LE LIEN D'ABORD, L'INTENTION ENSUITE (2026-09-01). L'ordre inverse
+    // enregistrait l'intention même quand le store REFUSAIT le lien — et son
+    // premier motif de refus est « ce sessionId est la conv MAÎTRESSE du
+    // groupe » : c'est très exactement le badge fantôme signalé (⚠ demandé
+    // sonnet · medium sur une maîtresse jamais lancée par le lot). Le store
+    // est le seul juge du lien ; l'intention ne parle que de ce qu'il a accepté.
+    // Hors groupe (tâche unique sans nom ni maîtresse), il n'y a aucun lien à
+    // établir : l'intention vaut pour la session que le launcher a PROUVÉE
+    // nôtre.
+    if (group ? groupStore.attachByIndex(group.id, i, r.sessionId) : true) {
+      intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort });
+    }
   }
 
   const unlinked = result.launched.filter((r) => !r.sessionId).length;
@@ -2332,8 +2345,11 @@ async function launchWaveForGroup(id, waveNumber, opts = {}) {
   for (let i = 0; i < result.launched.length; i++) {
     const r = result.launched[i];
     if (!r.sessionId) continue;
-    intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort });
-    groupStore.attach(id, members[i].key, r.sessionId);
+    // Le lien d'abord, l'intention ensuite — même raison qu'au Create : un
+    // lien refusé par le store ne doit JAMAIS laisser une intention derrière.
+    if (groupStore.attach(id, members[i].key, r.sessionId)) {
+      intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort });
+    }
   }
 
   pushPanelState();
@@ -2658,16 +2674,46 @@ async function linkMember(id, key) {
 // re-lien s'est alors fait tout seul). Relancer là-dessus ouvrirait un doublon
 // et écraserait un lien vivant — exactement le genre de faute que ce chantier
 // supprime.
+function relaunchMemberTruth(id, key) {
+  const g = groupStore && groupStore.get(id);
+  const m = g && g.members.find((x) => x.key === key);
+  if (!m) return null;
+  const convs = stateEngine ? stateEngine.getSnapshot().conversations : [];
+  const byId = new Map(convs.map((c) => [c.sessionId, c]));
+  return memberTruth(redirectMember(m, currentSuperseded()), memberSources((sid) => byId.get(sid)));
+}
+
 async function relaunchMember(id, key) {
   if (!groupStore || !batchLauncher) return;
   const g = groupStore.get(id);
   const m = g && g.members.find((x) => x.key === key);
   if (!m) return;
 
-  const convs = stateEngine ? stateEngine.getSnapshot().conversations : [];
-  const byId = new Map(convs.map((c) => [c.sessionId, c]));
-  const truth = memberTruth(redirectMember(m, currentSuperseded()), memberSources((sid) => byId.get(sid)));
-  if (truth.status !== 'unsent-lost') return;
+  const truth = relaunchMemberTruth(id, key);
+  if (!truth || (truth.status !== 'unsent-lost' && truth.status !== 'not-linked')) return;
+
+  // 'not-linked' (2026-09-02, correctif §c) : aucun sessionId n'a jamais été
+  // attaché, donc un onglet peut encore traîner quelque part avec le prompt
+  // inséré, en attente d'Entrée — relancer ouvrirait un second onglet pour la
+  // même tâche. Confirmation d'UNE ligne, jamais un délai ni une heuristique
+  // (choix d'Anthony) ; 'unsent-lost' reste sans confirmation, inchangé.
+  if (truth.status === 'not-linked') {
+    const relaunch = vscode.l10n.t('Relaunch');
+    let choice;
+    try {
+      choice = await vscode.window.showWarningMessage(
+        vscode.l10n.t('A tab may still be open for this task with its prompt waiting for Enter. Relaunch anyway?'),
+        { modal: true },
+        relaunch
+      );
+    } catch { choice = undefined; }
+    if (choice !== relaunch) return;
+    // Revérifié après l'attente de la confirmation : elle a pu suffire à ce
+    // que l'user appuie sur Entrée dans l'onglet orphelin, qui se relie alors
+    // tout seul (même garde que la fraîcheur ci-dessous, appliquée deux fois).
+    const recheck = relaunchMemberTruth(id, key);
+    if (!recheck || recheck.status !== 'not-linked') return;
+  }
 
   const at = Date.now();
   if (!groupStore.rearm(id, key, at)) return;
@@ -2687,9 +2733,9 @@ async function relaunchMember(id, key) {
   // presse-papier, fichier de session en retard) le membre reste « en attente »
   // et l'étage 2 le rattrapera au premier Entrée — le cas normal, pas un échec.
   const r = result.launched && result.launched[0];
-  if (r && r.sessionId) {
+  if (r && r.sessionId && groupStore.attach(id, key, r.sessionId)) {
+    // Le lien d'abord, l'intention ensuite (même raison qu'au Create).
     intentStore.record(r.sessionId, { model: m.model, effort: m.effort });
-    groupStore.attach(id, key, r.sessionId);
   }
   pushPanelState();
 }
@@ -2850,6 +2896,23 @@ function resolveMasterCandidate(paste, token) {
   const conv = stateEngine.getSnapshot().conversations.find((c) => c.sessionId === res.sessionId);
   console.log('[QuotaBar] master conversation candidate = %s (via %s)', res.sessionId, res.via);
   return { sessionId: res.sessionId, title: (conv && conv.title) || '', via: res.via };
+}
+
+// Choix EXPLICITE du panneau (clic sur une ligne, 2026-09-02) : quand
+// `master.explicit` est vrai, il TRANCHE — sessionId non nul = cette conv est
+// la maîtresse, honorée sans revalider quoi que ce soit contre le texte collé
+// (l'user vient de la désigner lui-même, plus sûr qu'une recherche) ;
+// sessionId nul = AUCUNE maîtresse, et surtout AUCUNE recherche — c'est
+// exactement ce qui manquait pour qu'un clic « détacher » puisse annuler un
+// rattachement que resolveMasterCandidate aurait sinon retrouvé tout seul par
+// le texte du collage. Sans choix explicite (champ absent, webview ancien
+// encore en cache) : comportement inchangé, resolveMasterCandidate reprend
+// la main.
+function explicitMasterCandidate(master, paste, token) {
+  if (!master || !master.explicit) return resolveMasterCandidate(paste, token);
+  if (!master.sessionId) return null;
+  const conv = stateEngine ? stateEngine.getSnapshot().conversations.find((c) => c.sessionId === master.sessionId) : null;
+  return { sessionId: master.sessionId, title: (conv && conv.title) || '', via: 'explicit' };
 }
 
 // Même recherche, déclenchée par le COLLAGE au lieu du « Create » (plan agrafe

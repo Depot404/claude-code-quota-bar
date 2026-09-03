@@ -859,16 +859,17 @@ console.log('\n11. Lot 3 : ambiguïté résiduelle — se taire plutôt que devi
   check('… les deux membres restent marqués tabAmbiguous',
     snapNone.conversations.every((c) => c.tabAmbiguous === true));
 
-  // active-session.json désigne B (l'AUTRE sœur que celle que l'appariement
-  // arbitraire aurait choisie) : c'est elle qui doit être surlignée, pas A.
+  // active-session.json (la conv du DERNIER PROMPT SOUMIS) ne départage plus ce
+  // groupe depuis 2.110.0 : il ne dit pas quel onglet est AFFICHÉ. Le silence
+  // tient, et il est ACTIF — highlightSessionId restant nul, le juge renderer
+  // peut combler par identité exacte (banc dédié : test-renderer-truth.js).
   const bId = snapNone.conversations.find((c) => c.title.includes('sujet B2')).sessionId;
   const snapSister = build2(0, bId);
-  const activeConv = snapSister.conversations.find((c) => c.isActive === true);
-  check('active-session.json désigne l\'autre sœur → C\'EST ELLE qui est surlignée',
-    !!activeConv && activeConv.sessionId === bId,
+  check('active-session.json ne départage plus un groupe ambigu → toujours personne',
+    snapSister.conversations.every((c) => c.isActive === false),
     JSON.stringify(snapSister.conversations.map((c) => [c.title, c.isActive])));
-  check('… une seule conv surlignée à la fois',
-    snapSister.conversations.filter((c) => c.isActive).length === 1);
+  check('… mais il reste publié par le snapshot (jeton /handoffs, diagnostic)',
+    snapSister.activeSessionId === bId, String(snapSister.activeSessionId));
 
   try { fs.rmSync(ACTIVE_SESSION_PATH2, { force: true }); } catch {}
 }
@@ -1045,14 +1046,32 @@ console.log('\n14. Fenêtre en cours de remontage : c\'est le RENDERER qui tranc
   // Le cœur : le renderer (memento workbench.parts.editor) a survécu au
   // reload et désigne g1. Relevé en réel le 2026-08-28 sur la fenêtre en
   // cause : 4 sessions déclarées, exactement les 4 onglets ouverts.
-  const settling = titlesOf(buildG({
+  // La Map de tolérance PARTAGÉE entre les deux recomputes ci-dessous — comme
+  // dans le vrai moteur. Indispensable au banc : en snapshot isolé (Map
+  // fraîche), resolveTabOpen tolère le premier raté et rend true même sans la
+  // grâce — l'assertion ne pourrait jamais tomber.
+  const sharedMisses = new Map();
+  const settlingOpts = {
     activatedAt: Date.now(),
     openSessionIds: () => new Set(['g1']),
-  }));
+    tabOpenMisses: sharedMisses,
+  };
+  buildG(settlingOpts);                      // 1er recompute du burst de reload
+  const settlingSnap = buildG(settlingOpts); // 2e : la tolérance serait épuisée
+  const settling = titlesOf(settlingSnap);
   check('remontage + renderer : l\'ouverte RESTE…',
     settling.includes('Conv bien ouverte'), JSON.stringify(settling));
   check('… et la fermée ne revient PAS en fantôme (la régression de 2.86.1)',
     !settling.includes('Conv fermee hier') && settling.length === 1, JSON.stringify(settling));
+  // Le frère oublié de 2.86.2 (constat user au reload de la 2.96.0) : la ligne
+  // restait, mais son BARRÉ (tabOpen, jugé sur l'appariement de libellés — pas
+  // encore republiés, CLI pas encore vivants) épuisait ses 2 tolérances dans le
+  // burst de recomputes du reload et tombait à false ~30 s : titre barré sur un
+  // onglet grand ouvert à l'écran. Pendant la grâce, tabOpen se juge sur le
+  // MÊME memento que la présence — un fait d'affichage, une source.
+  const rowG1 = settlingSnap.conversations.find((c) => c.sessionId === 'g1');
+  check('… et l\'ouverte n\'est PAS barrée pendant le remontage (tabOpen suit le renderer)',
+    !!rowG1 && rowG1.tabOpen === true, JSON.stringify(rowG1 && rowG1.tabOpen));
 
   // Sans renderer, personne ne peut trancher : on ne touche à rien plutôt que
   // de fabriquer des fantômes.
@@ -1068,6 +1087,230 @@ console.log('\n14. Fenêtre en cours de remontage : c\'est le RENDERER qui tranc
   }));
   check('grâce écoulée : on revient au jugement ordinaire (par les libellés)',
     JSON.stringify(settled) === JSON.stringify(noGrace), JSON.stringify(settled));
+}
+
+console.log('\n15. Onglet restauré JAMAIS VISITÉ : « Claude Code » n\'est pas un libellé, c\'est un blanc (2026-09-02)');
+{
+  // Mesuré au journal après quatre rechargements de fenêtre (2026-09-02,
+  // VS Code 1.135) : VS Code ne désérialise un webview Claude restauré qu'à sa
+  // PREMIÈRE VISITE — jusque-là son `Tab.label` vaut le titre générique de la
+  // vue, « Claude Code » (185 occurrences relevées, `claude:true` dans
+  // `tabs-proof`). Les vrais libellés ne sont donc pas revenus « au bout de
+  // quelques dizaines de secondes » : ils sont revenus à +195 s, +237 s,
+  // +567 s, +627 s — c'est-à-dire quand l'utilisateur a visité l'onglet.
+  //
+  // Ce que le §14 modélisait par `labels: []` est donc FAUX au regard du monde
+  // réel : les libellés existent, ils valent tous « Claude Code ». Aucune conv
+  // ne les matche ⇒ perte NON ambiguë, immédiate ⇒ isGone conclut « prouvée
+  // fermée » sur cinq onglets grands ouverts à l'écran (2 lignes pour 5
+  // onglets, capture user).
+  const wsP = 'C:\\Users\\Test\\Projets VSCODE\\Placeholder';
+  const dirP = state.projectDirFor(wsP);
+  fs.mkdirSync(dirP, { recursive: true });
+  const mk = (id, title) => fs.writeFileSync(path.join(dirP, id + '.jsonl'),
+    [userMsg('sujet ' + id), assistant, { type: 'ai-title', aiTitle: title }]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  mk('p1', 'Conv visitee apres reload');
+  mk('p2', 'Conv restauree jamais vue');
+  mk('p3', 'Conv restauree jamais vue non plus');
+  mk('p4', 'Conv fermee pour de bon');
+
+  // L'état exact mesuré : un seul onglet désérialisé (celui qui était actif au
+  // reload), trois autres encore au titre générique — dont un qui n'a AUCUNE
+  // conv derrière au sens des libellés (p4 est fermée : elle n'a pas d'onglet
+  // du tout, ni réel ni générique).
+  const buildP = (extra) => state.buildSnapshot({
+    workspacePath: wsP, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => ({ known: true, labels: ['Conv visitee apres reload', 'Claude Code', 'Claude Code'] }),
+    liveSessions: () => new Set(),
+    sessionTitles: () => new Map([
+      ['p1', 'Conv visitee apres reload'], ['p2', 'Conv restauree jamais vue'],
+      ['p3', 'Conv restauree jamais vue non plus'], ['p4', 'Conv fermee pour de bon'],
+    ]),
+    ...extra,
+  }, state.createTranscriptReader());
+  const idsOf = (snap) => snap.conversations.map((c) => c.sessionId).sort();
+
+  // La grâce de 2.86.2 est ÉCOULÉE depuis longtemps (le symptôme est constaté
+  // 5 min après le reload) : c'est tout l'objet du chapitre — une horloge de
+  // 90 s ne peut pas couvrir un retour de libellé qui dépend d'un GESTE.
+  const settled = { activatedAt: Date.now() - 10 * 60 * 1000, openSessionIds: () => new Set(['p1', 'p2', 'p3']) };
+  const kept = idsOf(buildP(settled));
+  check('les onglets restaurés non visités gardent leur ligne (le symptôme du 2026-09-02)',
+    JSON.stringify(kept) === JSON.stringify(['p1', 'p2', 'p3']), JSON.stringify(kept));
+  check('… et la conv réellement fermée ne revient PAS en fantôme (leçon 2.86.1)',
+    !kept.includes('p4'), JSON.stringify(kept));
+  const rowP2 = buildP(settled).conversations.find((c) => c.sessionId === 'p2');
+  check('… et elle n\'est pas BARRÉE non plus (tabOpen suit le même juge)',
+    !!rowP2 && rowP2.tabOpen === true, JSON.stringify(rowP2 && rowP2.tabOpen));
+
+  // Dégradation : sans le memento, personne ne peut trancher → comportement
+  // d'avant à l'octet près, jamais un panneau de fantômes.
+  const blindP = idsOf(buildP({ activatedAt: Date.now() - 10 * 60 * 1000, openSessionIds: () => new Set() }));
+  check('sans renderer (base illisible) : comportement d\'avant, aucune grâce',
+    JSON.stringify(blindP) === JSON.stringify(['p1']), JSON.stringify(blindP));
+
+  // Tous les onglets désérialisés : plus aucun blanc, la preuve ordinaire
+  // reprend TOUT son rôle — sans quoi la parade deviendrait permanente.
+  const allResolved = idsOf(buildP({
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(['p1', 'p2', 'p3']),
+    tabs: () => ({ known: true, labels: ['Conv visitee apres reload'] }),
+  }));
+  check('aucun libellé générique : retour au jugement ordinaire (par les libellés)',
+    JSON.stringify(allResolved) === JSON.stringify(['p1']), JSON.stringify(allResolved));
+
+  // Un onglet NEUF (lancement de vague) porte lui aussi « Claude Code » : sa
+  // conversation n'est pas encore dans le memento, et son libellé ne matche
+  // rien. La présence doit alors se lire sur l'UNION des deux preuves, jamais
+  // sur le seul memento — sinon la parade masquerait la conv qu'on vient
+  // d'ouvrir.
+  mk('p5', 'Conv toute neuve');
+  const fresh = idsOf(buildP({
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(['p1', 'p2', 'p3']),
+    tabs: () => ({ known: true, labels: ['Conv visitee apres reload', 'Claude Code', 'Claude Code', 'Conv toute neuve'] }),
+    sessionTitles: () => new Map([['p1', 'Conv visitee apres reload'], ['p5', 'Conv toute neuve']]),
+  }));
+  check('onglet neuf hors memento mais au libellé matchant : gardé (union des preuves)',
+    fresh.includes('p5') && fresh.includes('p1'), JSON.stringify(fresh));
+
+  // LE FRÈRE, trouvé en revue du même lot : le filtre d'ancienneté tourne AVANT
+  // tout ça, et il ne connaît que `tabStillOpenFor` — donc les libellés. Une
+  // conversation de plus de `recentMs` dont l'onglet restauré n'a pas encore
+  // été visité était retirée par `aged` avant même que la présence ait son mot
+  // à dire : corriger la présence seule ne l'aurait jamais fait revenir.
+  const old = path.join(dirP, 'p6.jsonl');
+  fs.writeFileSync(old,
+    [userMsg('sujet p6'), assistant, { type: 'ai-title', aiTitle: 'Conv de la nuit derniere' }]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const longAgo = Date.now() - 8 * 3600 * 1000;
+  fs.utimesSync(old, longAgo / 1000, longAgo / 1000);
+  const agedOpts = {
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(['p1', 'p2', 'p3', 'p6']),
+    sessionTitles: () => new Map([
+      ['p1', 'Conv visitee apres reload'], ['p2', 'Conv restauree jamais vue'],
+      ['p3', 'Conv restauree jamais vue non plus'], ['p6', 'Conv de la nuit derniere'],
+    ]),
+  };
+  check('conv de plus de 4 h dont l\'onglet restauré n\'est pas visité : PAS écartée par l\'ancienneté',
+    idsOf(buildP(agedOpts)).includes('p6'), JSON.stringify(idsOf(buildP(agedOpts))));
+  // La contrepartie, inchangée : sans preuve d'onglet, l'ancienneté tranche
+  // toujours — c'est elle qui garde le panneau court.
+  const agedGone = idsOf(buildP({
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(['p1', 'p2', 'p3']),
+  }));
+  check('… mais une vieille conv SANS onglet reste écartée (l\'ancienneté garde son rôle)',
+    !agedGone.includes('p6'), JSON.stringify(agedGone));
+
+  // ── §16. LA FERMETURE OBSERVÉE PRIME SUR LE SOUVENIR DU RENDERER ──────────
+  // Symptôme mesuré le 2026-09-02 (user) : onglet fermé, la ligne reste ~30 s.
+  // Journal `presence-drop` : la conv « QuotaSaver tabs.js et state.js »
+  // (9b1431db) quitte la liste à 21:21:22 avec `closed:true` — donc `markClosed`
+  // avait DÉJÀ posé sa fermeture, et le recompute qu'il déclenche n'avait rien
+  // changé ; aucun presence-drop dans les 35 s qui précèdent.
+  //
+  // Cause : `settling` est le régime NORMAL chez qui garde des onglets restaurés
+  // (placeholders 1 à 4 sur les 11 relevés du jour), et il juge la présence sur
+  // `openIds.has(id) || hasTab`. À la fermeture, `hasTab` tombe dans les 150 ms
+  // (tabs.js republie), mais `openIds` — le memento du renderer — retarde
+  // jusqu'à ~27 s (mesure de 2.84.0) et GÈLE hors focus. L'union restait donc
+  // vraie, `isGone` sortait sur son premier test (`if (open) return false`)
+  // AVANT même de regarder `closedAt`, et la ligne survivait jusqu'au flush
+  // suivant — soit le tick de 30 s, d'où la durée observée.
+  //
+  // Classe, et c'est la doctrine du dossier (2026-08-29) : l'ÉVÉNEMENT de
+  // fermeture et le VERDICT de présence ne sont pas la même preuve. Avant
+  // 2.103.0 l'ordre des tests d'isGone était sans conséquence — `open` ne venait
+  // que du libellé, qui tombe AVEC l'événement. En ajoutant une source qui
+  // retarde, on a rendu périmable une preuve qu'isGone traite comme fraîche.
+  // Le correctif tient à la SOURCE (un fait d'affichage, une source) : une
+  // session dont la fermeture est observée sort de `openIds`, donc du memento
+  // pour tout le monde — présence, tabOpen, appariement ET filtre d'ancienneté.
+  const closedNow = () => new Map([['p1', Date.now()]]);
+  const afterClose = {
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(['p1', 'p2', 'p3']),   // le memento retarde encore
+    tabs: () => ({ known: true, labels: ['Claude Code', 'Claude Code'] }), // p1 n'a plus d'onglet
+    closedAt: closedNow(),
+  };
+  const closedIds = idsOf(buildP(afterClose));
+  check('onglet fermé sous nos yeux : la ligne part TOUT DE SUITE, memento en retard ou non',
+    !closedIds.includes('p1'), JSON.stringify(closedIds));
+  check('… sans emporter les onglets restaurés voisins (le correctif de 2.103.0 tient)',
+    closedIds.includes('p2') && closedIds.includes('p3'), JSON.stringify(closedIds));
+
+  // LE FRÈRE, à la porte d'avant : `tabProvenOpen` lit le même memento pour le
+  // filtre d'ancienneté. Sans le correctif à la source, une vieille conv fermée
+  // resterait retenue par `aged` exactement le même temps.
+  const oldClosed = idsOf(buildP({
+    ...agedOpts,
+    openSessionIds: () => new Set(['p1', 'p2', 'p3', 'p6']),
+    tabs: () => ({ known: true, labels: ['Conv visitee apres reload', 'Claude Code', 'Claude Code'] }),
+    closedAt: new Map([['p6', Date.now()]]),
+  }));
+  check('vieille conv dont l\'onglet vient d\'être fermé : plus retenue par le memento non plus',
+    !oldClosed.includes('p6'), JSON.stringify(oldClosed));
+
+  // Contrepartie — le memento est neutralisé, JAMAIS le libellé : un onglet qui
+  // porte encore ce nom reste une preuve fraîche d'ouverture (réouverture,
+  // sœur homonyme). Sans quoi on fabriquerait le faux négatif symétrique, la
+  // régression de 2.86.1 sous une autre forme.
+  const reopened = idsOf(buildP({
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(['p2', 'p3']),         // pas encore reflushé
+    tabs: () => ({ known: true, labels: ['Conv visitee apres reload', 'Claude Code', 'Claude Code'] }),
+    closedAt: closedNow(),
+  }));
+  check('… mais un onglet qui porte ENCORE ce libellé garde sa ligne (preuve fraîche)',
+    reopened.includes('p1'), JSON.stringify(reopened));
+
+  // Dégradation habituelle : sans memento, rien à neutraliser, comportement
+  // d'avant à l'octet près.
+  const closedBlind = idsOf(buildP({
+    activatedAt: Date.now() - 10 * 60 * 1000,
+    openSessionIds: () => new Set(),
+    tabs: () => ({ known: true, labels: ['Claude Code', 'Claude Code'] }),
+    closedAt: closedNow(),
+  }));
+  check('sans renderer : la fermeture se juge comme avant (aucun memento à écarter)',
+    !closedBlind.includes('p1'), JSON.stringify(closedBlind));
+
+  // LE FRÈRE SUR L'AUTRE BRANCHE (hors `settling`, le régime de qui visite tous
+  // ses onglets) : la tolérance aux pertes AMBIGUËS retenait `open` vrai le
+  // temps de ses recomputes et masquait `closedAt` à isGone par le même chemin
+  // exactement. Elle est faite pour le tirage au sort entre sœurs homonymes,
+  // pas pour un onglet qu'on a VU se fermer.
+  const twins2 = 'C:\\Users\\Test\\Projets VSCODE\\TwinsClosed';
+  const dir2 = state.projectDirFor(twins2);
+  fs.mkdirSync(dir2, { recursive: true });
+  const PFX = 'z'.repeat(24);
+  const twinFile = (name, subject, title) => {
+    const f = path.join(dir2, name + '.jsonl');
+    fs.writeFileSync(f, [userMsg(subject), assistant, { type: 'ai-title', aiTitle: title }]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+    return f;
+  };
+  twinFile('tkeep', 'sujet A', `${PFX} onglet reellement ouvert`);
+  const loserFile = twinFile('tclosed', 'sujet B, tout autre', `${PFX} onglet que je viens de fermer`);
+  const older = (Date.now() - 5000) / 1000;
+  fs.utimesSync(loserFile, older, older);   // plus ancienne : perd le départage
+  const buildT = (extra) => state.buildSnapshot({
+    workspacePath: twins2, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => ({ known: true, labels: [`${PFX}…`] }),   // un seul onglet pour deux sœurs
+    liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    ...extra,
+  }, state.createTranscriptReader());
+
+  // Témoin : sans fermeture observée, la tolérance joue — c'est §10, inchangé.
+  check('témoin : sans fermeture observée, la sœur surnuméraire est tolérée au 1er recompute',
+    buildT({}).conversations.length === 2, JSON.stringify(buildT({}).conversations.map((c) => c.title)));
+  const twinClosed = buildT({ closedAt: new Map([['tclosed', Date.now()]]) }).conversations;
+  check('fermeture observée : la sœur part au 1er recompute, la tolérance ne la retient plus',
+    twinClosed.length === 1 && twinClosed[0].title.includes('reellement ouvert'),
+    JSON.stringify(twinClosed.map((c) => c.title)));
 }
 
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}

@@ -252,7 +252,16 @@ function build(status, ctx) {
     canLink: status === 'not-linked' || status === 'unsent-lost',
     // Rouvrir une conversation pour cette tâche (prompt/modèle/effort du
     // membre) : le remède quand l'onglet, lui, est vraiment parti.
-    canRelaunch: status === 'unsent-lost',
+    // 'not-linked' (2026-09-02, correctif §c) : une vague OUVERTE dont AUCUN
+    // sessionId n'a jamais été attaché (aucun process n'a même été tenté sous
+    // cet identifiant) n'offrait que « Lier… », geste que l'user n'utilise
+    // jamais — la vague restait ouverte pour toujours. L'argument de
+    // PLAN_lien_mort_ne_2026-08-04.md pour unsent-lost (rien n'a jamais été
+    // envoyé sous cet identifiant, donc rien à protéger) vaut a fortiori ici :
+    // il n'y a même pas d'identifiant. Confirmation d'UNE ligne exigée avant
+    // l'action réelle (extension.js relaunchMember) : un onglet peut encore
+    // traîner avec le prompt inséré, en attente d'Entrée.
+    canRelaunch: status === 'unsent-lost' || status === 'not-linked',
     // Fermer l'onglet : seulement une conversation terminée dont un onglet est
     // encore ouvert — donc forcément visible dans la vue (c'est la seule chose
     // que la vue a le droit de décider ici).

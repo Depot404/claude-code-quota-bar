@@ -164,8 +164,16 @@ check('plusieurs tâches → groupe, toujours (inchangé)',
   shouldCreateGroup(2, '', false) === true);
 check('1 tâche, sans nom de groupe ni maîtresse résolue → pas de groupe',
   shouldCreateGroup(1, '', false) === false);
+// RÉTABLI le 2026-09-02 (régression de la même journée, cf. extension.js) :
+// refuser le groupe sur un simple `group:` laissait la tâche SANS AUCUNE
+// surface à l'écran — avant le premier Entrée le transcript n'existe pas
+// encore, le lot était son seul porteur d'état. Le vrai grief (le nom n'est
+// affiché nulle part) se règle par la CHROME de la grip (panel.js), pas en
+// empêchant le lot de naître.
 check('1 tâche + `group:` (nom non vide) → groupe',
   shouldCreateGroup(1, 'Refonte paiement', false) === true);
+check('1 tâche + `group:` ET maîtresse → groupe (les deux raisons cumulées)',
+  shouldCreateGroup(1, 'Refonte paiement', true) === true);
 check('1 tâche + maîtresse résolue (candidat non nul) → groupe',
   shouldCreateGroup(1, '', true) === true);
 check('1 tâche, collage non résolu (candidat null/falsy) et sans nom → pas de groupe',

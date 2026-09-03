@@ -43,6 +43,13 @@ check('convId null + lancé → not-linked', t.status === 'not-linked', t.status
 check('… Link… proposé (seul cas où c\'est vrai)', t.canLink === true);
 check('… waveStatus launched (la vague l\'attend)', t.waveStatus === 'launched');
 check('… note « not linked yet »', t.note === 'not linked yet', t.note);
+// Correctif 2026-09-02 (§c) : aucun sessionId n'a JAMAIS été attaché — un
+// onglet peut traîner avec le prompt inséré, ce que la confirmation
+// (extension.js relaunchMember) doit dire avant de relancer, mais le bouton
+// existe désormais (l'user n'utilisait jamais « Lier… » sur ce cas, la vague
+// restait ouverte pour toujours).
+check('… « Relancer » proposé aussi (2026-09-02, aucun identifiant à protéger)',
+  t.canRelaunch === true, String(t.canRelaunch));
 
 // | présent | vivante | absent | — | inserted — press Enter |   ← BUG 3 et 4
 t = memberTruth(linked, sources({ live: ['s1'] }));

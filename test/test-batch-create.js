@@ -19,7 +19,7 @@ const vm = require('vm');
 const EXT = path.join(__dirname, '..');
 const {
   normalizeTasks, envForTask, applyEnv, conflictingEnvVars,
-  createIntentStore, mismatchOf, intentConfirmed, ENV_MODEL, ENV_EFFORT,
+  createIntentStore, mismatchOf, ENV_MODEL, ENV_EFFORT,
   resolveDefaultModel, resolveDefaultEffort, appendTasksAfterWave,
 } = require(path.join(EXT, 'batch.js'));
 const { createBatchLauncher } = require(path.join(EXT, 'launcher.js'));
@@ -33,11 +33,17 @@ function check(name, cond, detail) {
 // Faux registre de sessions : `spawn()` simule l'apparition d'un fichier
 // ~/.claude/sessions/<pid>.json, ce que fait le CLI à l'OUVERTURE de l'onglet
 // (vérifié empiriquement 2026-07-22).
+//
+// `startedAt` est l'horodatage que le CLI écrit dans ce fichier (epoch ms,
+// relevé sur CLI 2.1.252) — c'est la seule PREUVE d'identité dont dispose le
+// launcher, d'où sa présence par défaut ici et le troisième argument qui
+// permet de fabriquer une session plus ANCIENNE que le lancement.
 function fakeRegistry(initial = []) {
   let entries = initial.slice();
   return {
     list: () => entries.slice(),
-    spawn: (sessionId, cwd) => entries.push({ sessionId, cwd, pid: 1000 + entries.length }),
+    spawn: (sessionId, cwd, startedAt = Date.now()) =>
+      entries.push({ sessionId, cwd, pid: 1000 + entries.length, startedAt }),
   };
 }
 
@@ -137,29 +143,27 @@ async function run() {
   check('valeur invalide enregistrée ⇒ ramenée à null (jamais un écart inventé)',
     intents2.get('s2').model === null && intents2.get('s2').effort === null, JSON.stringify(intents2.get('s2')));
 
-  console.log('\n4bis. Intention confirmée puis oubliée (plan surlignage-effort §2)');
-  check('pas d\'intention ⇒ jamais confirmée',
-    intentConfirmed(null, { modelId: 'claude-sonnet-5', effort: 'low' }) === false);
-  check('réel encore inconnu ⇒ pas encore confirmée',
-    intentConfirmed(intents.get('s1'), { modelId: null, effort: null }) === false);
-  check('un seul champ demandé confirmé sur son propre champ',
-    intentConfirmed({ model: null, effort: 'low' }, { modelId: 'claude-sonnet-5', effort: 'low' }) === true);
-  check('modèle et effort demandés, réel conforme aux deux ⇒ confirmée',
-    intentConfirmed(intents.get('s1'), { modelId: 'claude-opus-4-8[1m]', effort: 'high' }) === true);
-  check('modèle conforme mais effort encore divergent ⇒ pas confirmée',
-    intentConfirmed(intents.get('s1'), { modelId: 'claude-opus-4-8[1m]', effort: 'medium' }) === false);
-  // Scénario réel : lancée en low, honorée pendant N tours (confirmée ⇒
-  // oubliée), puis l'user change le sélecteur DANS la conversation — le
-  // nouveau réel ne doit plus jamais être lu comme un écart avec le lancement.
+  console.log('\n4bis. L\'intention SURVIT à un lancement honoré (demande user 2026-08-31)');
+  // Contrat INVERSÉ par rapport à 2.78.2, qui oubliait l'intention dès que le
+  // lancement l'avait honorée : une dérive survenue plus tard ne pouvait alors
+  // plus rien allumer, et c'est exactement ce que l'user a constaté (effort
+  // verrouillé à `medium` par l'environnement du lot pendant que le sélecteur
+  // natif annonçait `max`, sans un mot à l'écran). L'intention vit désormais
+  // aussi longtemps que la conversation, `mismatchOf` restant seul juge.
   const intents3 = createIntentStore();
   intents3.record('s3', { model: 'sonnet', effort: 'low' });
-  const real1 = { modelId: 'claude-sonnet-5', effort: 'low' };
-  check('lancement honoré ⇒ pas d\'écart', mismatchOf(intents3.get('s3'), real1) === null);
-  check('… et l\'intention est bien confirmée à cet instant', intentConfirmed(intents3.get('s3'), real1) === true);
-  intents3.forget('s3'); // ce que fait extension.js dès que intentConfirmed rend true
-  const real2 = { modelId: 'claude-sonnet-5', effort: 'xhigh' };
-  check('après changement délibéré du réglage dans la conv, plus aucun écart accusé',
-    mismatchOf(intents3.get('s3'), real2) === null, JSON.stringify(mismatchOf(intents3.get('s3'), real2)));
+  check('lancement honoré ⇒ pas d\'écart',
+    mismatchOf(intents3.get('s3'), { modelId: 'claude-sonnet-5', effort: 'low' }) === null);
+  const drift = mismatchOf(intents3.get('s3'), { modelId: 'claude-sonnet-5', effort: 'xhigh' });
+  check('dérive de l\'effort APRÈS un lancement honoré ⇒ écart signalé',
+    !!(drift && drift.effort && drift.effort.asked === 'low' && drift.effort.real === 'xhigh'), JSON.stringify(drift));
+  check('l\'intention est toujours là (jamais oubliée en cours de route)',
+    !!intents3.get('s3') && intents3.get('s3').effort === 'low');
+  const driftModel = mismatchOf(intents3.get('s3'), { modelId: 'claude-opus-5', effort: 'low' });
+  check('dérive du MODÈLE après un lancement honoré ⇒ écart signalé aussi',
+    !!(driftModel && driftModel.model && driftModel.model.real === 'opus'), JSON.stringify(driftModel));
+  check('plus aucune fonction d\'oubli automatique n\'est exportée',
+    require(path.join(EXT, 'batch.js')).intentConfirmed === undefined);
 
   console.log('\n5. Lancement : env posé PENDANT l\'appel, restauré APRÈS');
   const reg = fakeRegistry([{ sessionId: 'old', cwd: 'C:\\ws' }]);
@@ -246,6 +250,122 @@ async function run() {
   res = await launcher.launch(normalizeTasks([{ prompt: 'z' }]));
   check('une session d\'un autre workspace n\'est jamais attribuée à notre lancement',
     res.launched[0].sessionId === null, JSON.stringify(res.launched[0].sessionId));
+
+  console.log('\n8bis. Garde d\'IDENTITÉ (2026-09-01) — une session ANCIENNE qui réapparaît pendant le poll');
+  // Bug mesuré le 2026-09-01 : badge « ⚠ demandé sonnet · medium » collé sur une
+  // conversation JAMAIS lancée par le lot (852411ca…, la maîtresse du batch),
+  // alors que le prompt était parti dans une autre (7e77d1dc…). Le launcher
+  // adoptait le PREMIER sessionId absent de la photo d'avant — or une session
+  // ancienne EST absente de cette photo quand son fichier de registre était
+  // illisible à cet instant (JSON en cours de réécriture ⇒ entrée sautée par
+  // live-sessions.js), puis redevient lisible pendant les 10 s de poll.
+  // L'ordre d'arrivée n'a jamais prouvé quoi que ce soit : seul `startedAt` le
+  // peut (même famille que la règle « l'ordre ne départage jamais deux sœurs »).
+  const regGhost = fakeRegistry();
+  launcher = createBatchLauncher({
+    executeCommand: async () => { regGhost.spawn('vieille-session', 'C:\\ws', Date.now() - 180000); },
+    listCommands: async () => ['claude-vscode.editor.open'],
+    env: {},
+    listSessions: regGhost.list,
+    workspacePath: 'C:\\ws',
+    waitMs: 30,
+    pollMs: 5,
+  });
+  res = await launcher.launch(normalizeTasks([{ prompt: 'z', model: 'sonnet', effort: 'medium' }]));
+  check('une session démarrée AVANT notre appel n\'est jamais adoptée, même absente de la photo d\'avant',
+    res.launched[0].sessionId === null, JSON.stringify(res.launched[0].sessionId));
+
+  // Le CLI qui n'écrirait pas `startedAt` (version antérieure) ne fournit aucune
+  // preuve : membre non lié, l'étage 2 (préfixe de prompt) rattrapera. Jamais
+  // une adoption au rabais.
+  const regNoStamp = fakeRegistry();
+  launcher = createBatchLauncher({
+    executeCommand: async () => { regNoStamp.spawn('sans-horodatage', 'C:\\ws', undefined); },
+    listCommands: async () => ['claude-vscode.editor.open'],
+    env: {},
+    listSessions: () => regNoStamp.list().map((e) => ({ ...e, startedAt: 0 })),
+    workspacePath: 'C:\\ws',
+    waitMs: 30, pollMs: 5,
+  });
+  res = await launcher.launch(normalizeTasks([{ prompt: 'z' }]));
+  check('registre sans startedAt (CLI ancien) ⇒ aucune preuve ⇒ membre non lié',
+    res.launched[0].sessionId === null, JSON.stringify(res.launched[0].sessionId));
+
+  console.log('\n8ter. Une session ÉTRANGÈRE au lancement apparaît pendant la fenêtre');
+  // Bouton « New session » cliqué par l'utilisateur au même instant : elle est
+  // aussi neuve que la nôtre, donc `startedAt` ne les départage pas. Deux
+  // candidates prouvées = ambiguïté, et l'ambiguïté ne se tranche pas par
+  // l'ordre — aucun rattachement (principe déjà tenu par attach.js).
+  const regTwo = fakeRegistry();
+  launcher = createBatchLauncher({
+    executeCommand: async () => {
+      regTwo.spawn('la-notre', 'C:\\ws');
+      regTwo.spawn('celle-de-l-user', 'C:\\ws');
+    },
+    listCommands: async () => ['claude-vscode.editor.open'],
+    env: {},
+    listSessions: regTwo.list,
+    workspacePath: 'C:\\ws',
+    waitMs: 30, pollMs: 5,
+  });
+  res = await launcher.launch(normalizeTasks([{ prompt: 'z' }]));
+  check('deux sessions neuves pendant la fenêtre ⇒ aucune adoption (jamais un tirage au sort)',
+    res.launched[0].sessionId === null, JSON.stringify(res.launched[0].sessionId));
+
+  // Le cas nominal reste intact : une seule session neuve ⇒ adoptée.
+  const regOne = fakeRegistry([{ sessionId: 'vieille', cwd: 'C:\\ws', startedAt: Date.now() - 600000 }]);
+  launcher = createBatchLauncher({
+    executeCommand: async () => { regOne.spawn('la-notre', 'C:\\ws'); },
+    listCommands: async () => ['claude-vscode.editor.open'],
+    env: {},
+    listSessions: regOne.list,
+    workspacePath: 'C:\\ws',
+    waitMs: 30, pollMs: 5,
+  });
+  res = await launcher.launch(normalizeTasks([{ prompt: 'z' }]));
+  check('une seule session neuve ⇒ toujours rattachée (le chemin nominal ne bouge pas)',
+    res.launched[0].sessionId === 'la-notre', JSON.stringify(res.launched[0].sessionId));
+
+  console.log('\n8quater. Auto-réparation des liens déjà FAUSSÉS (groups.js dropMisattachedIntents)');
+  // Le badge fantôme déjà écrit dans workspaceState ne s'efface pas tout seul :
+  // au chargement, un membre PORTEUR D'UNE INTENTION dont la session a démarré
+  // avant `launchedAt − SESSION_WAIT_MS` est la preuve d'une mésattribution
+  // passée → on défait le lien (le prompt, le modèle et l'effort restent, donc
+  // « Relancer » et l'étage 2 fonctionnent toujours).
+  const { createGroupStore } = require(path.join(EXT, 'groups.js'));
+  const { SESSION_WAIT_MS } = require(path.join(EXT, 'launcher.js'));
+  const T0 = 1000000000;
+  const stored = [{
+    id: 'g1', name: 'Batch', createdAt: T0, members: [
+      { key: 'm1', prompt: 'p1', model: 'sonnet', effort: 'medium', wave: 1, sessionId: 'faussee', launchedAt: T0 },
+      { key: 'm2', prompt: 'p2', model: 'opus', effort: 'high', wave: 1, sessionId: 'legitime', launchedAt: T0 },
+      { key: 'm3', prompt: 'p3', model: 'fable', effort: 'high', wave: 1, sessionId: 'process-mort', launchedAt: T0 },
+      { key: 'm4', prompt: '', model: null, effort: null, wave: 1, sessionId: 'ajoutee-a-la-main', launchedAt: T0 },
+    ],
+  }];
+  let saved = null;
+  const gs = createGroupStore({ load: () => stored, save: (g) => { saved = g; } });
+  const started = new Map([
+    ['faussee', T0 - SESSION_WAIT_MS - 1],          // née AVANT la fenêtre d'attente
+    ['legitime', T0 + 900],                          // née pendant, c'est bien la nôtre
+    ['ajoutee-a-la-main', T0 - 3600000],             // vieille, mais AUCUNE intention
+    // 'process-mort' : absente du registre → doute, on garde
+  ]);
+  const dropped = gs.dropMisattachedIntents((sid) => (started.has(sid) ? started.get(sid) : null), SESSION_WAIT_MS);
+  const mem = (k) => gs.get('g1').members.find((m) => m.key === k);
+  check('lien prouvé faux défait (un seul)', dropped === 1 && mem('m1').sessionId === null, JSON.stringify({ dropped, m1: mem('m1').sessionId }));
+  check('plus aucune intention pour la session mésattribuée (badge fantôme éteint)',
+    !gs.intents().some((i) => i.sessionId === 'faussee'), JSON.stringify(gs.intents()));
+  check('prompt/modèle/effort conservés — « Relancer » et l\'étage 2 restent possibles',
+    mem('m1').prompt === 'p1' && mem('m1').model === 'sonnet' && mem('m1').effort === 'medium', JSON.stringify(mem('m1')));
+  check('lien légitime conservé', mem('m2').sessionId === 'legitime');
+  check('registre muet (process mort) ⇒ le doute profite à l\'existant', mem('m3').sessionId === 'process-mort');
+  check('membre sans intention (conv ajoutée à la main, forcément ancienne) ⇒ jamais touché',
+    mem('m4').sessionId === 'ajoutee-a-la-main');
+  check('la réparation est PERSISTÉE (le fantôme ne revient pas au prochain reload)',
+    !!saved && saved[0].members[0].sessionId === null, JSON.stringify(saved && saved[0].members[0]));
+  const gs2 = createGroupStore({ load: () => stored, save: () => {} });
+  check('registre entièrement muet ⇒ rien n\'est défait', gs2.dropMisattachedIntents(() => null, SESSION_WAIT_MS) === 0);
 
   console.log('\n9. Repli presse-papier (editor.open absent ou en échec)');
   let clip = null, messages = [], commands = [];

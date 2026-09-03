@@ -708,6 +708,47 @@ function createGroupStore(deps = {}) {
       return out;
     },
 
+    // Auto-réparation des liens PROUVÉS FAUX (2026-09-01). La garde d'identité
+    // du launcher empêche les mésattributions à venir ; celles déjà écrites
+    // dans workspaceState, elles, survivent aux reloads et gardent leur badge
+    // d'écart sur une conversation qui n'a jamais rien demandé. La preuve est la
+    // même que celle du launcher, relue à l'envers : une session dont le process
+    // a démarré AVANT `launchedAt − waitMs` ne peut pas être celle que ce
+    // lancement a ouverte.
+    //
+    // Portée volontairement étroite — seuls les membres PORTEURS D'UNE INTENTION
+    // (ceux dont le badge peut mentir) : une conversation ajoutée à la main
+    // (`addExisting`, model/effort à `null`) est légitimement plus vieille que
+    // son membre, et rien ne doit la défaire.
+    // Le doute profite TOUJOURS à l'existant : `startedAtOf` qui rend `null`
+    // (process mort, registre illisible) ou un `startedAt` postérieur (un reload
+    // a respawné le CLI de cette conversation) ⇒ on garde.
+    // On défait le LIEN, pas la tâche : prompt, modèle, effort et vague restent,
+    // donc « Relancer » et le rattachement par l'étage 2 fonctionnent encore.
+    //
+    // startedAtOf : (sessionId) => epoch ms | null
+    // → nombre de liens défaits.
+    dropMisattachedIntents(startedAtOf, waitMs) {
+      if (typeof startedAtOf !== 'function' || !Number.isFinite(waitMs)) return 0;
+      let n = 0;
+      for (const g of groups) {
+        for (const m of g.members) {
+          if (!m.sessionId) continue;
+          if ((!m.model || m.model === 'inherit') && (!m.effort || m.effort === 'inherit')) continue;
+          const at = Number.isFinite(m.launchedAt) ? m.launchedAt : g.createdAt;
+          if (!Number.isFinite(at) || at <= 0) continue;
+          let started = null;
+          try { started = startedAtOf(m.sessionId); } catch { started = null; }
+          if (!Number.isFinite(started) || started <= 0) continue;
+          if (started >= at - waitMs) continue;
+          m.sessionId = null;
+          n++;
+        }
+      }
+      if (n) persist();
+      return n;
+    },
+
     // Purge des groupes DEVENUS SANS OBJET : plus vieux que `maxAgeMs` et dont
     // aucun membre ne correspond à une conversation encore connue du panneau.
     // Appelée une fois à l'activation, jamais en continu — c'est un ménage de

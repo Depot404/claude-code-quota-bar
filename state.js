@@ -30,13 +30,12 @@
 //           d'appariement, 2026-08-21) — départage deux onglets au libellé
 //           identique, ce que le libellé seul ne peut plus faire ;
 //           labelChangedAt = dernier changement de valeur d'activeLabel
-//           (référence temporelle de l'arbitre renderer, 2026-08-27)
+//           (référence temporelle du juge renderer, 2026-08-27)
 //   rendererActive: () => ({ sessionId, claude, flushedAt })
 //         — l'éditeur ACTIF au sens du memento du renderer (session-titles.js
-//           createRendererActive) : le JUGE du surlignage, cf. l'arbitre
-//           « le renderer est le juge » dans buildSnapshot (2026-08-27).
-//           Absent (bancs, base illisible) ⇒ arbitre inactif, verdict par
-//           libellés inchangé.
+//           createRendererActive) : il COMBLE un surlignage vide, cf. le juge
+//           dans buildSnapshot (2.106.0). Absent (bancs, base illisible) ⇒
+//           juge inactif, verdict par libellés inchangé.
 //   liveSessions: () => Set<sessionId>   — sessions CLI vivantes
 //         (live-sessions.js ; défaut = le vrai registre ~/.claude/sessions)
 //   sessionTitles: () => Map<sessionId, label>  — titres d'onglet RÉELS
@@ -64,7 +63,7 @@ const os = require('os');
 const path = require('path');
 const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js');
 const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, pendingInteractiveAt, interruptedAt, lastActivityTs, firstUserText, pendingResumeSignals } = require('./hooks/transcript.js');
-const { labelMatches, convMatchesLabel, pairTabs } = require('./labels.js');
+const { labelMatches, convMatchesLabel, pairTabs, isPlaceholderTabLabel, labelNamesAnother } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
 const { liveSessionIds, foreignSessionIds, liveSessionEntries, SESSIONS_DIR } = require('./live-sessions.js');
 const { cleanLabel } = require('./session-titles.js');
@@ -80,54 +79,24 @@ const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SESSIONS_STATE_PATH = path.join(CLAUDE_DIR, 'sessions-state.json');
 const ACTIVE_SESSION_PATH = path.join(CLAUDE_DIR, 'active-session.json');
 
-// ── « Le renderer est le juge » (refactor surlignage, 2026-08-27) ───────────
-// Marge de l'arbitre : la vérité renderer (memento du state.vscdb, cf.
-// session-titles.js createRendererActive) ne corrige le surlignage que si son
-// flush est postérieur d'au moins cette marge au dernier changement adopté par
-// le tracker d'onglets. Elle couvre l'asynchronisme flush/horloge : un état
-// capturé à T peut être écrit à T+ε — sans marge, un geste tombé dans cet ε
-// serait « jugé » par un memento qui ne l'a pas vu. Override de banc, même
-// motif que FLIP_QUARANTINE_MS (tabs.js).
-// ⚠️ MESURÉ le 2026-08-27 au soir (dépouillement du journal + échantillonnage
-// direct du state.vscdb) : `flushedAt` est le mtime du FICHIER, il ne date PAS
-// la clé qu'on y lit. Le fichier est réécrit toutes les 30-60 s pour d'autres
-// clés (3 flushs sur 7 observés sans le moindre changement de
-// `workbench.parts.editor`), et la clé de l'éditeur actif, elle, met jusqu'à
-// **27 s** à porter une bascule (mesure directe : clic panneau 18:15:26,4 →
-// valeur écrite 18:15:53,7). Avec 3 s de marge, l'arbitre se croyait donc
-// « plus récent » en lisant un état vieux d'une demi-minute : les 4 seules
-// vraies corrections du journal (14:33:36, 14:36:53, 14:50:49, 18:02:23) ont
-// TOUTES rétrogradé un clic panneau `isTrusted` vieux de 4 à 7 s — l'invariant
-// « un memento en retard ne rétrograde pas un clic frais » énoncé au-dessus
-// était écrit, mais pas tenu. La marge couvre maintenant la latence mesurée
-// (27 s) plus une réserve : en dessous, le juge ne peut que fabriquer du faux.
-const RENDERER_TRUTH_MARGIN_MS = Number(process.env.QUOTABAR_TRUTH_MARGIN_MS) || 45000;
-// Sauf quand il n'y a RIEN à rétrograder : verdict par libellés muet (onglet en
-// cours de renommage, « Claude Code » sans titre), le juge ne remplace aucun
-// choix, il comble un vide. Aucun clic ne peut être écrasé par ce chemin, donc
-// la marge courte d'origine y reste — c'est le service rendu par les deux
-// premiers épisodes du journal (wasVia:none, 14:23:37 et 14:25:51).
+// ── Le juge renderer COMBLE un surlignage vide (2.106.0) ────────────────────
+// Marge du juge : la vérité renderer (memento du state.vscdb, cf.
+// session-titles.js createRendererActive) ne désigne une ligne que si son flush
+// est postérieur d'au moins cette marge au dernier changement adopté par le
+// tracker d'onglets. Elle couvre l'asynchronisme flush/horloge : un état capturé
+// à T peut être écrit à T+ε — sans marge, un geste tombé dans cet ε serait
+// « jugé » par un memento qui ne l'a pas vu.
+// Marge COURTE parce qu'il n'y a jamais rien à rétrograder : le juge n'entre en
+// scène que si le verdict par libellés est MUET (onglet renommé avec le prompt
+// de sa tâche, « Claude Code » sans titre — mesuré le 2026-09-02), et combler un
+// vide n'écrase aucun choix. C'est la garde `judgeAllowed` de buildSnapshot.
+// ⚠️ Ce que l'ancienne marge longue (45 s, 2026-08-27 → 2.110.0) protégeait
+// n'existe plus : elle bornait le juge quand il pouvait ÉCRASER un choix
+// existant pour corriger un mensonge de la copie miroir — mensonge supprimé en
+// amont par VS Code 1.135 (microsoft/vscode#331914). Historique et mesures
+// (`flushedAt` est le mtime du FICHIER et ne date pas la clé lue ; jusqu'à 27 s
+// de retard) : NOTES_architecture.md.
 const RENDERER_TRUTH_FILL_MARGIN_MS = Number(process.env.QUOTABAR_TRUTH_FILL_MARGIN_MS) || 3000;
-// Durée d'exposition du bandeau « surlignage corrigé » côté panneau : passée
-// elle, le snapshot cesse de publier l'épisode (le webview borne aussi de son
-// côté, il n'attend pas un push d'expiration).
-const RECONCILE_NOTICE_MS = 10 * 60 * 1000;
-// Grâce AVANT le bandeau (demande user, 2026-08-27 après le premier reload) :
-// la correction du surlignage reste immédiate, mais l'ÉPISODE ne devient une
-// alerte visible que si la divergence persiste au-delà de cette fenêtre. Les
-// deux premiers bandeaux réels étaient des transitoires de renommage d'onglet
-// (« Claude Code » → titre, verdict par libellés vide 3-6 s, wasSessionId
-// null au journal) : un vide comblé ou une divergence que le tracker résorbe
-// en quelques secondes est le système qui FONCTIONNE, pas une erreur à
-// montrer. 5 s, tranché par l'user (2026-08-27, « 15 c'est trop long ») : les
-// transitoires de renommage mesurés durent 0,4-2 s (et les vides sont déjà
-// filtrés par wasSessionId), le vrai bug fondateur durait 14 minutes — 5 s
-// sépare encore largement les deux. Lue à chaque évaluation (pas figée au
-// require) : le banc joue plusieurs valeurs dans le même process.
-const reconcileGraceMs = () => {
-  const v = Number(process.env.QUOTABAR_RECONCILE_GRACE_MS);
-  return Number.isFinite(v) ? v : 5000;
-};
 
 // Une conv `busy` dont le transcript n'a rien écrit depuis 5 min ET dont le
 // process CLI est MORT est un zombie (process tué, crash, VS Code fermé sans
@@ -183,6 +152,11 @@ const PENDING_IDLE_MS = Number(process.env.CLAUDE_QUOTA_PENDING_IDLE_MS) > 0
 // lancements de vagues de cette même tempête ; un cran au-dessus parce que le
 // symptôme observé durait « environ une minute ». L'env var ne sert qu'aux
 // bancs — attendre 90 s par test serait absurde.
+// ⚠️ 2026-09-02 : cette horloge ne couvre plus que le tout début du remontage,
+// l'instant où même la liste d'onglets n'est pas encore complète. Le vrai
+// remontage, lui, ne se mesure PAS en secondes (cf. `settling`) : un onglet
+// restauré attend d'être VISITÉ pour publier son libellé — mesuré à +195 s,
+// +237 s, +567 s et +627 s sur quatre rechargements du même jour.
 const ACTIVATION_GRACE_MS = Number(process.env.CLAUDE_QUOTA_PRESENCE_GRACE_MS) > 0
   ? Number(process.env.CLAUDE_QUOTA_PRESENCE_GRACE_MS)
   : 90 * 1000;
@@ -190,6 +164,10 @@ const ACTIVATION_GRACE_MS = Number(process.env.CLAUDE_QUOTA_PRESENCE_GRACE_MS) >
 // une seule fenêtre, donc un seul verdict à la fois — une clé fixe suffit,
 // partagée par tous les appels de buildSnapshot de ce process.
 const highlightVerdictFilter = createVerdictFilter();
+// Même filtre, même raison, pour la composition de la LISTE (cf. `dropped`
+// dans buildSnapshot) : un recompute par écriture de transcript, donc des
+// dizaines par minute, et une seule ligne quand la composition change.
+const presenceJournalFilter = createVerdictFilter();
 // Marge avant de lire une écriture transcript comme une REPRISE du travail
 // (après une permission accordée, ou après un Stop qui n'a pas fini le tour).
 // Elle absorbe le voisinage immédiat du hook : le dernier message assistant du
@@ -853,7 +831,47 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // ancienne version de VS Code sans le memento) ⇒ Set vide ⇒ pairTabs retombe
   // intégralement sur l'appariement par libellé, comportement d'avant à l'octet
   // près.
-  const openIds = (typeof opts.openSessionIds === 'function' && opts.openSessionIds()) || NO_LIVE;
+  const rawOpenIds = (typeof opts.openSessionIds === 'function' && opts.openSessionIds()) || NO_LIVE;
+  // ── LE MEMENTO EST UN SOUVENIR, LA FERMETURE EST UN TÉMOIGNAGE (2026-09-02) ─
+  // Une session dont l'onglet s'est fermé SOUS NOS YEUX quitte le memento ici,
+  // à la source, avant tout usage. Sans ça, la ligne survivait ~30 s à sa
+  // fermeture (mesuré par l'user, journal `presence-drop` : drop à 21:21:22
+  // avec `closed:true` déjà posé, aucun changement de composition dans les 35 s
+  // précédentes) — le retrait ne se faisait plus sur l'événement mais au tick
+  // suivant, dont la période est justement de 30 s.
+  //
+  // POURQUOI ÇA N'ARRIVAIT PAS AVANT 2.103.0 : `openIds` n'entrait alors dans le
+  // jugement de présence que pendant la grâce d'activation. Depuis, `settling`
+  // est le régime NORMAL (il suffit d'UN onglet restauré non visité, cf. plus
+  // bas) et la présence se lit sur `openIds || libellé`. Or les deux preuves
+  // n'ont pas la même fraîcheur : le libellé tombe dans les 150 ms (tabs.js
+  // republie sur l'événement), le memento retarde jusqu'à ~27 s (mesure de
+  // 2.84.0) et GÈLE tant que la fenêtre n'a pas le focus. L'union restait donc
+  // vraie et `isGone` sortait sur son premier test — `if (open) return false`,
+  // AVANT de consulter `closedAt`. Cet ordre était sans conséquence tant que
+  // `open` ne venait que du libellé ; ajouter une source qui retarde a rendu
+  // périmable une preuve traitée comme fraîche.
+  //
+  // C'est la doctrine du 2026-08-29, appliquée dans l'autre sens : l'ÉVÉNEMENT
+  // de fermeture et le VERDICT de présence ne sont pas la même preuve. On savait
+  // qu'un verdict ne doit jamais déclencher d'irréversible ; la réciproque
+  // manquait — un souvenir ne doit jamais contredire un événement observé.
+  //
+  // NEUTRALISÉ À LA SOURCE, et non au point de lecture : le même memento sert
+  // la présence, `tabOpen`, l'appariement de pairTabs ET le filtre d'ancienneté
+  // (`tabProvenOpen` ci-dessous) — ce dernier retenait une vieille conversation
+  // fermée exactement le même temps, à la porte d'AVANT. Les corriger séparément
+  // ne se verrait pas (« un fait d'affichage doit avoir UNE source »).
+  //
+  // Ce qui n'est PAS neutralisé : le LIBELLÉ. Un onglet qui porte encore ce nom
+  // reste une preuve fraîche d'ouverture — réouverture, sœur homonyme —, et
+  // `isGone` garde sa propre sortie de secours (écriture postérieure à la
+  // fermeture ⇒ `closedAt.delete`). Neutraliser les deux fabriquerait le faux
+  // négatif symétrique, la leçon de 2.86.1.
+  const closedIds = opts.closedAt instanceof Map ? opts.closedAt : null;
+  const openIds = closedIds && closedIds.size && rawOpenIds.size
+    ? new Set([...rawOpenIds].filter((id) => !closedIds.has(id)))
+    : rawOpenIds;
   // Naissance (ms epoch) de chaque process VIVANT du registre — incident
   // spinner éternel 2026-08-18, cf. le commentaire de `effectiveState` sur
   // `startedAt`. Absente des opts (bancs d'avant ce lot) ⇒ Map vide ⇒ la
@@ -876,6 +894,22 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   const pinnedIds = rawPinned instanceof Set
     ? rawPinned
     : new Set(Array.isArray(rawPinned) ? rawPinned : []);
+
+  // « Un onglet OUVERT porte-t-il encore cette conversation ? » — les DEUX
+  // preuves, jamais le seul libellé (2026-09-02, frère du symptôme §9(d) des
+  // notes d'audit). `tabStillOpenFor` croise le store des titres avec les
+  // libellés d'onglets : un onglet restauré et jamais visité porte « Claude
+  // Code », donc il répond NON pour une conversation grande ouverte à l'écran.
+  // Le memento du renderer, lui, la NOMME. Sans ce croisement, l'invariant
+  // « onglet ouvert ⇒ listée » retombait au bout de `recentMs` sur les deux
+  // portes qui le tiennent avant toute lecture de transcript : le filtre
+  // d'ancienneté et la priorité dans les `maxItems` places — une conversation
+  // de plus de 4 h dont l'onglet n'a pas encore été visité restait invisible
+  // même après le correctif de la présence, puisque `aged` la retire AVANT.
+  // openIds vide (base illisible) ⇒ retombe sur `tabStillOpenFor` seul,
+  // comportement d'avant à l'octet près.
+  const tabProvenOpen = (sessionId) => tabStillOpenFor(sessionId, titles, tabs)
+    || openIds.has(sessionId);
 
   if (projectDir) {
     for (const { sessionId, file } of listTranscripts(projectDir)) {
@@ -928,7 +962,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // marquée reprend une place de `maxItems`, comme une conv à onglet
       // ouvert (cf. le tri des candidats plus bas).
       if (now - mtime > recentMs && !live.has(sessionId)
-        && !tabStillOpenFor(sessionId, titles, tabs)
+        && !tabProvenOpen(sessionId)
         && !pinnedIds.has(sessionId)) { aged.add(sessionId); continue; }
       byId.set(sessionId, { sessionId, transcript: file, mtime, entry: fresh ? entry : null });
     }
@@ -1005,7 +1039,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // Effet de bord utile : une marquée étant en tête des candidats, elle est
   // toujours dans les SCAN_LIMIT transcripts réellement lus, si vieille soit-elle.
   const hasTab = new Map();
-  for (const c of byId.values()) hasTab.set(c.sessionId, tabStillOpenFor(c.sessionId, titles, tabs) ? 1 : 0);
+  for (const c of byId.values()) hasTab.set(c.sessionId, tabProvenOpen(c.sessionId) ? 1 : 0);
   const pinRank = (id) => (pinnedIds.has(id) ? 1 : 0);
   const candidates = [...byId.values()].sort((a, b) => {
     const d = hasTab.get(b.sessionId) - hasTab.get(a.sessionId);
@@ -1135,11 +1169,22 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // preuve quand plusieurs conversations partagent le libellé actif.
   const indexFromMemento = new Set();
   if (positionOf) {
+    // Ce que le libellé trouvé à la position peut contredire (2026-09-03) : pas
+    // « ne correspond pas à cette conversation » — c'est le cas de tout onglet
+    // que l'extension officielle a renommé avec le dernier prompt (« ok go »,
+    // journal 01:00:00 `matches:0 via:none` sur une position JUSTE), et le
+    // prendre pour un veto laissait la ligne éteinte jusqu'au prochain flush du
+    // juge (~5 s, puis rechute à chaque changement d'onglet). Seul un libellé
+    // qui NOMME une autre conversation listée prouve une photo périmée pour
+    // cette ligne (onglets réordonnés depuis le flush). Cf. labels.js
+    // `labelNamesAnother` — la même règle que focus.js, au même instant.
+    const listed = prepared.map((q) => ({ sessionId: q.c.sessionId, title: q.title, tabTitle: q.tabTitle }));
     for (const p of prepared) {
       const loc = positionOf.get(p.c.sessionId);
       if (!loc) continue;
       const label = labels[loc.flatIndex];
-      if (label == null || !convMatchesLabel(label, { title: p.title, tabTitle: p.tabTitle })) continue;
+      if (label == null) continue;
+      if (labelNamesAnother(label, { sessionId: p.c.sessionId, title: p.title, tabTitle: p.tabTitle }, listed)) continue;
       pairing.index.set(p.c.sessionId, loc.flatIndex);
       pairing.ambiguous.delete(p.c.sessionId);
       indexFromMemento.add(p.c.sessionId);
@@ -1193,9 +1238,24 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // ⇒ personne ne peut trancher ⇒ AUCUNE grâce, comportement d'avant à l'octet
   // près : mieux vaut une disparition d'une minute qu'un panneau de fantômes.
   // `activatedAt` absent des opts (tous les bancs d'avant ce lot) : idem.
-  const settling = typeof opts.activatedAt === 'number'
-    && now - opts.activatedAt < ACTIVATION_GRACE_MS
-    && openIds.size > 0;
+  //
+  // ── LE REMONTAGE NE SE MESURE PAS EN SECONDES (2026-09-02) ────────────────
+  // L'horloge de 90 s supposait que les libellés reviennent SEULS. Ils ne
+  // reviennent pas : VS Code ne désérialise un webview restauré qu'à sa
+  // première VISITE, et jusque-là son onglet porte le titre générique
+  // « Claude Code » (cf. labels.js `isPlaceholderTabLabel`). Mesuré au journal
+  // sur quatre rechargements du 2026-09-02 : premiers vrais libellés à +195 s,
+  // +237 s, +567 s, +627 s — chaque fois à l'instant d'une visite. Cinq minutes
+  // après un reload, la grâce était donc écoulée depuis longtemps et trois
+  // onglets grands ouverts passaient pour « prouvés fermés » : 2 lignes pour
+  // 5 onglets (capture user, §9(d) des notes d'audit).
+  // Le témoin juste est donc le FAIT, pas le délai : reste-t-il un onglet
+  // Claude dont le libellé n'est pas encore résolu ? L'horloge est conservée
+  // pour ce qu'elle seule couvre — les toutes premières secondes, où la liste
+  // d'onglets elle-même peut être incomplète, donc sans aucun blanc à voir.
+  const settling = openIds.size > 0
+    && ((typeof opts.activatedAt === 'number' && now - opts.activatedAt < ACTIVATION_GRACE_MS)
+      || labels.some(isPlaceholderTabLabel));
 
   // Sessions dont l'onglet est PROUVÉ absent — identité publiée, appariement
   // tenté, aucun onglet. Publié hors de la liste rendue parce que le fait vaut
@@ -1207,6 +1267,17 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // process orphelin). Signalé par l'user le 2026-08-24, panneau rechargé :
   // les lignes de conversations avaient bien disparu, le lot non.
   const tabGoneIds = new Set();
+
+  // ── JOURNAL DE PRÉSENCE (2026-09-02) ──────────────────────────────────────
+  // « Le JOURNAL tranche, jamais un mécanisme inféré » (CLAUDE.md) ne valait
+  // que pour le SURLIGNAGE : le 2026-09-02, aucune ligne du journal ne pouvait
+  // dire par quelle règle une conversation avait quitté le panneau, et le
+  // diagnostic a dû se reconstituer par les `matches:0` des verdicts de
+  // surlignage — un signal qui ne parle QUE de l'onglet actif, donc muet sur
+  // les quatre autres lignes manquantes. Une ligne par CHANGEMENT de
+  // composition ferme l'angle mort ; le filtre anti-bavardage la garde lisible.
+  // Aucun verdict n'en dépend (cf. ack-journal.js : ce module n'influence rien).
+  const dropped = [];
 
   // PASSE 2 — décide qui est visible, dans le même ordre, avec l'appariement
   // déjà connu.
@@ -1222,10 +1293,27 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     // RENDERER et de lui seul : les libellés ne sont pas tous revenus, et la
     // tolérance aux pertes ambiguës ne sait rien d'une source absente. Le
     // reste du temps, rien ne change.
+    // UNION des deux preuves, jamais le memento seul (2026-09-02) : un onglet
+    // NEUF — celui qu'une vague vient d'ouvrir — porte lui aussi le libellé
+    // générique, donc `settling` est vrai en plein régime normal, et le memento
+    // du renderer ne connaît pas encore cette session (il retarde jusqu'à ~27 s,
+    // et il gèle tant que la fenêtre n'a pas le focus). Le juger sur le seul
+    // memento masquerait la conversation qu'on vient d'ouvrir. Un libellé qui
+    // matche reste ce qu'il a toujours été : une preuve d'onglet ouvert.
+    // Une fermeture OBSERVÉE rend la perte non ambiguë, donc immédiate (frère du
+    // correctif ci-dessus, même passe) : la tolérance existe pour le seul cas
+    // « le départage des sœurs homonymes a désigné l'autre cette fois-ci », un
+    // tirage au sort dont on se méfie — pas pour un onglet qu'on a VU se fermer.
+    // Sans ça, `open` restait vrai le temps des tolérances et masquait `closedAt`
+    // à `isGone` par le même chemin exactement, sur l'autre branche. La preuve
+    // fraîche garde toujours le dernier mot : `hasTab` sort `true` avant même
+    // d'arriver ici (cf. resolveHasTabForPresence).
     const presenceHasTab = settling
-      ? openIds.has(c.sessionId)
+      ? (openIds.has(c.sessionId) || hasTab)
       : resolveHasTabForPresence(
-        c.sessionId, hasTab, pairing.ambiguous.has(c.sessionId), presenceMisses
+        c.sessionId, hasTab,
+        pairing.ambiguous.has(c.sessionId) && !closedAt.has(c.sessionId),
+        presenceMisses
       );
     if (tabs.known && !presenceHasTab && identityKnown(c.sessionId)) tabGoneIds.add(c.sessionId);
     const gone = isGone(
@@ -1248,12 +1336,17 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
         sessionId: c.sessionId, title, titleSource,
         mtime: c.mtime, live: live.has(c.sessionId), tabOpen: false, transcript: c.transcript,
       });
+      dropped.push({
+        id: c.sessionId, rule: 'gone', state, labelMatch: hasTab, memento: openIds.has(c.sessionId),
+        idKnown: identityKnown(c.sessionId), live: live.has(c.sessionId),
+        foreign: foreign.has(c.sessionId), closed: closedAt.has(c.sessionId), src: titleSource,
+      });
       continue;
     }
     // Le rendu reste borné à maxItems (comme avant), mais le scan, lui,
     // continue jusqu'à SCAN_LIMIT — sans ça, un husk plus ancien que les
     // maxItems convs visibles ne serait jamais lu, donc jamais candidat.
-    if (conversations.length >= maxItems) continue;
+    if (conversations.length >= maxItems) { dropped.push({ id: c.sessionId, rule: 'maxItems' }); continue; }
     const row = {
       sessionId: c.sessionId,
       title,
@@ -1265,8 +1358,19 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // bijectif (`hasTab`, plus haut) passe par resolveTabOpen (lot « bascule
       // au focus ») pour absorber un manque isolé plutôt que de le croire
       // tout de suite.
+      // Pendant le remontage (`settling`), MÊME JUGE que la présence : le
+      // memento du renderer. La présence avait été corrigée ainsi en 2.86.2,
+      // mais tabOpen restait jugé sur l'appariement de libellés — or les CLI
+      // respawnent et les libellés ne sont pas tous revenus : une conv done
+      // (CLI pas encore vivant, isLive muet) épuisait ses 2 tolérances en un
+      // burst de recomputes et PANEL.JS BARRAIT son titre ~30 s, onglet grand
+      // ouvert à l'écran (constat user au reload de la 2.96.0, 2026-08-31).
+      // « Un fait d'affichage doit avoir UNE source » : la ligne et son barré
+      // se jugent ensemble ou pas du tout. Banc : test-presence.js §14.
       tabOpen: tabs.known
-        ? resolveTabOpen(c.sessionId, hasTab, tabOpenMisses, live.has(c.sessionId))
+        ? (settling
+          ? presenceHasTab
+          : resolveTabOpen(c.sessionId, hasTab, tabOpenMisses, live.has(c.sessionId)))
         : false,
       // Cette conv appartient-elle à un groupe où l'appariement est arbitraire
       // (mêmes titres tronqués) ? Lot 3 du plan d'appariement : consommé par
@@ -1304,6 +1408,32 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     conversations.push(row);
     supersedeCandidates.push(row);
   }
+
+  // Une ligne quand la composition de la liste change — jamais à chaque
+  // recompute (cf. presenceJournalFilter). Enveloppée comme tout le reste du
+  // journal : elle ne décide rien et ne doit jamais casser un snapshot.
+  try {
+    const sig = JSON.stringify([
+      conversations.length, settling,
+      dropped.map((d) => `${d.id}:${d.rule}:${d.labelMatch ? 'L' : '-'}${d.memento ? 'M' : '-'}${d.idKnown ? 'K' : '-'}`),
+      [...aged],
+    ]);
+    const take = presenceJournalFilter.take('presence', sig);
+    if (take) {
+      logEvent('presence-drop', {
+        shown: conversations.length,
+        settling,
+        openIds: openIds.size,
+        labels: labels.length,
+        placeholders: labels.filter(isPlaceholderTabLabel).length,
+        storeAlive,
+        tabsKnown: !!tabs.known,
+        aged: [...aged],
+        dropped,
+        repeatsSkipped: take.repeatsSkipped,
+      });
+    }
+  } catch {}
 
   // Supplantation de session, à travers un reload OU un respawn spontané
   // (supersede.js) : quand l'extension officielle relance une conversation
@@ -1407,9 +1537,6 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     // Le critère est désormais le fait lui-même : dès que `highlightMatches > 1`,
     // aucun raisonnement TEXTUEL ne peut désigner la bonne — ni le repli par
     // libellé, ni un appariement que pairTabs a lui-même marqué arbitraire.
-    // Seul `active-session.json` (identifiant VRAI) est admis ; à défaut, aucun
-    // surlignage. Se taire est le seul repli honnête : le juge renderer
-    // ci-dessous, lui, tranchera par identité dès son prochain flush.
     // Le critère n'est PAS « pairTabs a-t-il su apparier » — il croit toujours
     // savoir, y compris quand il vient de tirer au sort entre deux libellés
     // égaux (c'est le bug d'origine). C'est « d'où vient cet index » : du
@@ -1419,21 +1546,24 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
     const arbitrary = highlightMatches > 1
       && !(target && indexFromMemento.has(target.sessionId));
     if (target && arbitrary) {
-      // Deux identités vraies peuvent départager, dans cet ordre de force :
-      //  1. `tabs.actSessionId` — le sessionId que le CLIC du panneau vient
-      //     d'activer par la voie identité (focus.js). C'est un geste humain
-      //     visant CETTE conversation-là, la preuve la plus directe qui existe.
-      //  2. `active-session.json` — la conv du dernier prompt soumis. Plus
-      //     faible (elle ne dit pas quel onglet est affiché) mais vraie, et
-      //     c'est le repli en place depuis le lot 3 du plan d'appariement.
+      // La SEULE identité admise ici : `tabs.actSessionId`, le sessionId que le
+      // CLIC du panneau vient d'activer par la voie identité (focus.js) — un
+      // geste humain visant CETTE conversation-là.
+      // `active-session.json` (la conv du DERNIER PROMPT soumis) a été retiré de
+      // ce départage en 2.110.0 : il ne mesure pas la bonne grandeur. Écrire
+      // dans une conversation ne dit pas quel onglet est AFFICHÉ — on peut
+      // soumettre dans l'une des deux sœurs puis aller lire l'autre depuis la
+      // barre d'onglets, et le surlignage restait alors faux SANS RECOURS (un
+      // `highlightSessionId` posé interdit au juge renderer de combler).
+      // Se taire est le repli honnête, et il est ACTIF : sans identité, la ligne
+      // reste éteinte, donc le juge renderer comble par identité exacte au flush
+      // suivant (~5 s mesurées) — une meilleure preuve, pas une preuve en moins.
       const clicked = tabs && tabs.actSessionId;
       const sister = (clicked
         && conversations.find((c) => c.sessionId === clicked && convMatchesLabel(activeLabel, c)))
-        || (activeSessionId
-          && conversations.find((c) => c.sessionId === activeSessionId && convMatchesLabel(activeLabel, c)))
         || null;
       target = sister || null;
-      if (sister) highlightVia = sister.sessionId === clicked ? 'panel-click' : 'active-session';
+      if (sister) highlightVia = 'panel-click';
     }
     if (target) {
       target.isActive = true;
@@ -1441,137 +1571,64 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       // écraser 'panel-click'/'active-session' ferait passer une preuve exacte
       // pour une correspondance de texte au journal — et c'est ce journal qui
       // sert à diagnostiquer ce chemin (règle du dossier, 2026-08-26).
-      if (highlightVia === 'none') highlightVia = 'label';
+      // `identity` (2026-09-03) : aucun libellé ne matche, c'est la POSITION du
+      // memento validé qui a désigné la ligne — le journal doit le dire tel
+      // quel, pas « label » (une correspondance de texte qui n'a pas eu lieu).
+      if (highlightVia === 'none') highlightVia = (byIndex && highlightMatches === 0) ? 'identity' : 'label';
       highlightSessionId = target.sessionId;
     }
-  } else {
-    for (const c of conversations) c.isActive = c.sessionId === activeSessionId;
-    if (activeSessionId) { highlightVia = 'active-session'; highlightSessionId = activeSessionId; }
   }
+  // PAS de branche « aucun onglet Claude sélectionné » (retirée en 2.110.0).
+  // Elle surlignait alors `active-session.json`, la conv du dernier prompt
+  // soumis — sur une fenêtre qui n'a AUCUN onglet Claude à l'écran, c'est
+  // désigner une conversation qu'on ne regarde pas. Le sens honnête est : rien.
+  // Le juge renderer ci-dessous reste, lui, libre d'allumer la ligne de
+  // l'éditeur réellement affiché, par identité.
 
-  // ── LE RENDERER EST LE JUGE (refactor surlignage, 2026-08-27) ─────────────
+  // ── LE JUGE RENDERER COMBLE UN SURLIGNAGE VIDE (2.106.0) ──────────────────
   // Tout le verdict ci-dessus descend d'UNE source : la copie miroir tabGroups
-  // de l'hôte d'extension (via tabs.js). Or elle a prouvé qu'elle sait rester
-  // FAUSSE indéfiniment — bascule fantôme adoptée fenêtre sans focus, puis plus
-  // AUCUN événement ni relecture pour la corriger (14 min mesurées le
-  // 2026-08-27, fenêtre « 142 modifications », pendant que l'écran affichait
-  // un autre onglet). Aucune parade interne ne peut fermer ce cas : toute
-  // relecture relit le même mensonge (cf. tabs.js, doctrine « une bascule ne
-  // s'adopte que prouvée » — nécessaire pour la réactivité, insuffisante pour
-  // la vérité).
+  // de l'hôte d'extension (via tabs.js). Elle donne le bon LIBELLÉ — jamais une
+  // IDENTITÉ. Quand ce libellé ne correspond à aucune conversation listée
+  // (l'onglet a été renommé avec le début du prompt de sa tâche, mesuré le
+  // 2026-09-02 et signalé par l'user), il ne reste RIEN et le panneau n'allume
+  // plus la ligne de l'onglet qu'on regarde.
   //
-  // Le juge est donc une source ÉTRANGÈRE au miroir : le memento
+  // Le juge est une source ÉTRANGÈRE au miroir : le memento
   // `workbench.parts.editor` du state.vscdb, écrit par le RENDERER — le
-  // processus qui peint l'écran, c'est-à-dire la vérité que l'utilisateur a
-  // sous les yeux — et qui porte l'IDENTITÉ exacte (sessionID) de l'éditeur
-  // actif, pas un libellé tronqué à apparier (cf. session-titles.js
-  // createRendererActive, et l'incident : mru[0] disait vrai sur le disque
-  // pendant tout le mensonge du miroir).
+  // processus qui peint l'écran — et qui porte l'IDENTITÉ exacte (sessionID) de
+  // l'éditeur actif, pas un libellé tronqué à apparier (cf. session-titles.js
+  // createRendererActive).
   //
-  // Règle d'arbitrage, dans les deux sens du temps :
-  //  - le memento ne juge que s'il est PLUS RÉCENT que le dernier avis du
-  //    tracker (flushedAt - marge > labelChangedAt) : un flush paresseux ne
-  //    rétrograde jamais un clic tout frais. ⚠️ La MARGE fait tout le travail
-  //    ici, et 3 s ne suffisaient pas : le mtime date le FICHIER, pas la clé
-  //    lue (mesures dans la déclaration de RENDERER_TRUTH_MARGIN_MS — jusqu'à
-  //    27 s de retard, et des flushs entiers sans le moindre changement de la
-  //    clé). Les 4 corrections « réelles » du premier jour ont toutes écrasé un
-  //    clic panneau de 4 à 7 s : c'était le juge qui fabriquait le faux
-  //    surlignage de quelques secondes, pas un fantôme qui survivait. Ce que la
-  //    marge retient est journalisé (highlight-truth-deferred) ;
-  //  - dès qu'il est plus récent et qu'il désigne une conversation LISTÉE
-  //    différente, il GAGNE — quelle que soit la porte par laquelle le
-  //    mensonge est entré (fantôme adopté, souvenir invalide, gel du canal…).
-  //    C'est le filet UNIVERSEL : plus aucune désynchronisation ne peut durer
-  //    au-delà du prochain flush du renderer.
-  //  - il ne dit rien quand l'actif n'est pas un panneau Claude (claude:false,
-  //    l'utilisateur est sur un fichier) : le repli-souvenir garde la main —
-  //    basculer sur un fichier n'éteint toujours pas le surlignage.
-  //  - il ne surligne jamais une conversation hors liste : se taire vaut
-  //    mieux qu'un surlignage sur de l'invisible.
-  // L'épisode est journalisé (highlight-reconciled) dès la première
-  // application ; le BANDEAU du panneau, lui, attend deux conditions (demande
-  // user après le premier reload, 2026-08-27 — « vraie erreur ou timing trop
-  // juste ») :
-  //  - un vrai « avant » : wasSessionId non nul. Combler un surlignage VIDE
-  //    (onglet en cours de renommage, « Claude Code » sans titre — verdict par
-  //    libellés muet quelques secondes) est un service, pas une erreur ; les
-  //    deux premiers bandeaux réels étaient exactement ça.
-  //  - la persistance : la même divergence doit tenir reconcileGraceMs()
-  //    (~15 s). Un transitoire que le tracker résorbe seul s'éteint sans
-  //    bruit ; le mensonge durable (14 min sur l'incident fondateur) est
-  //    promu bandeau à +15 s. La CORRECTION du surlignage reste immédiate
-  //    dans les deux cas — seule l'ALERTE attend.
-  // `reconcileMemory` (propriété du moteur, comme tabOpenMisses) porte les
-  // deux étages : `pending` (épisode en observation) puis `last` (épisode
-  // promu, publié au panneau) — l'arbitrage se RÉAPPLIQUE à chaque recompute,
-  // une seule ligne de journal et un seul bandeau par épisode.
+  // Il ne COMBLE, il n'ÉCRASE jamais (`judgeAllowed`) : dès qu'une preuve a déjà
+  // désigné une ligne — identité, position du memento, libellé, clic — c'est
+  // elle qui tient, et le memento (qui retarde jusqu'à 27 s, mesuré) n'a rien à
+  // redire. La branche « écraser pour corriger un mensonge du miroir » est
+  // partie en 2.110.0 avec le mensonge lui-même (VS Code ≥ 1.135), et avec elle
+  // sa marge longue, son bandeau et ses épisodes.
+  //
+  // Ses trois refus, inchangés :
+  //  - memento plus vieux que le dernier avis du tracker (flushedAt - marge >
+  //    labelChangedAt) : il n'apprend rien, on se tait ;
+  //  - actif non-Claude (claude:false, l'utilisateur est sur un fichier) : le
+  //    repli-souvenir garde la main — basculer sur un fichier n'éteint pas le
+  //    surlignage ;
+  //  - session hors liste : se taire vaut mieux qu'un surlignage sur de
+  //    l'invisible.
   const rendererTruth = (typeof opts.rendererActive === 'function' && opts.rendererActive()) || null;
-  const reconcileMemory = opts.reconcileMemory || {};
-  let reconciledKey = null;
-  const truthDiverges = !!(rendererTruth && rendererTruth.claude && rendererTruth.sessionId
+  const judgeAllowed = !highlightSessionId;
+  const truthUsable = judgeAllowed && !!(rendererTruth && rendererTruth.claude && rendererTruth.sessionId
       && typeof rendererTruth.flushedAt === 'number'
-      && tabs && typeof tabs.labelChangedAt === 'number' && tabs.labelChangedAt > 0
-      && rendererTruth.sessionId !== highlightSessionId);
-  // Deux marges, une par ENJEU (2026-08-27 soir, cf. leur déclaration) :
-  // écraser un choix existant exige de couvrir la latence réelle du memento ;
-  // combler un vide ne peut rien écraser.
-  const truthMargin = highlightSessionId ? RENDERER_TRUTH_MARGIN_MS : RENDERER_TRUTH_FILL_MARGIN_MS;
-  const truthFresh = truthDiverges && rendererTruth.flushedAt - truthMargin > tabs.labelChangedAt;
-  if (truthDiverges && !truthFresh) {
-    // Le juge a quelque chose à dire mais rien qui prouve qu'il l'a appris
-    // APRÈS le dernier avis du tracker : on se tait, et on le DIT au journal —
-    // une ligne par épisode retenu, pour que le prochain chapitre sache ce que
-    // cette garde coûte (correction légitime retardée) au lieu de le deviner.
-    const deferredKey = `${highlightSessionId || ''}>${rendererTruth.sessionId}@${tabs.labelChangedAt}`;
-    if (reconcileMemory.deferredKey !== deferredKey) {
-      reconcileMemory.deferredKey = deferredKey;
-      logEvent('highlight-truth-deferred', {
-        wasSessionId: highlightSessionId || null, nowSessionId: rendererTruth.sessionId,
-        flushedAt: rendererTruth.flushedAt, labelChangedAt: tabs.labelChangedAt,
-        marginMs: truthMargin, sinceLabelChangeMs: now - tabs.labelChangedAt,
-      });
-    }
-  } else if (reconcileMemory.deferredKey) {
-    reconcileMemory.deferredKey = null;
-  }
+      && tabs && typeof tabs.labelChangedAt === 'number' && tabs.labelChangedAt > 0);
+  const truthFresh = truthUsable
+    && rendererTruth.flushedAt - RENDERER_TRUTH_FILL_MARGIN_MS > tabs.labelChangedAt;
   if (truthFresh) {
     const target = conversations.find((c) => c.sessionId === rendererTruth.sessionId);
     if (target) {
-      const episodeKey = `${highlightSessionId || ''}>${rendererTruth.sessionId}@${tabs.labelChangedAt}`;
-      reconciledKey = episodeKey;
-      if (reconcileMemory.lastKey !== episodeKey) {
-        if (!reconcileMemory.pending || reconcileMemory.pending.key !== episodeKey) {
-          const was = highlightSessionId
-            ? conversations.find((c) => c.sessionId === highlightSessionId) : null;
-          const detail = {
-            at: now,
-            wasSessionId: highlightSessionId, wasTitle: (was && was.title) || null, wasVia: highlightVia,
-            nowSessionId: rendererTruth.sessionId, nowTitle: target.title || null,
-            flushedAt: rendererTruth.flushedAt, labelChangedAt: tabs.labelChangedAt,
-          };
-          reconcileMemory.pending = { key: episodeKey, firstAt: now, detail };
-          logEvent('highlight-reconciled', detail);
-        } else if (reconcileMemory.pending.detail.wasSessionId
-                   && now - reconcileMemory.pending.firstAt >= reconcileGraceMs()) {
-          reconcileMemory.lastKey = episodeKey;
-          reconcileMemory.last = { ...reconcileMemory.pending.detail, at: reconcileMemory.pending.firstAt };
-          logEvent('highlight-banner', { key: episodeKey, heldForMs: now - reconcileMemory.pending.firstAt });
-          reconcileMemory.pending = null;
-        }
-      }
       for (const c of conversations) c.isActive = false;
       target.isActive = true;
       highlightSessionId = rendererTruth.sessionId;
       highlightVia = 'renderer-truth';
     }
-  }
-  // Divergence disparue (tracker réaligné, vérité changée, fraîcheur cassée
-  // par un nouveau geste) avant la promotion : l'épisode en observation était
-  // un transitoire — il s'éteint sans bandeau. Un épisode déjà PROMU, lui,
-  // reste publié (l'utilisateur doit voir qu'il y a eu une vraie correction).
-  if (reconcileMemory.pending && reconcileMemory.pending.key !== reconciledKey) {
-    reconcileMemory.pending = null;
   }
   // Journal du lot 0 (préalable au fix d'appariement) — un OBSERVATEUR : aucune
   // décision ci-dessus n'en dépend, l'absence de journal ne change rien au
@@ -1580,13 +1637,13 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // PLAN_appariement_onglets_2026-08-15.md pour le détail des champs.
   {
     const sig = JSON.stringify([activeLabel, highlightSessionId, highlightVia, highlightMatches,
-      tabs && tabs.frozen, tabs && tabs.source]);
+      tabs && tabs.source]);
     const taken = highlightVerdictFilter.take('highlight', sig);
     if (taken) {
       logEvent('highlight-verdict', {
         activeLabel, sessionId: highlightSessionId, matches: highlightMatches,
         activeSessionId, via: highlightVia,
-        frozen: !!(tabs && tabs.frozen), source: (tabs && tabs.source) || null,
+        source: (tabs && tabs.source) || null,
         windowFocused: tabs ? tabs.windowFocused : null,
         sinceFocusMs: tabs ? tabs.sinceFocusMs : null,
         repeatsSkipped: taken.repeatsSkipped,
@@ -1616,14 +1673,7 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // `supersededBy` (husk→successeur) : la redirection d'identité que les
   // consommateurs de sessionId (membres de groupe, master, moteur de vagues)
   // appliquent au rendu — cf. supersede.js. Vide dans le cas nominal.
-  // `highlightReconcile` : le dernier épisode « le renderer a corrigé le
-  // surlignage » tant qu'il est frais (bandeau warning du panneau, cf.
-  // l'arbitre ci-dessus) — null sinon.
-  return {
-    conversations, activeSessionId, generatedAt: now, supersededBy, tabGoneIds,
-    highlightReconcile: (reconcileMemory.last && now - reconcileMemory.last.at < RECONCILE_NOTICE_MS)
-      ? reconcileMemory.last : null,
-  };
+  return { conversations, activeSessionId, generatedAt: now, supersededBy, tabGoneIds };
 }
 
 // Ce que le webview AFFICHE, et rien d'autre. Le snapshot porte aussi des champs
@@ -1666,11 +1716,6 @@ function createStateEngine(options = {}) {
   // d'affichage vs la présence même de la ligne) et ne doivent pas se remettre
   // à zéro l'une l'autre.
   const presenceMisses = new Map();
-  // Mémoire de l'arbitre « le renderer est le juge » (cf. buildSnapshot) :
-  // même besoin de survie d'un recompute à l'autre que les deux Maps ci-dessus
-  // — l'arbitrage se réapplique à chaque recompute, l'épisode ne se journalise
-  // et ne se (re)date qu'une fois.
-  const reconcileMemory = {};
   // `liveSessions` a un défaut RÉEL : le registre est du Node pur, lisible d'ici
   // (contrairement au state.vscdb, dont seul l'hôte d'extension connaît le
   // chemin — d'où `sessionTitles` sans défaut, injecté par extension.js).
@@ -1684,7 +1729,7 @@ function createStateEngine(options = {}) {
     // Défaut RÉEL, même registre que liveSessions ci-dessus (live-sessions.js) :
     // cf. `startedAt` sur effectiveState.
     liveSessionStarts: () => new Map(liveSessionEntries().map((e) => [e.sessionId, e.startedAt || null])),
-    ...DEFAULTS, ...options, closedAt, tabOpenMisses, presenceMisses, readCost, reconcileMemory,
+    ...DEFAULTS, ...options, closedAt, tabOpenMisses, presenceMisses, readCost,
   };
   const onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
   // Part de la clé de rendu qui N'EST PAS dans les conversations (2026-08-06).

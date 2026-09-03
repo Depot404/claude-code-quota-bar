@@ -36,6 +36,7 @@
 
 const { envForTask, applyEnv } = require('./batch.js');
 const { liveSessionEntries } = require('./live-sessions.js');
+const { CLI_CLOCK_SLACK_MS } = require('./attach.js');
 
 const OPEN_COMMAND = 'claude-vscode.editor.open';
 const NEW_CONVERSATION_COMMAND = 'claude-vscode.newConversation';
@@ -82,26 +83,56 @@ function createBatchLauncher(deps = {}) {
   // d'attribuer à notre lancement une conversation ouverte au même moment dans
   // une AUTRE fenêtre VS Code (chaque fenêtre a son propre hôte d'extension,
   // vérifié 2026-07-22 — mais elles partagent ce registre).
-  function snapshotIds() {
-    const out = new Set();
+  function candidates() {
+    const out = [];
     let entries = [];
     try { entries = listSessions() || []; } catch { entries = []; }
     for (const e of entries) {
       if (!e || !e.sessionId) continue;
       if (workspacePath && e.cwd && !samePath(e.cwd, workspacePath)) continue;
-      out.add(e.sessionId);
+      out.push(e);
     }
     return out;
   }
 
-  // Premier sessionId apparu depuis `before`. `null` au timeout : ce n'est pas
-  // une erreur, juste une conversation qu'on n'a pas su nommer (le membre
-  // restera « non lié » au lot 2, avec son action manuelle).
-  async function waitForNewSession(before) {
+  function snapshotIds() {
+    return new Set(candidates().map((e) => e.sessionId));
+  }
+
+  // La session que NOTRE appel vient de faire naître. `null` au timeout : ce
+  // n'est pas une erreur, juste une conversation qu'on n'a pas su nommer (le
+  // membre reste « non lié » au lot 2, avec son action manuelle).
+  //
+  // ⚠️ L'ORDRE D'ARRIVÉE NE PROUVE RIEN (2026-09-01, bug mesuré). Jusqu'ici on
+  // adoptait le PREMIER sessionId absent de la photo d'avant : une déduction
+  // d'ordre, pas une preuve — et deux situations la mettent en défaut :
+  //   • une session ANCIENNE paraît neuve quand son fichier de registre était
+  //     illisible à l'instant de la photo (JSON en cours de réécriture ⇒ entrée
+  //     sautée par live-sessions.js) puis redevient lisible pendant le poll ;
+  //   • une session créée à la main par l'utilisateur (bouton « New session »)
+  //     pendant la fenêtre est tout aussi « absente d'avant ».
+  // Résultat vu par l'user : badge « ⚠ demandé sonnet · medium » sur une
+  // conversation jamais lancée par le lot (la maîtresse du batch), le prompt
+  // ayant atterri ailleurs. Même famille que « l'ordre ne départage jamais deux
+  // sœurs — seule l'identité le peut » (CLAUDE.md), et que le commentaire de
+  // batch.js : « on ne rattache jamais une intention par déduction ».
+  //
+  // La preuve, ici, est `startedAt` (epoch ms écrit par le CLI dans son fichier
+  // de registre) : un process démarré AVANT notre appel ne peut pas être
+  // l'onglet qu'on vient d'ouvrir. Deux conséquences assumées :
+  //   • `startedAt` absent/0 (CLI plus ancien) ⇒ aucune preuve ⇒ non lié, et
+  //     c'est l'étage 2 (préfixe de prompt) qui rattrape — jamais une adoption
+  //     au rabais ;
+  //   • deux candidates prouvées neuves ⇒ ambiguïté ⇒ rien, comme partout
+  //     ailleurs dans ce chantier (attach.js, en-tête).
+  async function waitForNewSession(before, since) {
     const deadline = Date.now() + waitMs;
+    const floor = since - CLI_CLOCK_SLACK_MS;
     for (;;) {
-      const now = snapshotIds();
-      for (const id of now) if (!before.has(id)) return id;
+      const fresh = candidates().filter((e) => !before.has(e.sessionId)
+        && Number.isFinite(e.startedAt) && e.startedAt >= floor);
+      if (fresh.length === 1) return fresh[0].sessionId;
+      if (fresh.length > 1) return null;
       if (Date.now() >= deadline) return null;
       await sleep(pollMs);
     }
@@ -120,8 +151,11 @@ function createBatchLauncher(deps = {}) {
         let sessionId = null;
         try {
           if (!canOpen) throw new Error(OPEN_COMMAND + ' unavailable');
+          // Pris AVANT la commande : c'est le plancher d'identité (aucun
+          // process né avant cet instant n'est l'onglet qu'on ouvre).
+          const since = Date.now();
           await executeCommand(OPEN_COMMAND, undefined, task.prompt, viewColumn);
-          sessionId = await waitForNewSession(before);
+          sessionId = await waitForNewSession(before, since);
         } finally {
           restore();
         }

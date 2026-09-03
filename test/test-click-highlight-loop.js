@@ -173,7 +173,6 @@ function rendererView() {
   return { sessionId: activeSessionId(), claude: true, flushedAt: Date.now() };
 }
 
-const reconcileMemory = {};
 function snapshot() {
   return state.buildSnapshot({
     workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 20,
@@ -181,7 +180,6 @@ function snapshot() {
     openSessionIds: () => new Set(MEMENTO.byId.keys()),
     sessionTabLocations: () => MEMENTO,
     rendererActive: rendererView,
-    reconcileMemory,
   }, state.createTranscriptReader());
 }
 
