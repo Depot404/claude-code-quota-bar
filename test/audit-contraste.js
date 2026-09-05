@@ -59,7 +59,7 @@ const OTHERS = [
 // modèle demandé ≠ modèle réel) : il est joué à part, avec un groupe.
 const GROUP = [{ id: 'g1', name: 'Lot de démonstration', stamp: '14:12', hue: 262, collapsed: false,
   launchedWave: 1, nextWave: 2, waveNotice: null,
-  master: { convId: 'm1', title: 'Tête de lot', tabTitle: null, listed: true, status: 'done', hint: '' },
+  master: { convId: 'm1', title: 'Tête de lot', listed: true, status: 'done', hint: '' },
   members: [{ key: 'w1', prompt: 'Tâche du lot', wave: 1, asked: { model: 'sonnet', effort: 'medium' },
     convId: 'x1', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' }] }];
 const MASTER_CONV = { id: 'm1', title: 'Tête de lot', model: 'Opus 4.8', effort: 'high', ctx: ctx(52),

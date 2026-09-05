@@ -515,6 +515,43 @@ function run() {
   check('numérotation contiguë depuis 1 après tous ces déplacements',
     nums16.join() === '1,2,3', nums16.join());
 
+  console.log('\n17. Lot D (2026-09-05) — la preuve de fin d\'un membre est un fait du LOT, persisté');
+  // « 0/3 done » sous trois ✓ : la preuve `done` partait avec l'onglet (hooks
+  // purgés à la fermeture). Écrite ici une fois observée, elle survit au reload
+  // comme le reste du store — et ne retombe que si le LIEN du membre change.
+  const st17 = fakeStorage();
+  let s17 = createGroupStore({ load: st17.load, save: st17.save, now: () => 1000, newId: () => 'g17' });
+  s17.create('Preuves', [{ prompt: 'a', wave: 1 }, { prompt: 'b', wave: 1 }, { prompt: 'c', wave: 2 }]);
+  check('un membre neuf n\'est pas prouvé', s17.get('g17').members.every((m) => m.doneProven === false));
+  check('membre NON lié : markDoneProven refusé (une preuve appartient à une conversation)',
+    s17.markDoneProven('g17', 'm1') === false);
+  s17.attach('g17', 'm1', 's-1');
+  check('membre lié : markDoneProven écrit', s17.markDoneProven('g17', 'm1') === true && s17.get('g17').members[0].doneProven === true);
+  check('… idempotent (déjà prouvé → false, rien à re-pousser)', s17.markDoneProven('g17', 'm1') === false);
+  check('… PERSISTÉ tel quel', st17.raw()[0].members[0].doneProven === true, JSON.stringify(st17.raw()[0].members[0]));
+  s17 = createGroupStore({ load: st17.load, save: st17.save, now: () => 2000 });
+  check('… et relu après « reload »', s17.get('g17').members[0].doneProven === true);
+  check('groupe ou clé inconnus : sans effet', s17.markDoneProven('nope', 'm1') === false && s17.markDoneProven('g17', 'zz') === false);
+
+  // Tout changement de lien remet la preuve à zéro : detach, rearm (Relaunch),
+  // attach vers une AUTRE conversation, auto-réparation d'un lien faux.
+  check('detach → preuve effacée', s17.detach('g17', 'm1') && s17.get('g17').members[0].doneProven === false);
+  s17.attach('g17', 'm1', 's-1'); s17.markDoneProven('g17', 'm1');
+  check('rearm (Relaunch) → preuve effacée', s17.rearm('g17', 'm1', 3000) && s17.get('g17').members[0].doneProven === false);
+  s17.attach('g17', 'm1', 's-1'); s17.markDoneProven('g17', 'm1');
+  check('attach vers une autre conversation → preuve effacée',
+    s17.attach('g17', 'm1', 's-1bis') && s17.get('g17').members[0].sessionId === 's-1bis' && s17.get('g17').members[0].doneProven === false);
+  s17.attach('g17', 'm2', 's-2'); s17.markDoneProven('g17', 'm2');
+  s17.get('g17').members[1].model = 'opus';   // porteur d'intention : éligible à l'auto-réparation
+  check('dropMisattachedIntents (lien prouvé faux) → lien ET preuve effacés',
+    s17.dropMisattachedIntents(() => 1, 100) === 1 && s17.get('g17').members[1].sessionId === null && s17.get('g17').members[1].doneProven === false);
+  // Stockage écrit par une version antérieure au lot D : champ absent → false.
+  const legacy17 = sanitizeGroup({ id: 'old', members: [{ key: 'm1', sessionId: 's', launchedAt: 5 }] });
+  check('stockage antérieur sans le champ → false, jamais undefined', legacy17.members[0].doneProven === false);
+  check('… et une valeur non booléenne ne passe pas pour une preuve',
+    sanitizeGroup({ id: 'old', members: [{ key: 'm1', doneProven: 'yes' }] }).members[0].doneProven === false);
+  check('addExisting → membre non prouvé', s17.addExisting('g17', 's-9', 'p') && s17.get('g17').members.find((m) => m.sessionId === 's-9').doneProven === false);
+
   console.log(`\n${pass} ok, ${fail} fail`);
   process.exit(fail ? 1 : 0);
 }

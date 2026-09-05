@@ -1,11 +1,19 @@
-// Banc des DEUX sources d'identité stable ajoutées le 2026-07-22 :
+// Banc des sources d'identité stable :
 //   - live-sessions.js  : registre ~/.claude/sessions/<pid>.json
-//   - session-titles.js : table sessionId → titre d'onglet réel (state.vscdb)
+//   - session-titles.js : le memento `workbench.parts.editor` du state.vscdb
+//     (quels sessionId ont un onglet Claude ouvert ICI, lequel est actif).
+//
+// Une troisième source vivait ici jusqu'au 2026-09-05 : `createSessionTitles`,
+// la table sessionId → TITRE D'ONGLET de la clé `agentSessions.model.cache`.
+// Mesurée MORTE sur le profil réel (2 entrées pour 7 onglets ouverts), elle a
+// été retirée en 2.114.0 avec tout ce qu'elle seule alimentait — et ses cas de
+// banc avec elle. Ce qu'elle prouvait (le schéma d'URI qui bouge, le zéro
+// suspect) ne protège plus rien : il n'y a plus de lecteur à protéger.
 //
 // Le vscdb est FABRIQUÉ ici avec node:sqlite (aucun fichier réel de VS Code
-// n'est ouvert). Si le module manque sur cette machine, la partie titres est
+// n'est ouvert). Si le module manque sur cette machine, la partie memento est
 // sautée explicitement — c'est aussi le test de la dégradation : sans sqlite,
-// createSessionTitles doit rendre une Map vide sans jamais lever.
+// les lecteurs rendent un état vide sans jamais lever.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -19,7 +27,7 @@ function check(name, cond, detail) {
 }
 function skip(name, why) { skipped++; console.log(`  skip ${name} (${why})`); }
 
-const { createSessionTitles, cleanLabel, CACHE_KEY, createOpenSessionIds, EDITOR_STATE_KEY,
+const { createOpenSessionIds, EDITOR_STATE_KEY,
   analyzeEditorState, createRendererActive } =
   require(path.join(__dirname, '..', 'session-titles.js'));
 const { liveSessionIds, foreignSessionIds, isForeignEntrypoint, pidAlive } =
@@ -89,108 +97,19 @@ check('les deux ensembles sont disjoints ici', [...vs].every((id) => !foreign.ha
 check('isForeignEntrypoint ne se déclenche pas sur une valeur vide',
   !isForeignEntrypoint('') && !isForeignEntrypoint(null) && !isForeignEntrypoint(undefined));
 
-// ── 2. Titres d'onglet réels ───────────────────────────────────────────────
-console.log('\n2. session-titles : state.vscdb (agentSessions.model.cache)');
-
-check('chemin null → Map vide, aucun accès disque',
-  createSessionTitles(null).get().size === 0);
-check('fichier inexistant → Map vide, aucune exception',
-  createSessionTitles(path.join(SANDBOX, 'absent.vscdb')).get().size === 0);
-
+// ── 2. Sessions ouvertes ICI, et onglet actif : le memento du renderer ─────
 let sqlite = null;
 try { sqlite = require('node:sqlite'); } catch {}
 
 if (!sqlite) {
-  skip('lecture d\'un vscdb fabriqué', 'node:sqlite indisponible — dégradation vérifiée ci-dessus');
+  skip('lecture d\'un vscdb fabriqué', 'node:sqlite indisponible — dégradation silencieuse, aucun lecteur ne lève');
 } else {
-  const dbPath = path.join(SANDBOX, 'state.vscdb');
-  // Même forme que le vrai fichier : entrées Claude ET entrées d'autres
-  // fournisseurs (chat local VS Code), qui ne doivent PAS entrer dans la table.
-  const entries = [
-    { providerType: 'claude-code', resource: 'claude-code:/sess-1', label: 'Upload Error TF400898: An Internal…' },
-    { providerType: 'claude-code', resource: 'claude-code:/sess-2', label: 'Autre conversation Claude' },
-    { providerType: 'local', resource: 'vscode-chat-session://local/abcdef', label: 'Chat VS Code local' },
-    { providerType: 'claude-code', resource: 'claude-code:/sess-3' },   // sans label
-    // Schéma d'URI RÉCENT, relevé le 2026-08-20 sur le vscdb du workspace
-    // Octopus (411 entrées, toutes sous ce schéma). Un seul préfixe en dur et
-    // la table entière redevient illisible sans la moindre erreur : ce cas est
-    // le témoin de cette panne-là, à garder même quand le vieux schéma aura
-    // disparu des workspaces récents.
-    { providerType: 'agent-host-claude', resource: 'agent-host-claude:/sess-4', label: 'Conversation au schéma récent' },
-  ];
-  const write = (value) => {
-    const db = new sqlite.DatabaseSync(dbPath);
-    db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)');
-    db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(CACHE_KEY, value);
-    db.close();
-  };
-  write(JSON.stringify(entries));
-
-  const titles = createSessionTitles(dbPath, { minStatIntervalMs: 0 });
-  let map = titles.get();
-  check('sessionId → libellé d\'onglet', map.get('sess-1') === 'Upload Error TF400898: An Internal…',
-    String(map.get('sess-1')));
-  check('schéma agent-host-claude:/ (2026-08) reconnu aussi',
-    map.get('sess-4') === 'Conversation au schéma récent', String(map.get('sess-4')));
-  check('les entrées non-Claude sont ignorées', !map.has('abcdef') && map.size === 3, String(map.size));
-  check('entrée sans label ignorée', !map.has('sess-3'));
-
-  // Le fichier bouge → la table suit (le cache est indexé sur (mtime, size)).
-  entries[0].label = 'Titre renommé entre-temps';
-  write(JSON.stringify(entries));
-  // Les mtimeMs peuvent être identiques à la ms près sur Windows : on force la
-  // date pour prouver l'invalidation, pas la résolution de l'horloge.
-  const future = Date.now() / 1000 + 5;
-  fs.utimesSync(dbPath, future, future);
-  check('réécriture du vscdb → nouvelle table',
-    titles.get().get('sess-1') === 'Titre renommé entre-temps', String(titles.get().get('sess-1')));
-
-  // Clé absente / valeur illisible : jamais d'exception, on garde le dernier
-  // état connu plutôt que d'effacer les titres.
-  write('{ pas du json');
-  const future2 = future + 5;
-  fs.utimesSync(dbPath, future2, future2);
-  check('valeur corrompue → dernière table connue conservée',
-    titles.get().get('sess-1') === 'Titre renommé entre-temps');
-
-  // Zéro entrée là où l'on en connaissait déjà : PANNE, pas dégradation.
-  // Relevé le 2026-08-24 sur le vscdb RÉEL du workspace ouvert — 369 entrées,
-  // puis 0, puis 369 de nouveau à trois minutes d'écart, sans la moindre erreur
-  // levée (instantané SQLite pris pendant que VS Code réécrit). Écraser la table
-  // pour autant, c'est perdre la seule preuve d'identité d'onglet le temps d'un
-  // tick, donc faire reparaître toutes les lignes sans onglet qu'elle écarte.
-  write(JSON.stringify([]));
-  const future3 = future2 + 5;
-  fs.utimesSync(dbPath, future3, future3);
-  check('lecture à zéro entrée → dernière table connue conservée',
-    titles.get().get('sess-1') === 'Titre renommé entre-temps',
-    String(titles.get().get('sess-1')));
-
-  // …et la clé n'a pas été mémorisée : le rafraîchissement suivant relit pour de
-  // vrai, la table repart dès que la lecture redevient bonne.
-  entries[0].label = 'Titre revenu';
-  write(JSON.stringify(entries));
-  const future4 = future3 + 5;
-  fs.utimesSync(dbPath, future4, future4);
-  check('lecture bonne après un zéro → table remise à jour',
-    titles.get().get('sess-1') === 'Titre revenu', String(titles.get().get('sess-1')));
-
-  // Throttle : `get()` est appelé à chaque snapshot, il ne doit pas re-stater
-  // le fichier à chaque fois.
-  const throttled = createSessionTitles(dbPath, { minStatIntervalMs: 60000 });
-  throttled.get();
-  const statSync = fs.statSync;
-  let stats = 0;
-  fs.statSync = (...a) => { stats++; return statSync(...a); };
-  try { throttled.get(); throttled.get(); } finally { fs.statSync = statSync; }
-  check('appels rapprochés : aucun re-stat du vscdb', stats === 0, String(stats));
-
-  // ── 2bis. Sessions ouvertes ICI : memento/workbench.parts.editor ──────────
+  // ── Sessions ouvertes ICI : memento/workbench.parts.editor ────────────────
   // Structure mesurée le 2026-08-25 sur un vscdb réel (lot « clic par
   // identifiant ») : arbre serializedGrid.root de noeuds "branch"/"leaf",
   // chaque éditeur webview portant un `value` JSON dont `state` est LUI-MÊME
   // un JSON encodé avec `sessionID`.
-  console.log('\n2bis. createOpenSessionIds : state.vscdb (memento/workbench.parts.editor)');
+  console.log('\n2. createOpenSessionIds : state.vscdb (memento/workbench.parts.editor)');
   const editorDbPath = path.join(SANDBOX, 'state-editor.vscdb');
   const claudeEditor = (sessionID) => ({
     id: 'workbench.editors.webviewInput',
@@ -250,6 +169,17 @@ if (!sqlite) {
   check('memento réécrit sans sess-open-2 → disparaît de l\'ensemble',
     ids2.has('sess-open-1') && !ids2.has('sess-open-2'), [...ids2].join(','));
 
+  // `bump()` (2026-09-04) : la cadence de 30 s ne doit pas retarder une photo
+  // que le fs.watch de l'extension vient de voir écrite — le clic la relisait
+  // déjà à la demande (freshLocations), le surlignage et la présence non.
+  const cadenced = createOpenSessionIds(editorDbPath, { minStatIntervalMs: 60 * 1000 });
+  check('lecteur cadencé : première photo servie', cadenced.get().has('sess-open-1') && !cadenced.get().has('sess-open-2'));
+  writeEditor(JSON.stringify(buildGrid(['sess-open-1', 'sess-open-2'])));
+  fs.utimesSync(editorDbPath, futureE + 2, futureE + 2);
+  check('sans bump, la cadence retient l\'ancienne photo', !cadenced.get().has('sess-open-2'), [...cadenced.get()].join(','));
+  cadenced.bump();
+  check('bump() → relecture immédiate, la nouvelle photo est servie', cadenced.get().has('sess-open-2'), [...cadenced.get()].join(','));
+
   // Valeur illisible : jamais d'exception, dernier ensemble connu conservé —
   // un Set VIDE serait aussi sûr ici (cf. commentaire de createOpenSessionIds :
   // l'absence n'est jamais dangereuse), mais garder le dernier connu évite de
@@ -272,7 +202,7 @@ if (!sqlite) {
   // (refactor surlignage 2026-08-27) Structure mesurée sur les deux fenêtres
   // réelles de l'incident : editorpart.state porte activeGroup, chaque leaf
   // porte data.id + data.mru (indices dans editors[], tête = actif). C'est la
-  // moitié « active » qu'analyzeEditorState ajoute au parcours du §2bis.
+  // moitié « active » qu'analyzeEditorState ajoute au parcours du §2.
   console.log('\n2ter. analyzeEditorState / createRendererActive : l\'éditeur ACTIF du memento');
   const gridActive = (activeGroup, leafs) => ({
     'editorpart.state': {
@@ -291,7 +221,7 @@ if (!sqlite) {
     const a = analyzeEditorState(parsed);
     check('l\'actif est mru[0] du groupe activeGroup, par identité',
       a.active && a.active.claude === true && a.active.sessionId === 'sess-c', JSON.stringify(a.active));
-    check('… et l\'ensemble des ouverts reste complet (§2bis intact)',
+    check('… et l\'ensemble des ouverts reste complet (§2 intact)',
       a.ids.size === 3 && a.ids.has('sess-a') && a.ids.has('sess-b') && a.ids.has('sess-c'),
       [...a.ids].join(','));
   }
@@ -350,12 +280,6 @@ if (!sqlite) {
   check('bump() → relecture immédiate malgré le throttle',
     throttledTruth.get().sessionId === 'sess-truth-3', JSON.stringify(throttledTruth.get().sessionId));
 }
-
-console.log('\n3. cleanLabel (affichage seulement)');
-check('caractère de remplacement final retiré', cleanLabel('Titre tronqué�') === 'Titre tronqué');
-check('points de suspension conservés (l\'onglet aussi les montre)',
-  cleanLabel('Titre tronqué…') === 'Titre tronqué…');
-check('non-chaîne → null', cleanLabel(undefined) === null);
 
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
 console.log(`\n${pass} ok, ${fail} fail${skipped ? `, ${skipped} skip` : ''}`);

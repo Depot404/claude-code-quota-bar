@@ -163,6 +163,32 @@ check('… et le surlignage reste correct malgré le journal coupé',
   snapOff && snapOff.conversations.some((c) => c.isActive));
 check('… et rien n\'a été écrit', lines().length === 0, String(lines().length));
 
+console.log('\n4. Onglet renommé au DERNIER PROMPT (réouverture, 2026-09-04) → reconnu par lastPrompt, via:label');
+// Après toute réouverture, l'extension officielle baptise l'onglet du dernier
+// prompt (24 car. + « … ») et le garde. Le libellé ne matche alors NI le titre
+// NI le store : sans `lastPrompt` (transcript `last-prompt`), la conv était
+// absente ou éteinte le temps que le memento soit flushé — dizaines de secondes.
+resetJournal();
+{
+  const p = path.join(projectDir, 'e.jsonl');
+  fs.writeFileSync(p, [
+    userMsg('on va coder from scratch un anti bruit de fond ?'), assistant,
+    { type: 'ai-title', aiTitle: 'Voix du compagnon — récriture Kokoro local et découpage' },
+    { type: 'last-prompt', lastPrompt: 'on va coder from scratch un anti bruit de fond ?' },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const snapE = snapshot(() => ({
+    known: true, labels: ['Conv A', 'Conv B', 'on va coder from scratch…'], activeLabel: 'on va coder from scratch…',
+    source: 'fresh', windowFocused: true, sinceFocusMs: 42,
+  }));
+  const e = snapE.conversations.find((c) => c.sessionId === 'e');
+  check('la conv rouverte est PRÉSENTE (son onglet porte son prompt, pas son titre)',
+    !!e, JSON.stringify(snapE.conversations.map((c) => c.sessionId)));
+  check('… et SURLIGNÉE quand cet onglet est l\'actif', !!e && e.isActive === true, JSON.stringify(e && e.isActive));
+  const v = verdicts()[verdicts().length - 1];
+  check('… verdict via:label, matches:1 — le prompt est un libellé reconnu, pas un tirage au sort',
+    !!v && v.via === 'label' && v.matches === 1 && v.sessionId === 'e', JSON.stringify(v));
+}
+
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

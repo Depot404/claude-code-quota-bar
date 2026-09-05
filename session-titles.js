@@ -1,27 +1,30 @@
 // ============================================================================
-// Table sessionId → TITRE D'ONGLET RÉEL (state.vscdb du workspace).
-//
-// POURQUOI — le titre affiché par le panneau venait du transcript (`ai-title`),
-// et le matching onglet↔conv comparait le libellé de l'onglet à ce titre-là.
-// Relevé 2026-07-22 : les deux DIVERGENT. Transcript « Afficher ? au lieu du
-// loading… », onglet « Upload Error TF400898: … » — jamais écrit dans le
-// transcript. Le titre d'onglet vit dans le state.vscdb du workspace
-// (clé `agentSessions.model.cache`, tableau d'entrées
-// `{resource: "claude-code:/<sessionId>", label, timing, metadata}`), que
-// l'extension officielle régénère sans réécrire d'`ai-title`. C'est la SEULE
-// table sessionId → titre d'onglet connue.
-//
-// Conséquence : sans elle, le filtre de présence de state.js masque une conv
-// ouverte dès que son onglet a été renommé, le clic-focus devient un no-op, et
-// le panneau affiche un nom que l'utilisateur ne voit nulle part.
+// Lecteurs du state.vscdb du workspace : QUELS ONGLETS CLAUDE SONT OUVERTS ICI,
+// et lequel est ACTIF — par IDENTITÉ de session, jamais par texte.
 //
 // ⚠️ Internal non documenté, sur un fichier dont VS Code est propriétaire :
 //   - lecture SEULE, jamais d'écriture ;
 //   - ouverture/lecture/FERMETURE à chaque rafraîchissement, aucun handle
 //     persistant sur un fichier que VS Code réécrit dans notre dos ;
 //   - toute erreur (module node:sqlite absent, base verrouillée, schéma
-//     changé) → on garde la dernière table connue et on continue. Jamais
+//     changé) → on garde le dernier état connu et on continue. Jamais
 //     d'exception, jamais de masquage EN PLUS : le doute profite à l'affichage.
+//
+// ── LE STORE D'ONGLETS `agentSessions.model.cache` EST PARTI (2.114.0) ───────
+// Ce module portait aussi `createSessionTitles`, la table sessionId → TITRE
+// D'ONGLET lue dans la clé `agentSessions.model.cache` du même fichier. Elle
+// alimentait `tabTitle`, `titleSource:'tab-store'` et la preuve « identité
+// publiée + aucun onglet ⇒ conversation fermée ». MESURÉE MORTE le 2026-09-04
+// sur le profil réel (rapport test/real-bench/RAPPORT_2026-09-04.md), re-mesurée
+// le 2026-09-05 avant ce retrait : 2 entrées, dont UNE SEULE des 7 sessions dont
+// un onglet est ouvert (14 %) — l'extension officielle n'y écrit plus. Une
+// source qui ne parle plus ne dégrade pas : elle publie des identités PÉRIMÉES,
+// donc elle conclut des fermetures fausses sur les deux conversations qu'elle
+// connaît encore. Le lecteur est retiré plutôt que gardé (rien à garder), et
+// personne ne le remplace : l'ouverture d'un onglet se lit désormais sur le
+// memento ci-dessous (`createOpenSessionIds`), qui, lui, nomme les 7.
+// S'il redevenait vivant un jour : `git show 98735301:Tools/ClaudeCodeQuotaBar/
+// session-titles.js` en garde le code entier.
 // ============================================================================
 
 const fs = require('fs');
@@ -32,25 +35,7 @@ const fs = require('fs');
 // qu'une conv travaille).
 const MIN_STAT_INTERVAL_MS = 30 * 1000;
 
-// Le schéma d'URI des sessions Claude a CHANGÉ sous nos pieds (relevé le
-// 2026-08-20) : `agent-host-claude:/<uuid>` là où c'était `claude-code:/<uuid>`.
-// Un seul préfixe en dur, et la table entière devient illisible SANS erreur —
-// 411 entrées présentes, 0 retenue sur le workspace Octopus, pendant que
-// d'autres workspaces plus anciens répondaient encore : la panne se lit comme
-// une dégradation silencieuse normale, ce qui la rend indétectable de
-// l'intérieur. C'est un internal non documenté ; il rebougera. On accepte donc
-// TOUS les schémas connus, du plus récent au plus ancien, et on n'en retire
-// jamais un tant qu'un workspace peut encore le porter (le vscdb d'un dossier
-// qu'on n'a pas rouvert depuis des mois garde l'ancien format pour toujours).
-//
-// Conséquence en cascade quand cette source tombe, et raison de ne pas la
-// laisser muette : elle est la SEULE preuve d'onglet indépendante du titre.
-// Sans elle, une conversation sans ai-title n'a plus aucun moyen d'être
-// reconnue fermée — c'est le bug des lignes barrées immortelles du 2026-08-20.
-const RESOURCE_PREFIXES = ['agent-host-claude:/', 'claude-code:/'];
-const CACHE_KEY = 'agentSessions.model.cache';
-
-// Deuxième table lue dans le MÊME state.vscdb (focus.js, lot « clic par
+// La table lue dans le state.vscdb (focus.js, lot « clic par
 // identifiant ») : le memento de la grille d'éditeurs, seule source qui dit
 // quels sessionId ont un onglet Claude ouvert DANS CETTE FENÊTRE — la Tab API
 // de VS Code n'expose que `label`, jamais l'identité de session portée par le
@@ -61,21 +46,11 @@ const CACHE_KEY = 'agentSessions.model.cache';
 const EDITOR_STATE_KEY = 'memento/workbench.parts.editor';
 const CLAUDE_EXTENSION_ID = 'Anthropic.claude-code';
 
-// L'identifiant de session porté par une URI de ressource, quel que soit son
-// schéma — null si aucun schéma connu ne la porte (autre provider d'agent).
-function sessionIdFromResource(resource) {
-  if (typeof resource !== 'string') return null;
-  for (const prefix of RESOURCE_PREFIXES) {
-    if (resource.startsWith(prefix)) return resource.slice(prefix.length) || null;
-  }
-  return null;
-}
-
 function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
 
 // node:sqlite est expérimental (Node 22) et peut manquer selon la version de
 // Node embarquée par VS Code : un seul log pour TOUT le module (les deux
-// tables partagent ce constat), puis dégradation définitive.
+// lecteurs partagent ce constat), puis dégradation définitive.
 let sqlite;
 let sqliteChecked = false;
 function loadSqlite() {
@@ -89,8 +64,8 @@ function loadSqlite() {
   return sqlite;
 }
 
-// Lecture bas niveau d'UNE clé du state.vscdb, partagée par les deux tables
-// qu'on y lit — même fichier, même garantie de dégradation (jamais
+// Lecture bas niveau d'UNE clé du state.vscdb, partagée par les lecteurs
+// qu'on y branche — même fichier, même garantie de dégradation (jamais
 // d'exception qui remonte). `ok:false, error:null` = sqlite indisponible
 // (déjà loggé par loadSqlite, ne pas re-logger) ; `ok:false, error` = lecture
 // ratée (base verrouillée, schéma inattendu) ; `ok:true, value:null` = clé
@@ -110,84 +85,6 @@ function readVscdbKey(stateDbPath, key) {
   } finally {
     if (db) { try { db.close(); } catch {} }
   }
-}
-
-// Le label peut se terminer par un marqueur de troncature ou un caractère de
-// remplacement (U+FFFD) quand VS Code coupe au milieu d'une paire de substituts.
-// On ne nettoie QUE pour l'affichage : le matching, lui, travaille sur la chaîne
-// brute (norm()/labelMatches de labels.js absorbent déjà la troncature).
-function cleanLabel(label) {
-  if (typeof label !== 'string') return null;
-  const cleaned = label.replace(/[\uFFFD\u0000-\u001F\u007F]+$/, '').trim();
-  return cleaned || null;
-}
-
-// createSessionTitles(path) → { get(): Map<sessionId, label> }
-// `stateDbPath` null/absent (pas de workspace ouvert) → Map vide pour toujours,
-// sans un seul accès disque.
-function createSessionTitles(stateDbPath, options = {}) {
-  const minStatIntervalMs = options.minStatIntervalMs != null
-    ? options.minStatIntervalMs : MIN_STAT_INTERVAL_MS;
-  let titles = new Map();
-  let key = null;          // (mtimeMs, size) du fichier déjà chargé
-  let lastStatAt = 0;
-  let warned = false;
-
-  function read() {
-    const res = readVscdbKey(stateDbPath, CACHE_KEY);
-    if (!res.ok) {
-      // Base verrouillée (SQLITE_BUSY), schéma changé, JSON inattendu : on
-      // conserve la dernière table connue. Un seul log (sqlite indisponible
-      // est déjà loggé une fois par loadSqlite, ne pas doubler).
-      if (res.error && !warned) { warned = true; log('session titles read failed: %s', res.error.message); }
-      return null;
-    }
-    const entries = Array.isArray(res.value) ? res.value : [];
-    const map = new Map();
-    for (const e of entries) {
-      if (!e || typeof e.label !== 'string') continue;
-      const sessionId = sessionIdFromResource(e.resource);
-      if (sessionId) map.set(sessionId, e.label);
-    }
-    return map;
-  }
-
-  return {
-    get() {
-      if (!stateDbPath) return titles;
-      const now = Date.now();
-      if (lastStatAt && now - lastStatAt < minStatIntervalMs) return titles;
-      lastStatAt = now;
-      let stat;
-      try { stat = fs.statSync(stateDbPath); } catch { return titles; }
-      const k = `${stat.mtimeMs}:${stat.size}`;
-      if (k === key) return titles;
-      const next = read();
-      if (!next) return titles;   // lecture ratée → on ne mémorise pas la clé
-      // …et une lecture qui rend ZÉRO là où l'on connaissait des sessions n'est
-      // pas une lecture réussie non plus. Relevé le 2026-08-24 sur la base du
-      // workspace ouvert : deux lectures à trois minutes d'écart, 369 entrées
-      // puis 0, puis 369 de nouveau — sans la moindre erreur levée (SQLite rend
-      // simplement un instantané où la ligne n'est pas visible pendant que VS
-      // Code réécrit). Écraser la table pour autant, c'est perdre la seule
-      // preuve d'identité d'onglet le temps d'un tick, donc faire reparaître
-      // toutes les lignes sans onglet que cette preuve fait disparaître.
-      // On garde la dernière table connue et on ne mémorise pas la clé : le
-      // prochain rafraîchissement relira. Un workspace qui perd RÉELLEMENT
-      // toutes ses sessions garde une table périmée, sans conséquence — une
-      // identité publiée en trop ne fait jamais afficher une conv de plus,
-      // elle ne sert qu'à conclure une fermeture déjà prouvée par l'absence
-      // d'onglet.
-      if (next.size === 0 && titles.size > 0) {
-        if (!warned) { warned = true; log('session titles read returned 0 (kept %d known)', titles.size); }
-        return titles;
-      }
-      key = k;
-      warned = false;
-      titles = next;
-      return titles;
-    },
-  };
 }
 
 // Un éditeur sérialisé du memento : est-ce un panneau Claude, et quel
@@ -293,13 +190,13 @@ function analyzeEditorState(parsed) {
 // CETTE fenêtre a un onglet Claude ouvert, au sens du memento sur disque.
 //
 // ⚠️ Ce memento est flushé PARESSEUSEMENT par VS Code (mesuré empiriquement au
-// lot « clic par identifiant », délai réel à documenter dans le rapport de ce
-// lot) : une fermeture d'onglet toute récente peut rester invisible ici
-// quelques secondes. Contrairement à `createSessionTitles` (où un zéro
-// suspect après une lecture fraîche est ignoré), ce Set n'a PAS ce garde-fou :
-// un zéro réel est un résultat honnête (fenêtre sans onglet Claude), et
-// l'exposer tel quel est SANS DANGER — il ne fait au pire que renvoyer
-// focus.js vers son repli par libellé. Le sens dangereux est l'inverse (un
+// lot « clic par identifiant », délai réel documenté dans
+// test/real-bench/RAPPORT_2026-09-04.md — 12 à 51 s) : une fermeture d'onglet
+// toute récente peut rester invisible ici quelques secondes. Ce Set n'a AUCUN
+// garde-fou contre un zéro : un zéro réel est un résultat honnête (fenêtre sans
+// onglet Claude), et l'exposer tel quel est SANS DANGER — il ne fait au pire
+// que renvoyer focus.js vers son repli par libellé. Le sens dangereux est
+// l'inverse (un
 // sessionId qui apparaît encore alors que l'onglet vient de fermer) : voir
 // focus.js `tryOfficialFocus` pour ce qu'on en fait.
 function createOpenSessionIds(stateDbPath, options = {}) {
@@ -349,6 +246,14 @@ function createOpenSessionIds(stateDbPath, options = {}) {
     // cadence — utile pour les dizaines de lectures par seconde du moteur —
     // devenait lui-même une source de positions périmées.
     freshLocations() { lastStatAt = 0; refresh(); return locations; },
+    // Même rôle que createRendererActive.bump() (2026-09-04) : le fs.watch
+    // d'extension.js sur le state.vscdb voit chaque flush du renderer — la
+    // photo des positions doit se relire à cet instant, pas au prochain tick
+    // de la cadence. Sans ça, le clic (freshLocations) et le surlignage /
+    // la présence (locations) lisaient le MÊME memento à deux fraîcheurs et
+    // pouvaient se contredire jusqu'à 30 s (journal 2026-09-04 21:22:09 :
+    // clic résolu par identité, surlignage `via:none` pendant 19 s).
+    bump() { lastStatAt = 0; },
   };
 }
 
@@ -419,7 +324,7 @@ function createRendererActive(stateDbPath, options = {}) {
 }
 
 module.exports = {
-  createSessionTitles, cleanLabel, MIN_STAT_INTERVAL_MS, CACHE_KEY,
+  MIN_STAT_INTERVAL_MS,
   createOpenSessionIds, EDITOR_STATE_KEY,
   analyzeEditorState, createRendererActive, RENDERER_ACTIVE_STAT_MS,
 };

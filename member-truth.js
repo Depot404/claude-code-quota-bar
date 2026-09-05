@@ -32,6 +32,25 @@
 //      un onglet) deviennent structurellement inatteignables, et un membre
 //      TERMINÉ tombe direct en `done-closed` (masqué) sans attendre que la
 //      course se résolve d'elle-même.
+//      ⚠️ PÉRIMÈTRE RÉDUIT EN 2.114.0 : `tabClosed` ne porte plus que la
+//      fermeture OBSERVÉE en direct (`stateEngine.isTabClosed`, posée par
+//      l'événement d'onglet). Le second verdict qui le complétait depuis le
+//      2026-08-24 — « identité publiée par le store d'onglets VS Code + aucun
+//      onglet apparié » (extension.js `isTabGone`) — est parti avec ce store,
+//      mesuré mort. Donc une fermeture faite pendant que la fenêtre était
+//      éteinte, ou un CLI orphelin survivant à son onglet, ne dégradent plus
+//      `live` : le membre reste « ouverte » jusqu'à la mort de son process.
+//      Personne ne reprend ce rôle — c'est la perte assumée du retrait.
+//   7. (2026-09-05, lot D du plan banc réel) « 0/3 done » sous trois ✓, vu sur
+//      capture : fermer un onglet purge l'entrée hooks (SessionEnd), rouvrir
+//      respawne un CLI qui n'écrit rien tant qu'on ne lui parle pas — la
+//      preuve `done` s'était évaporée AVEC l'onglet, et le compteur (qui lit
+//      `waveStatus`) contredisait les lignes. La preuve observée une fois
+//      s'ÉCRIT désormais dans le store du lot (`member.doneProven`, groups.js
+//      markDoneProven, posée par extension.js à l'instant où cette table la
+//      voit vraie) et c'est ELLE que cette table lit d'abord : un membre prouvé
+//      fini reste `waveStatus: 'done'` quoi que disent ensuite les sources, et
+//      n'en repart que si son lien change (Relaunch, retrait, re-lien).
 // Cause commune : un FAIT DURABLE (lié ? envoyé ? terminé ?) déduit d'une VUE
 // PARTIELLE — la liste affichée par le panneau, qui ne contient que les
 // conversations ayant un transcript ET un onglet, bornée à `maxItems`. Une
@@ -101,7 +120,11 @@ const NOTES = {
   idle: 'open',
   interrupted: 'interrupted',
   done: '✓ done',
-  'done-closed': '✓ done · closed',
+  // Le ✓ n'est plus dans la note : la ligne d'un membre fini dont l'onglet est
+  // fermé RESTE dans le lot (lot D, 2026-09-05 — elle en disparaissait), avec
+  // le même glyphe ✓ atténué et le même barré que la ligne fermée de la liste
+  // plate ; la note ne dit plus que ce que la ligne ne montre pas déjà.
+  'done-closed': 'tab closed',
   stale: 'interrupted — never finished',
   'unsent-lost': 'link lost before sending',
 };
@@ -216,12 +239,17 @@ function memberTruth(member, sources) {
     }
   }
 
-  return build(status, { convId, conv, live, sent, state });
+  // Preuve de fin déjà ÉCRITE dans le store (bug n°7) : elle prime sur tout ce
+  // que les sources disent encore — ou ne disent plus — de cette conversation.
+  // Le statut d'AFFICHAGE, lui, reste celui de l'instant (une conv rouverte et
+  // relancée montre son état réel) ; seul le vocabulaire du moteur de vagues
+  // est verrouillé sur `done`.
+  return build(status, { convId, conv, live, sent, state, proven: m.doneProven === true });
 }
 
 function build(status, ctx) {
   const listed = !!ctx.conv;
-  const waveStatus = WAVE_STATUS[status] || 'launched';
+  const waveStatus = ctx.proven ? 'done' : (WAVE_STATUS[status] || 'launched');
   return {
     status,
     waveStatus,
@@ -237,7 +265,9 @@ function build(status, ctx) {
     // donc ce que l'affichage n'a pas le droit d'exiger et ce qu'une ouverture
     // automatique, elle, doit exiger : un `done` ÉCRIT par une source (les
     // hooks, ou l'état affiné de la vue), jamais déduit d'un silence.
-    doneProven: waveStatus === 'done' && ctx.state === 'done',
+    // Ou déjà écrit dans le store à une observation précédente (bug n°7) : une
+    // preuve ne se périme pas parce que l'onglet qui la portait a été fermé.
+    doneProven: !!ctx.proven || (waveStatus === 'done' && ctx.state === 'done'),
     convId: ctx.convId,
     linked: !!ctx.convId,
     listed,

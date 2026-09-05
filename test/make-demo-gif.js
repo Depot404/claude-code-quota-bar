@@ -224,7 +224,7 @@ function group(launchedWave, nextWave, w1a, w1b, w2a) {
   return [{
     id: 'g1', name: 'Notifications revamp', stamp: '09:41', hue: 262, collapsed: false,
     launchedWave, nextWave, waveNotice: null,
-    master: { convId: 'm0', title: MASTER.title, tabTitle: null, listed: true, status: 'done', hint: '' },
+    master: { convId: 'm0', title: MASTER.title, listed: true, status: 'done', hint: '' },
     members: [
       member('w1a', T1_TITLE, 1, { model: 'sonnet', effort: 'medium' }, 'g1a', w1a),
       member('w1b', T2_TITLE, 1, { model: 'haiku', effort: null }, 'g1b', w1b),

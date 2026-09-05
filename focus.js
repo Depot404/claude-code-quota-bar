@@ -96,11 +96,13 @@ const GROUP_FOCUS_COMMANDS = [
 ];
 
 function log(fmt, ...args) { console.log('[QuotaBar] ' + fmt, ...args); }
+// Pour le journal seulement : un prompt peut faire plusieurs Ko.
+const brief = (s) => (typeof s === 'string' && s ? s.slice(0, 40) : null);
 
 // Injecte par extension.js (`createOpenSessionIds` de session-titles.js, lu
-// sur LE MEME state.vscdb que sessionTitles) : sessionId → ouvert dans CETTE
-// fenetre. Ne sert plus a decider d'un focus (voir l'en-tete) ; conserve comme
-// source de verite d'identite d'onglet pour les appelants qui l'interrogent.
+// sur LE MEME memento que les positions d'onglets) : sessionId → ouvert dans
+// CETTE fenetre. Ne sert plus a decider d'un focus (voir l'en-tete) ; conserve
+// comme source de verite d'identite d'onglet pour les appelants qui l'interrogent.
 let getOpenSessionIds = () => new Set();
 function setOpenSessionIdsSource(fn) {
   getOpenSessionIds = typeof fn === 'function' ? fn : () => new Set();
@@ -113,15 +115,24 @@ function setSessionLocationsSource(fn) {
   getSessionLocations = typeof fn === 'function' ? fn : () => null;
 }
 
-// Les conversations LISTÉES par le panneau ({ sessionId, title, tabTitle }),
-// injectées par extension.js depuis le snapshot du moteur. Elles ne servent
-// qu'à UNE question (labels.js `labelNamesAnother`) : le libellé trouvé à la
-// position que l'identité désigne nomme-t-il une AUTRE conversation ? Sans
-// source (bancs, moteur pas encore prêt) : personne d'autre n'est nommé, et
-// l'identité garde la main — c'est le sens par défaut voulu.
+// Les conversations LISTÉES par le panneau ({ sessionId, title, lastPrompt }),
+// injectées par extension.js depuis le snapshot du moteur. Deux
+// questions y sont lues : (1) labels.js `labelNamesAnother` — le libellé trouvé
+// à la position que l'identité désigne nomme-t-il une AUTRE conversation ? ;
+// (2) `lastPromptOf` — le dernier prompt de la conversation cliquée, SECOND
+// libellé que son onglet peut porter (le webview ne le transporte pas). Sans
+// source (bancs, moteur pas encore prêt) : personne d'autre n'est nommé, pas de
+// dernier prompt, et l'identité garde la main — c'est le sens par défaut voulu.
 let getListedConversations = () => [];
 function setListedConversationsSource(fn) {
   getListedConversations = typeof fn === 'function' ? fn : () => [];
+}
+function lastPromptOf(sessionId) {
+  if (!sessionId) return null;
+  let listed = [];
+  try { listed = getListedConversations() || []; } catch { return null; }
+  const c = listed.find((x) => x && x.sessionId === sessionId);
+  return (c && c.lastPrompt) || null;
 }
 
 // L'état FRAIS des onglets de cette fenêtre, dans le comptage qu'attend
@@ -196,7 +207,8 @@ function claudeTabsSnapshot() {
 async function focusByIdentity(sessionId, conv, origin) {
   const done = (outcome, extra) => {
     logEvent('focus-identity', {
-      origin: origin || 'unknown', sessionId, title: conv && conv.title, tabTitle: conv && conv.tabTitle,
+      origin: origin || 'unknown', sessionId, title: conv && conv.title,
+      lastPrompt: brief(conv && conv.lastPrompt),
       outcome, ...extra,
     });
   };
@@ -230,7 +242,7 @@ async function focusByIdentity(sessionId, conv, origin) {
   if (!labelMatched) {
     let others = [];
     try { others = getListedConversations() || []; } catch { others = []; }
-    if (labelNamesAnother(tab.label, { sessionId, title: conv && conv.title, tabTitle: conv && conv.tabTitle }, others)) {
+    if (labelNamesAnother(tab.label, { sessionId, title: conv && conv.title, lastPrompt: conv && conv.lastPrompt }, others)) {
       log('identity focus: label at index %d is "%s", which names another conversation — falling back', loc.index, tab.label);
       done('label-names-another', { loc, labelThere: tab.label, tabs: claudeTabsSnapshot() });
       return null;
@@ -245,23 +257,33 @@ async function focusByIdentity(sessionId, conv, origin) {
 // Cherche l'onglet dans TOUS les groupes de CETTE fenêtre (le lot 1 ne regardait
 // que le groupe actif). Garde-fou conservé : sans correspondance on ne devine
 // pas — mieux vaut ne rien faire que focus la mauvaise conversation.
-// `tabTitle` (2026-07-22) : titre RÉEL de l'onglet quand il diverge de celui du
-// transcript (state.vscdb, cf. session-titles.js). Sans lui, un clic sur une
-// conv dont l'onglet a été renommé par l'extension officielle ne trouve rien et
-// reste un no-op — c'est la moitié « clic » du bug de présence.
-function findTab(title, tabTitle) {
-  if (!norm(title) && !norm(tabTitle)) return null;
-  const conv = { title, tabTitle };
+// `lastPrompt` (2026-09-04) : SECOND libellé possible — un onglet rouvert ou
+// restauré porte le dernier prompt, pas le titre (cf. labels.js). Un troisième
+// a existé ici, `tabTitle` (le libellé brut du store d'onglets VS Code) :
+// retiré en 2.114.0, ce store étant mesuré mort.
+// `ambiguousOut` (2026-09-05, Lot A) : SECOND CANAL, ignoré des appelants qui
+// ne le passent pas. Rempli (`.labels`) quand PLUS D'UN onglet Claude, tous
+// groupes confondus, matche la conversation — mesuré le 2026-09-04 (rapport
+// question 5) : le repli qui « choisissait le groupe actif » a activé la
+// MAUVAISE sœur une fois sur trois. Deux onglets homonymes sont
+// INDISCERNABLES par le texte ; il n'y a plus de choix à faire, seulement à
+// le dire (focusConversation / createFocusRelay journalisent `ambiguous-here`).
+function findTab(title, lastPrompt, ambiguousOut) {
+  if (!norm(title) && !norm(lastPrompt)) return null;
+  const conv = { title, lastPrompt: lastPrompt || null };
   const matches = [];
   for (const group of vscode.window.tabGroups.all) {
-    const index = group.tabs.findIndex((t) => isClaudeTab(t) && convMatchesLabel(t.label, conv));
-    if (index >= 0) matches.push({ group, index, label: group.tabs[index].label });
+    (group.tabs || []).forEach((tab, index) => {
+      if (isClaudeTab(tab) && convMatchesLabel(tab.label, conv)) matches.push({ group, index, label: tab.label });
+    });
   }
   if (!matches.length) return null;
-  if (matches.length > 1) log('ambiguous title "%s" in %d groups — picking the active one', title, matches.length);
-  // Ambiguïté (deux libellés tronqués au même préfixe, groupes différents) : le
-  // groupe actif est le seul « récemment utilisé » que l'API expose.
-  return matches.find((m) => m.group.isActive) || matches[0];
+  if (matches.length > 1) {
+    log('ambiguous title "%s" in %d tabs here — refusing to guess', title, matches.length);
+    if (ambiguousOut) ambiguousOut.labels = matches.map((m) => m.label);
+    return null;
+  }
+  return matches[0];
 }
 
 async function focusTab(match) {
@@ -369,7 +391,8 @@ function createFocusRelay(handlers = {}) {
     // LES DEUX à la même requête, et la dernière servie emportait le focus.
     // `ownsSession` ne peut être vrai que dans une seule fenêtre.
     if (req.action !== 'close') {
-      const label = await focusByIdentity(req.session_id, { title: req.title, tabTitle: req.tab_title }, 'relay');
+      const label = await focusByIdentity(req.session_id,
+        { title: req.title, lastPrompt: req.last_prompt || null }, 'relay');
       if (label) {
         raiseWindow(label);
         // 2e argument : l'identité activée, connue ici avec certitude (c'est
@@ -381,8 +404,20 @@ function createFocusRelay(handlers = {}) {
       }
     }
 
-    const match = findTab(req.title, req.tab_title);
-    if (!match) return;                                // pas chez nous : une autre fenêtre répondra
+    const ambiguousHere = {};
+    const match = findTab(req.title, req.last_prompt || null, ambiguousHere);
+    if (!match) {
+      // Ambigu ICI (plusieurs onglets Claude portent ce nom dans cette
+      // fenêtre) : on ne tranche pas plus qu'au clic direct, et une autre
+      // fenêtre n'a rien à faire de cette conclusion — elle est locale.
+      if (ambiguousHere.labels) {
+        logEvent('focus-label-fallback', {
+          sessionId: req.session_id || null, title: req.title,
+          lastPrompt: brief(req.last_prompt), outcome: 'ambiguous-here', candidates: ambiguousHere.labels,
+        });
+      }
+      return;                                // pas chez nous, ou ambigu ici : rien à faire dans les deux cas
+    }
     try {
       // `action` absent = focus : c'est la seule action qui existait avant le
       // lot 2, et une requête écrite par une fenêtre restée sur l'ancienne
@@ -417,26 +452,36 @@ function createFocusRelay(handlers = {}) {
 // (`reportActivation`) qu'une activation vient de se produire, sans attendre
 // que l'API le confirme — la seule preuve qui reste vraie si sa copie miroir
 // des onglets est gelée.
-async function focusConversation(msg) {
+// `refused` (lot D, 2026-09-05) : second canal, même idiome que `ambiguousOut`
+// de findTab — rempli (`.labels`) quand le clic est REFUSÉ pour ambiguïté ici.
+// Mesuré au banc réel du 2026-09-05 : le refus était juste mais muet à l'écran
+// (badge ≈ éteint à l'instant du clic) ; extension.js le relaie au webview, qui
+// allume le badge de la ligne cliquée. Ignoré des appelants qui ne le passent pas.
+async function focusConversation(msg, refused) {
   const title = msg && msg.title;
-  const tabTitle = (msg && msg.tabTitle) || null;
   const sessionId = (msg && msg.id) || null;
+  // Le DERNIER PROMPT de la conversation (2026-09-04) — troisième libellé que
+  // son onglet peut porter (labels.js convMatchesLabel), lu sur la liste du
+  // moteur par identité : le webview ne le transporte pas.
+  const lastPrompt = lastPromptOf(sessionId);
   // L'identité se suffit à elle-même : une conversation sans titre exploitable
   // (transcript pas encore né) reste cliquable par ce seul chemin.
-  if (!sessionId && !norm(title) && !norm(tabTitle)) return null;
+  if (!sessionId && !norm(title)) return null;
 
   // 1. IDENTITÉ — seule voie capable de départager deux onglets homonymes (cf.
   // en-tête). Gardée par la preuve d'appartenance, et surtout filetée : si elle
   // ouvre quoi que ce soit, elle le referme et rend `null`. Le contrat « le
   // panneau n'ouvre jamais d'onglet » (décision user 2026-08-26) est donc tenu
   // par vérification de l'effet, plus par l'abstinence.
-  const byIdentity = await focusByIdentity(sessionId, { title, tabTitle }, 'click');
+  const byIdentity = await focusByIdentity(sessionId, { title, lastPrompt }, 'click');
   if (byIdentity) return byIdentity;
 
   // 2. REPLI PAR LIBELLÉ — inchangé, et toujours nécessaire : identité inconnue
   // (conv d'une autre fenêtre, sonde indisponible, version d'extension sans la
-  // commande). Ne peut pas départager des homonymes, par construction.
-  const match = findTab(title, tabTitle);
+  // commande). Ne peut PLUS départager des homonymes (Lot A, 2026-09-05) : il
+  // refuse au lieu de deviner — cf. l'en-tête de `findTab`.
+  const ambiguousHere = {};
+  const match = findTab(title, lastPrompt, ambiguousHere);
   if (match) {
     // Journalisé (2026-09-03, instrumentation fait 2) : c'est CE chemin — celui
     // qui apparie par TEXTE au lieu de l'identité — qui peut viser un onglet
@@ -445,12 +490,26 @@ async function focusConversation(msg) {
     // cette fenêtre voyait au même instant, pour vérifier après coup si un
     // autre onglet portait déjà ce libellé.
     logEvent('focus-label-fallback', {
-      sessionId, title, tabTitle,
+      sessionId, title, lastPrompt: brief(lastPrompt),
       resolvedLabel: match.label, resolvedViewColumn: match.group.viewColumn, resolvedIndex: match.index,
       tabs: claudeTabsSnapshot(),
     });
     await focusTab(match);
     return match.label;
+  }
+  if (ambiguousHere.labels) {
+    // L'onglet EST dans cette fenêtre, mais plus d'un porte ce nom : aucune
+    // commande VS Code (on ne sait pas lequel), aucun relais (une autre
+    // fenêtre répondrait à tort « pas chez moi » n'aiderait pas non plus —
+    // l'onglet est ICI). panel.js explique le refus par l'infobulle du ≈.
+    logEvent('focus-label-fallback', {
+      sessionId, title, lastPrompt: brief(lastPrompt),
+      outcome: 'ambiguous-here', candidates: ambiguousHere.labels,
+    });
+    // Le refus se DIT à l'appelant (lot D) : extension.js le relaie au webview
+    // (`focusRefused`), qui allume le badge ≈ de la ligne cliquée.
+    if (refused) refused.labels = ambiguousHere.labels;
+    return null;
   }
   // Introuvable ici : l'onglet vit peut-être dans une autre fenêtre VS Code.
   // On journalise les libellés vus : c'est exactement ce qui manquait pour
@@ -458,10 +517,10 @@ async function focusConversation(msg) {
   // titre complet côté panneau) — un clic sans effet ET sans trace est invisible.
   log('no tab here for "%s" (claude tabs: %j) — relaying to the other windows', title,
     vscode.window.tabGroups.all.flatMap((g) => g.tabs.filter(isClaudeTab).map((t) => t.label)));
-  logEvent('focus-not-here', { sessionId, title, tabTitle, tabs: claudeTabsSnapshot() });
+  logEvent('focus-not-here', { sessionId, title, lastPrompt: brief(lastPrompt), tabs: claudeTabsSnapshot() });
   writeRequest({
     title,
-    tab_title: tabTitle,
+    last_prompt: lastPrompt,
     session_id: (msg && msg.id) || null,
     ts: Date.now(),
     origin_pid: process.pid,

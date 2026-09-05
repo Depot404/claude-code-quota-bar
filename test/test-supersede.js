@@ -214,11 +214,13 @@ check('titres et premiers messages différents → aucune supplantation',
 
 // VETO PAR LE PREMIER MESSAGE (2026-08-27) — le cas réel : deux lots
 // différents, deux plans différents, dix heures d'écart, MÊME titre. Le titre du
-// husk vient du store d'onglets de VS Code, qui garde ses entrées après la
-// fermeture de l'onglet : rien ne distingue plus les deux, sauf leur premier
-// message. Un successeur VIVANT ne rachète pas la divergence.
+// husk venait alors du store d'onglets de VS Code (`titleSource:'tab-store'`,
+// source retirée en 2.114.0) ; un titre d'IA identique sur deux conversations
+// distinctes reproduit exactement le même piège, d'où ce cas rejoué en
+// 'ai-title' : rien ne les distingue, sauf leur premier message. Un successeur
+// VIVANT ne rachète pas la divergence.
 map = computeSupersededBy([
-  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'tab-store', mtime: 100,
+  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'ai-title', mtime: 100,
       firstUser: 'Refactor the billing client and update its contract tests, then run the suite' }),
   c({ sessionId: 'succ', title: 'Billing client refactor', mtime: 200, live: true, tabOpen: true,
       firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
@@ -229,7 +231,7 @@ check('même titre mais premiers messages divergents → aucune supplantation, m
 // La contrepartie, à ne pas casser : même titre ET même premier message rejoué
 // = le vrai respawn, il DOIT toujours folder.
 map = computeSupersededBy([
-  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'tab-store', mtime: 100,
+  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'ai-title', mtime: 100,
       firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
   c({ sessionId: 'succ', title: 'Billing client refactor', mtime: 200, live: true, tabOpen: true,
       firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
@@ -241,7 +243,7 @@ check('même titre ET même premier message rejoué → supplantation conservée
 // de veto possible, on retombe sur le groupement par titre — comportement
 // d'avant, comme toute source optionnelle de ce module.
 map = computeSupersededBy([
-  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'tab-store', mtime: 100 }),
+  c({ sessionId: 'husk', title: 'Billing client refactor', titleSource: 'ai-title', mtime: 100 }),
   c({ sessionId: 'succ', title: 'Billing client refactor', mtime: 200, live: true, tabOpen: true,
       firstUser: 'Refactor the billing client and update the invoice templates, then run the suite' }),
 ]);
@@ -287,7 +289,7 @@ function snapshot(tabProvider, live = new Set()) {
   const reader = state.createTranscriptReader();
   return state.buildSnapshot({
     workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12, tabs: tabProvider,
-    liveSessions: () => live, sessionTitles: () => new Map(),
+    liveSessions: () => live,
   }, reader);
 }
 
@@ -344,7 +346,7 @@ function snapshot2(withSecondSignal) {
   const reader = state.createTranscriptReader();
   const args = [
     { workspacePath: WS2, recentMs: 4 * 3600 * 1000, maxItems: 12, tabs: openSuccTab,
-      liveSessions: () => new Set(), sessionTitles: () => new Map() },
+      liveSessions: () => new Set() },
     reader,
   ];
   if (withSecondSignal) args.push(state.createFirstUserReader());

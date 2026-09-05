@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.116.0] - 2026-09-05
+
+### Changed
+- **A batch member whose tab is closed no longer keeps a row.** 2.115.0 kept a closed batch member as a struck-through row, greyed with its ✓ and captioned "tab closed", so a batch's composition would not depend on which tabs happened to be open. Reversed on your own call after seeing it on screen: a closed tab removes the row in a batch exactly as it does in the flat conversation list — one row is one tab, in both views alike. The header count stays right regardless: it reads the finish proof written into the batch's store (2.115.0), never the rows that happen to be rendered. A batch whose members have all finished and closed still disappears entirely, as before.
+
+## [2.115.0] - 2026-09-05
+
+### Fixed
+- **A batch member whose tab you closed keeps its row.** Measured on a real batch (a master conversation plus three tasks over two waves): close every tab, reopen one from the extension's session list, and the batch came back with a single member — the two others had vanished without a trace, and so had the "wave 1 / wave 2" headers. The batch was showing *the members whose tab is open*, not its composition. A batch is a plan you read: a member whose tab is closed now stays in place, greyed and struck through with its ✓, captioned "tab closed", and the wave headers no longer depend on which tabs happen to be open. The flat conversation list is unchanged: there, a row is a tab, and a tab proven closed still removes its row.
+- **The batch header no longer says "0/3 done" under three ✓.** Closing a tab lets Claude Code purge the conversation's hook state; reopening it respawns a process that writes nothing until you talk to it. The proof that a task had finished left with the tab, so the header — which counts proven finishes — contradicted the rows. A finish, once observed, is now written into the batch itself and survives tab closures, reloads and purged state; the header count and the automatic wave advance read it first. It is reset only when the member's link changes (Relaunch, removal, re-link), and a stored proof can never launch the next wave twice — a launched wave is locked at the moment it opens.
+- **A click refused because two open tabs share the conversation's name now shows it.** 2.113.0 made the panel refuse to guess between two homonymous tabs; measured on a real click, the refusal was correct but silent — the ≈ badge that explains it only lit up when the ambiguity had already been measured on the row, which it had not been at the instant of the click. The extension now tells the panel about the refusal and the ≈ badge of the clicked row lights up at once, with the same tooltip ("Two open tabs carry this name — click the tab itself, or wait a few seconds."). It stays lit until the first state where the ambiguity is no longer measured, and at least five seconds.
+
+## [2.114.0] - 2026-09-05
+
+### Changed
+- **The panel no longer reads the tab-title store VS Code stopped writing to.** Claude Code used to keep a session-id → tab-title table in the workspace database, and the panel read it to caption rows, to match tabs, and — since 2.79.0 — to prove a conversation closed ("its identity is published, no open tab carries it"). Measured on a real profile: the table now holds 2 entries, and only one of the 7 sessions whose tab was actually open. A source that has gone quiet is not neutral — its stale entries still claim identities, so that proof could only be wrong. The reader and everything it alone fed are gone, and nothing replaces them: row captions come from the transcript, tab matching uses the conversation title and its last prompt, and an open tab is recognised by identity through the editor memento, which named all 7. What is no longer detected, said plainly: a tab closed while its window was shut, and a background process outliving its tab — a conversation in either case stays listed until its process dies. Closing a tab in front of you removes its row in under a second, as before.
+
+## [2.113.0] - 2026-09-05
+
+### Fixed
+- **A click on a conversation whose tab shares its truncated name with another tab no longer activates the wrong one.** Measured on a real run of the extension list, closing and reopening several conversations: two open tabs read the same 24-character label, and the fallback path — which only runs when no exact position is known yet — picked "the active group" as a guess. One click in three landed on the other tab. It now refuses instead: when more than one open tab matches a conversation's name, nothing is focused and nothing is relayed to another window (the tab is right here, there is simply no way to tell which one). A discreet ≈ badge already marked these rows; its tooltip now explains the refusal — click the tab itself, or wait a few seconds for VS Code to write the exact position.
+
+## [2.112.0] - 2026-09-04
+
+### Fixed
+- **A conversation reopened from history is clickable at once, not tens of seconds later.** When a conversation tab is reopened (or restored after a reload), Claude Code names the tab after the conversation's *last prompt* rather than its title, and keeps that name even after new messages. The panel resolves a click by tab position first — an exact answer, but read from a record VS Code writes lazily, often tens of seconds after the tabs settle — and falls back to matching the tab label against the conversation's names in the meantime. That fallback knew two of the three names a tab can carry (the generated title, the title VS Code stores) and not the third, the last prompt: on every reopened tab it found nothing, and the click did nothing until the position record caught up. Measured on a real session: ten clicks in fifteen seconds, all silent, the tab in plain view. The last prompt is now one of the labels the panel matches against — for the click, for the highlight of the row whose tab is on screen, for deciding whether a tab is still open, and for the check that a position is stale because its tab names *another* conversation — one rule, in the one place all of them read from.
+- **The row highlight and the click no longer disagree for up to 30 seconds after VS Code writes its tab record.** The click re-read that record on demand; the highlight and the presence check read it on a 30-second cadence. The file watcher that already refreshed the renderer's active-editor record now refreshes the position record too.
+
+## [2.111.0] - 2026-09-04
+
+### Changed
+- **The batch banner no longer describes a batch that has already been launched.** Its three sentences each repeated something the batch's own rows show two lines higher: "not sent yet — press Enter in their tabs" (the tab is right there with your prompt in it, and the member row says so), "a task lost its link — use Relaunch" (the Relaunch button is *on* that row), "not identified yet — use Link…" (so is the Link… button). Gone with them: the per-push recount, its static suffix, and the whole lifecycle needed to stop a frozen message from turning into a lie. What still speaks: the counter while conversations are opening, and a failure if the launch itself fails. A batch in trouble shows it on its members.
+- **Dropping a `claude-convs` block into an existing batch no longer answers with a banner.** It reported that the block's own group name had been ignored in favour of the target batch's — a statement with no action attached, usually cut off mid-sentence in a narrow panel, and one more line to dismiss after every transfer. The name that was actually kept is the one written on the batch itself.
+
 ## [2.110.0] - 2026-09-03
 
 ### Changed

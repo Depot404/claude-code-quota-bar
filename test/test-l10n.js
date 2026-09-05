@@ -102,8 +102,8 @@ check('clé présente, avec placeholder → traduction + substitution',
   runT(extracted1.fnSrc, extracted1.bundleLiteral, 'Create {0}', 3) === 'Créer 3');
 check('clé absente du bundle → repli sur le texte source (anglais), placeholders quand même substitués',
   runT(extracted1.fnSrc, extracted1.bundleLiteral, 'Untitled') === 'Untitled'
-  && runT(extracted1.fnSrc, extracted1.bundleLiteral, '{0} conversations not sent yet — press Enter in their tabs.', 2)
-     === '2 conversations not sent yet — press Enter in their tabs.'
+  && runT(extracted1.fnSrc, extracted1.bundleLiteral, 'Opening {0} conversation(s)…', 2)
+     === 'Opening 2 conversation(s)…'
   // Deux placeholders tous fournis (la chaîne du bandeau n'en a plus qu'un
   // depuis 2026-08-15) — la ligne suivante, elle, couvre l'argument manquant.
   && runT(extracted1.fnSrc, extracted1.bundleLiteral, 'Wave {0}: could not open — {1}.', 2, 'boom')

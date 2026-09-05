@@ -118,39 +118,6 @@ check('une AUTRE conv étrangère ne masque pas celle-ci',
 check('ensemble vide (entrypoint absent/inconnu) → comportement d\'avant le lot',
   goneF(conv({ state: 'busy' }), noTabs, new Map(), new Set(), new Set()) === false);
 
-console.log('\n3ter. Titre d\'onglet divergent (state.vscdb)');
-const divergent = {
-  sessionId: 's1',
-  title: 'Upload Error TF400898: An Internal Error…',   // titre affiché (store)
-  tabTitle: 'Upload Error TF400898: An Internal Error…',
-  titleSource: 'tab-store',
-  state: 'idle',
-  mtime: Date.now(),
-};
-check('onglet renommé → la conv est reconnue par son titre de store',
-  gone(divergent, tabs('Upload Error TF400898: A…')) === false);
-check('titre de store matchable : sans onglet nulle part → MASQUÉE',
-  gone(divergent, noTabs) === true);
-check('l\'ancien titre transcript matche encore un onglet → affichée',
-  gone({ ...divergent, title: 'Afficher ? au lieu du loading' },
-    tabs('Afficher ? au lieu du l…')) === false);
-
-console.log('\n3quater. pickTitle : on affiche le nom de l\'ONGLET');
-const pick = state.pickTitle;
-check('store + transcript qui ne matche aucun onglet → titre du store',
-  pick('Vieux titre transcript', 'ai-title', 'Titre onglet réel', tabs('Titre onglet réel'))
-    .title === 'Titre onglet réel');
-check('… et sa source devient tab-store (donc masquable)',
-  pick('Vieux titre', 'ai-title', 'Titre onglet réel', tabs('Titre onglet réel'))
-    .titleSource === 'tab-store');
-check('transcript qui matche un onglet ouvert → titre transcript conservé',
-  pick('Conv ouverte à garder', 'ai-title', 'Entrée de store périmée',
-    tabs('Conv ouverte à garder')).title === 'Conv ouverte à garder');
-check('pas d\'entrée de store → titre transcript intact',
-  pick('Conv sans store', 'ai-title', null, noTabs).title === 'Conv sans store');
-check('libellé de store terminé par un caractère de remplacement → nettoyé à l\'affichage',
-  pick('Vieux titre', 'ai-title', 'Titre tronqué�', noTabs).title === 'Titre tronqué');
-
 // ── Snapshot complet sur de vrais fichiers ────────────────────────────────
 console.log('\n4. buildSnapshot de bout en bout (transcripts réels fabriqués)');
 
@@ -190,7 +157,7 @@ function snapshot(tabProvider, extra = {}) {
   return state.buildSnapshot({
     workspacePath: WS, recentMs: 4 * 3600 * 1000, maxItems: 12, tabs: tabProvider,
     // Injection : aucun accès au vrai ~/.claude/sessions ni au vrai state.vscdb.
-    liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    liveSessions: () => new Set(),
     ...extra,
   }, reader);
 }
@@ -209,111 +176,35 @@ titles = snapshot(() => tabs('Conv fermée à masq…')).conversations.map((c) =
 check('libellé tronqué réel de VS Code → la conv est reconnue et gardée',
   titles.includes('Conv fermée à masquer'), titles.join(' | '));
 
-// ── Snapshot : identités stables de bout en bout ───────────────────────────
-console.log('\n4bis. Snapshot : session vivante et titre d\'onglet réel');
+// ── Le store d'onglets est PARTI (2.114.0) : les échappatoires rouvrent ───
+// Du 2026-08-24 au 2026-09-05, deux sections vivaient ici : « identité publiée
+// + aucun onglet ⇒ fermée » (`sessionTitles`, `tabGoneIds`) et le titre
+// d'affichage emprunté au store (`pickTitle`, `titleSource:'tab-store'`).
+// Le store `agentSessions.model.cache` est MESURÉ MORT (2 entrées pour 7
+// onglets ouverts, 2026-09-04 puis 2026-09-05) : les deux sont retirées, et
+// PERSONNE ne reprend leur rôle. Ce qui suit verrouille ce qu'il en reste —
+// les exemptions d'isGone redeviennent inconditionnelles, exactement comme
+// avant le 2026-08-24.
+console.log('\n4bis. Store d\'onglets retiré : les exemptions d\'isGone sont rouvertes');
 {
-  // 'a' = la conv de l'incident : ai-title que plus aucun onglet ne porte.
-  const openTab = () => tabs('Titre réel de l\'onglet…');
-  const titles = () => new Map([['a', 'Titre réel de l\'onglet renommé']]);
-
-  let snap = snapshot(openTab, { sessionTitles: titles });
-  let a = snap.conversations.find((c) => c.sessionId === 'a');
-  check('conv à onglet renommé : réaffichée', !!a,
-    snap.conversations.map((c) => c.title).join(' | '));
-  check('… sous le titre de l\'ONGLET', a && a.title === 'Titre réel de l\'onglet renommé',
-    a && a.title);
-  check('… et le libellé brut du store voyage dans le snapshot (clic-focus)',
-    a && a.tabTitle === 'Titre réel de l\'onglet renommé', a && String(a.tabTitle));
-
-  // Même conv, aucun onglet nulle part et pas de session vivante : elle reste
-  // masquée — le titre de store est matchable, donc son absence prouve quelque
-  // chose (pas de régression du lot 5).
-  snap = snapshot(() => noTabs, { sessionTitles: titles });
-  check('titre de store sans onglet et sans session vivante → masquée',
-    !snap.conversations.some((c) => c.sessionId === 'a'),
-    snap.conversations.map((c) => c.title).join(' | '));
-
-  // La même, avec son process CLI vivant — MASQUÉE depuis le 2026-08-24.
-  // « Le CLI tourne, donc son onglet est ouvert » est faux : un process survit à
-  // la fermeture de son onglet (relevé vivant 16 h après, fenêtre jamais
-  // rechargée, zéro onglet Claude déclaré par elle) et la ligne restait à
-  // l'écran pour toujours. Le store publie ici l'identité d'onglet de 'a' :
-  // aucun onglet ne la porte ⇒ c'est une PREUVE de fermeture, pas une ignorance.
-  snap = snapshot(() => noTabs, { sessionTitles: titles, liveSessions: () => new Set(['a']) });
-  check('identité publiée + aucun onglet : masquée MÊME avec son CLI vivant (CLI orphelin)',
-    !snap.conversations.some((c) => c.sessionId === 'a'),
-    snap.conversations.map((c) => c.title).join(' | '));
-
-  // …et l'autre moitié, toujours vraie : tant que le store n'a RIEN publié pour
-  // cette session (conv qui vient de naître, la vue officielle écrit sa paire
-  // sessionId→titre avec latence), il n'existe aucune preuve à opposer au
-  // process vivant — elle reste affichée. C'est le cas que protégeait le
-  // garde-fou d'origine (2026-07-22), et il est intact.
-  snap = snapshot(() => noTabs, { sessionTitles: () => new Map(), liveSessions: () => new Set(['a']) });
-  check('identité non publiée + CLI vivant → affichée (conv qui vient de naître)',
-    snap.conversations.some((c) => c.sessionId === 'a'),
-    snap.conversations.map((c) => c.title).join(' | '));
-
-  // Tri tabOrder + surlignage doivent la retrouver par son titre de store.
-  snap = snapshot(() => ({ known: true, labels: ['Conv ouverte à garder', 'Titre réel de l\'onglet…'], activeLabel: 'Titre réel de l\'onglet…' }),
-    { sessionTitles: titles, sortOrder: 'tabOrder' });
-  const ids = snap.conversations.map((c) => c.sessionId);
-  check('tri tabOrder : la conv renommée se range à la position de son onglet',
-    ids.indexOf('a') === 1, ids.join(','));
-  check('surlignage : l\'onglet actif renommé désigne bien cette conv',
-    snap.conversations.find((c) => c.isActive || false) &&
-    snap.conversations.find((c) => c.isActive).sessionId === 'a',
-    JSON.stringify(snap.conversations.map((c) => [c.sessionId, c.isActive])));
-}
-
-// ── Les trois échappatoires, fermées dès que l'identité est publiée ─────────
-console.log('\n4bis-suite. Identité d\'onglet publiée : plus de ligne sans onglet');
-{
-  // 'c' (titre de repli) et 'd' (busy, CLI vivant) restaient affichées SANS
-  // onglet, chacune par une exemption différente d'isGone — toutes posées pour
-  // couvrir un « on ne peut pas encore savoir ». Dès que le store publie leur
-  // titre d'onglet, on PEUT savoir : aucun onglet ne les porte ⇒ elles partent.
-  // Demande de l'user du 2026-08-23 : les lignes reflètent les onglets ouverts.
-  const published = () => new Map([['c', 'Titre de repli sans ai-title'], ['d', 'Conv CLI au travail']]);
   const onlyB = () => tabs('Conv ouverte à garder');
-
-  let snap = snapshot(onlyB, { sessionTitles: published, liveSessions: () => new Set(['d']) });
-  let ids = snap.conversations.map((x) => x.sessionId);
-  check('titre de repli + identité publiée + aucun onglet → masquée', !ids.includes('c'), ids.join(','));
-  check('busy + CLI vivant + identité publiée + aucun onglet → masquée', !ids.includes('d'), ids.join(','));
-  check('… la conv dont l\'onglet est ouvert, elle, reste', ids.includes('b'), ids.join(','));
-
-  // Le fait « onglet prouvé absent » est PUBLIÉ par le snapshot, y compris pour
-  // les conversations qu'il ne rend pas : c'est de là que member-truth.js tire
-  // son `tabClosed` pour les membres de lot, dont l'onglet a pu se fermer hors
-  // de la vue (fenêtre éteinte, process orphelin). Sans ça, un membre restait
-  // « ouverte » et retenait son lot à l'écran (signalé le 2026-08-24).
-  check('tabGoneIds publie les onglets prouvés absents',
-    snap.tabGoneIds.has('c') && snap.tabGoneIds.has('d'), [...snap.tabGoneIds].join(','));
-  check('… et jamais celui dont l\'onglet est ouvert', !snap.tabGoneIds.has('b'),
-    [...snap.tabGoneIds].join(','));
-
-  // Garde-fou de panne : store muet (0 entrée là où le fichier existe) = PANNE,
-  // pas dégradation (incident 2026-08-20) — les exemptions reprennent toutes,
-  // rien ne disparaît de plus.
-  snap = snapshot(onlyB, { sessionTitles: () => new Map(), liveSessions: () => new Set(['d']) });
-  ids = snap.conversations.map((x) => x.sessionId);
-  check('store muet → les deux reviennent (aucun masquage de plus)',
-    ids.includes('c') && ids.includes('d'), ids.join(','));
-  check('… et tabGoneIds reste vide : on ne prouve la fermeture de personne',
-    snap.tabGoneIds.size === 0, [...snap.tabGoneIds].join(','));
-
-  // La marque « à relire » : seule exemption qui subsiste, parce qu'elle est un
-  // ORDRE de l'utilisateur et non une preuve manquante.
-  snap = snapshot(onlyB, {
-    sessionTitles: published, liveSessions: () => new Set(['d']),
-    pinnedSessions: () => new Set(['c']),
-  });
-  ids = snap.conversations.map((x) => x.sessionId);
-  check('... meme marquee : onglet prouve ferme -> la ligne part aussi (decision user 2026-08-26)',
-    !ids.includes('c'), ids.join(','));
-  check('... et plus aucune conversation ne publie tabGone (champ retire du modele)',
-    snap.conversations.every((x) => !('tabGone' in x)), ids.join(','));
+  const snap = snapshot(onlyB, { liveSessions: () => new Set(['d']) });
+  const ids = snap.conversations.map((x) => x.sessionId);
+  check('titre de repli sans onglet → RESTE (plus aucune identité pour trancher)',
+    ids.includes('c'), ids.join(','));
+  check('busy + CLI vivant sans onglet → RESTE (idem)', ids.includes('d'), ids.join(','));
+  check('… et la conv dont l\'onglet est ouvert reste, elle aussi', ids.includes('b'), ids.join(','));
+  check('une conv ai-title sans onglet part toujours (preuve par le libellé, intacte)',
+    !ids.includes('a'), ids.join(','));
+  // Le champ `tabTitle` ne voyage plus : focus.js et panel.js ne le
+  // transportent plus non plus (un libellé de moins à faire circuler).
+  check('aucune conversation ne porte tabTitle', snap.conversations.every((x) => !('tabTitle' in x)),
+    JSON.stringify(snap.conversations[0] || null).slice(0, 120));
+  // …et le snapshot ne publie plus `tabGoneIds` : member-truth ne peut donc
+  // plus conclure « onglet fermé » sur une fenêtre éteinte ou un process
+  // orphelin — perte assumée, nommée dans member-truth.js.
+  check('le snapshot ne publie plus tabGoneIds', !('tabGoneIds' in snap),
+    Object.keys(snap).join(','));
 }
 
 console.log('\n4ter. Transcript plus vieux que recentMs mais session vivante');
@@ -328,7 +219,7 @@ console.log('\n4ter. Transcript plus vieux que recentMs mais session vivante');
   fs.utimesSync(f, when, when);
   const build = (liveIds) => state.buildSnapshot({
     workspacePath: old, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: () => unknown, liveSessions: () => new Set(liveIds), sessionTitles: () => new Map(),
+    tabs: () => unknown, liveSessions: () => new Set(liveIds),
   }, state.createTranscriptReader());
   check('transcript inactif depuis 8 h, session morte → hors candidats (inchangé)',
     build([]).conversations.length === 0);
@@ -352,13 +243,15 @@ console.log('\n4quater. Transcript vieux, session MORTE, mais onglet resté ouve
     .map((l) => JSON.stringify(l)).join('\n') + '\n');
   const when = (Date.now() - 8 * 3600 * 1000) / 1000;        // 8 h → hors recentMs
   fs.utimesSync(f, when, when);
-  const build = (tabProvider, store) => state.buildSnapshot({
+  const build = (tabProvider, ids) => state.buildSnapshot({
     workspacePath: kept, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: tabProvider, liveSessions: () => new Set(), sessionTitles: () => store,
+    tabs: tabProvider, liveSessions: () => new Set(), openSessionIds: () => ids,
   }, state.createTranscriptReader());
-  // Le store VS Code connaît la paire sessionId → libellé d'onglet, et l'onglet
-  // ouvert porte ce libellé TRONQUÉ, comme le fait l'extension officielle.
-  const store = new Map([['mm', 'Master conv of a batch']]);
+  // Le memento du renderer NOMME la session dont l'onglet est ouvert ici ;
+  // l'onglet, lui, porte le libellé TRONQUÉ comme le fait l'extension
+  // officielle. Depuis 2.114.0 c'est la SEULE preuve de cet invariant : le
+  // store d'onglets qui le tenait aussi est mort, donc retiré.
+  const store = new Set(['mm']);
   const open = () => tabs('Master conv of a bat…');
 
   const shown = build(open, store).conversations;
@@ -367,12 +260,17 @@ console.log('\n4quater. Transcript vieux, session MORTE, mais onglet resté ouve
     JSON.stringify(shown.map((c) => c.title)));
   check('…et son onglet est reconnu ouvert (donc jamais barrée)',
     shown.length === 1 && shown[0].tabOpen === true);
-  check('store connu mais AUCUN onglet ouvert → hors candidats (inchangé)',
+  check('identité connue mais AUCUN onglet ouvert → hors candidats (inchangé)',
     build(() => noTabs, store).conversations.length === 0);
-  check('onglet ouvert mais store muet → hors candidats (dégradation silencieuse)',
-    build(open, new Map()).conversations.length === 0);
-  check('onglets inconnus (tracker mort) → hors candidats (comportement d\'avant)',
-    build(() => unknown, store).conversations.length === 0);
+  check('onglet ouvert mais memento muet → hors candidats (dégradation silencieuse)',
+    build(open, new Set()).conversations.length === 0);
+  check('onglets inconnus (tracker mort) ET memento muet → hors candidats',
+    build(() => unknown, new Set()).conversations.length === 0);
+  // Le memento ne dépend PAS du tracker d'onglets : une identité publiée reste
+  // une preuve d'onglet ouvert même quand la copie miroir de l'hôte est morte —
+  // et « tabs.known:false ⇒ on ne masque rien » fait le reste.
+  check('tracker mort mais memento qui NOMME la session → listée (le doute profite à l\'affichage)',
+    build(() => unknown, store).conversations.length === 1);
 }
 
 // Le cas témoin du 2026-08-20 : la ligne BARRÉE qu'aucun geste ne retire.
@@ -405,7 +303,7 @@ console.log('\n4quinquies. Fiche hooks fraîche + transcript vieux + titre de re
   }));
   const build = (liveIds) => state.buildSnapshot({
     workspacePath: ghost, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: () => noTabs, liveSessions: () => new Set(liveIds), sessionTitles: () => new Map(),
+    tabs: () => noTabs, liveSessions: () => new Set(liveIds),
   }, state.createTranscriptReader());
   const shown = build([]).conversations;
   check('transcript muet depuis 16 h, aucun onglet → hors liste MALGRÉ la fiche fraîche',
@@ -447,7 +345,7 @@ console.log('\n4sexies. Conv MARQUÉE « à relire » : survit à la fermeture d
   mk('old', 'Conv oubliee non marquee', 8);
   const build = (extra) => state.buildSnapshot(Object.assign({
     workspacePath: pinnedWs, recentMs: 4 * 3600 * 1000, maxItems: 12,
-    tabs: () => noTabs, liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    tabs: () => noTabs, liveSessions: () => new Set(),
   }, extra), state.createTranscriptReader());
 
   const withPin = build({ pinnedSessions: () => new Set(['pin']) }).conversations;
@@ -468,7 +366,7 @@ console.log('\n4sexies. Conv MARQUÉE « à relire » : survit à la fermeture d
   const openTab = build({
     pinnedSessions: () => new Set(['pin']),
     tabs: () => tabs('Conv marquee a relire'),
-    sessionTitles: () => new Map([['pin', 'Conv marquee a relire']]),
+    openSessionIds: () => new Set(['pin']),
   }).conversations.find((c) => c.sessionId === 'pin');
   check('marquee AVEC son onglet ouvert -> tabOpen true (le cas nominal ne bouge pas)',
     !!openTab && openTab.tabOpen === true,
@@ -501,7 +399,7 @@ console.log('\n4septies. Places de maxItems : une marquée passe devant les fra�
   const build = (maxItems) => state.buildSnapshot({
     workspacePath: race, recentMs: 4 * 3600 * 1000, maxItems,
     tabs: () => tabs('Conv avec onglet ouver…'),
-    sessionTitles: () => new Map([['tab', 'Conv avec onglet ouvert']]),
+    openSessionIds: () => new Set(['tab']),
     pinnedSessions: () => new Set(['pin']),
   }, state.createTranscriptReader());
 
@@ -574,7 +472,7 @@ console.log('\n5bis. Une conv à onglet ouvert passe devant maxItems convs plus 
   const snap = state.buildSnapshot({
     workspacePath: race, recentMs: 4 * 3600 * 1000, maxItems: 12,
     tabs: () => tabs('Old conv with an open t…'), liveSessions: () => new Set(),
-    sessionTitles: () => new Map([['rz', 'Old conv with an open tab']]),
+    openSessionIds: () => new Set(['rz']),
   }, state.createTranscriptReader());
   const shown = snap.conversations.map((c) => c.title);
   check('la conv à onglet ouvert est listée malgré 12 convs plus fraîches',
@@ -706,7 +604,7 @@ console.log('\n8bis. buildSnapshot : le cas témoin « master barrée au collage
   const findM = (snap) => snap.conversations.find((c) => c.sessionId === 'm');
   const build = (live, misses) => state.buildSnapshot({
     workspacePath: MASTER_WS, recentMs: 4 * 3600 * 1000, maxItems: 12, tabs: realTab,
-    liveSessions: () => new Set(live), sessionTitles: () => new Map(), tabOpenMisses: misses,
+    liveSessions: () => new Set(live), tabOpenMisses: misses,
   }, state.createTranscriptReader());
 
   // Session VIVANTE (née d'une fenêtre VS Code) : deux recomputes consécutifs
@@ -769,7 +667,7 @@ console.log('\n10. Appariement bijectif : plus d\'emprunt d\'onglet entre sœurs
   const build = (labels, extra) => state.buildSnapshot({
     workspacePath: twins, recentMs: 4 * 3600 * 1000, maxItems: 12,
     tabs: () => ({ known: true, labels }),
-    liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    liveSessions: () => new Set(),
     ...extra,
   }, state.createTranscriptReader());
 
@@ -845,7 +743,7 @@ console.log('\n11. Lot 3 : ambiguïté résiduelle — se taire plutôt que devi
         known: true, labels: [label2, label2], activeLabel: label2, activeIndex,
         frozen: false, source: 'fresh', windowFocused: true, sinceFocusMs: 10,
       }),
-      liveSessions: () => new Set(), sessionTitles: () => new Map(),
+      liveSessions: () => new Set(),
     }, state.createTranscriptReader());
   }
 
@@ -885,8 +783,8 @@ console.log('\n11. Lot 3 : ambiguïté résiduelle — se taire plutôt que devi
 console.log('\n12. pairTabs (labels.js) : l\'identité tranche, l\'ORDRE ne décide plus');
 {
   const { pairTabs } = require(path.join(__dirname, '..', 'labels.js'));
-  const sisterA = { sessionId: 'sisterA', title: 'yyy sujet A complet', tabTitle: null };
-  const sisterB = { sessionId: 'sisterB', title: 'yyy sujet B complet', tabTitle: null };
+  const sisterA = { sessionId: 'sisterA', title: 'yyy sujet A complet' };
+  const sisterB = { sessionId: 'sisterB', title: 'yyy sujet B complet' };
   const label = 'yyy…';
 
   // Sans identité (openIds absent) : c'est l'ORDRE de réception qui décide —
@@ -967,7 +865,7 @@ console.log('\n13. buildSnapshot : identité câblée de bout en bout, plus de c
     return state.buildSnapshot({
       workspacePath: twins3, recentMs: 4 * 3600 * 1000, maxItems: 12,
       tabs: () => ({ known: true, labels: [label3] }),
-      liveSessions: () => new Set(), sessionTitles: () => new Map(),
+      liveSessions: () => new Set(),
       ...extra,
     }, state.createTranscriptReader());
   };
@@ -1032,9 +930,6 @@ console.log('\n14. Fenêtre en cours de remontage : c\'est le RENDERER qui tranc
     // creux qui suit un rechargement de fenêtre.
     tabs: () => ({ known: true, labels: [] }),
     liveSessions: () => new Set(),
-    // Le store, lui, publie les deux identités — c'est ce qui rendait la
-    // fermeture « prouvée » alors qu'une des deux était bien ouverte.
-    sessionTitles: () => new Map([['g1', 'Conv bien ouverte'], ['g2', 'Conv fermee hier']]),
     ...extra,
   }, state.createTranscriptReader());
   const titlesOf = (snap) => snap.conversations.map((c) => c.title).sort();
@@ -1123,10 +1018,6 @@ console.log('\n15. Onglet restauré JAMAIS VISITÉ : « Claude Code » n\'est pa
     workspacePath: wsP, recentMs: 4 * 3600 * 1000, maxItems: 12,
     tabs: () => ({ known: true, labels: ['Conv visitee apres reload', 'Claude Code', 'Claude Code'] }),
     liveSessions: () => new Set(),
-    sessionTitles: () => new Map([
-      ['p1', 'Conv visitee apres reload'], ['p2', 'Conv restauree jamais vue'],
-      ['p3', 'Conv restauree jamais vue non plus'], ['p4', 'Conv fermee pour de bon'],
-    ]),
     ...extra,
   }, state.createTranscriptReader());
   const idsOf = (snap) => snap.conversations.map((c) => c.sessionId).sort();
@@ -1170,13 +1061,12 @@ console.log('\n15. Onglet restauré JAMAIS VISITÉ : « Claude Code » n\'est pa
     activatedAt: Date.now() - 10 * 60 * 1000,
     openSessionIds: () => new Set(['p1', 'p2', 'p3']),
     tabs: () => ({ known: true, labels: ['Conv visitee apres reload', 'Claude Code', 'Claude Code', 'Conv toute neuve'] }),
-    sessionTitles: () => new Map([['p1', 'Conv visitee apres reload'], ['p5', 'Conv toute neuve']]),
   }));
   check('onglet neuf hors memento mais au libellé matchant : gardé (union des preuves)',
     fresh.includes('p5') && fresh.includes('p1'), JSON.stringify(fresh));
 
   // LE FRÈRE, trouvé en revue du même lot : le filtre d'ancienneté tourne AVANT
-  // tout ça, et il ne connaît que `tabStillOpenFor` — donc les libellés. Une
+  // tout ça, et il ne connaissait que les libellés d onglets. Une
   // conversation de plus de `recentMs` dont l'onglet restauré n'a pas encore
   // été visité était retirée par `aged` avant même que la présence ait son mot
   // à dire : corriger la présence seule ne l'aurait jamais fait revenir.
@@ -1189,10 +1079,6 @@ console.log('\n15. Onglet restauré JAMAIS VISITÉ : « Claude Code » n\'est pa
   const agedOpts = {
     activatedAt: Date.now() - 10 * 60 * 1000,
     openSessionIds: () => new Set(['p1', 'p2', 'p3', 'p6']),
-    sessionTitles: () => new Map([
-      ['p1', 'Conv visitee apres reload'], ['p2', 'Conv restauree jamais vue'],
-      ['p3', 'Conv restauree jamais vue non plus'], ['p6', 'Conv de la nuit derniere'],
-    ]),
   };
   check('conv de plus de 4 h dont l\'onglet restauré n\'est pas visité : PAS écartée par l\'ancienneté',
     idsOf(buildP(agedOpts)).includes('p6'), JSON.stringify(idsOf(buildP(agedOpts))));
@@ -1300,7 +1186,7 @@ console.log('\n15. Onglet restauré JAMAIS VISITÉ : « Claude Code » n\'est pa
   const buildT = (extra) => state.buildSnapshot({
     workspacePath: twins2, recentMs: 4 * 3600 * 1000, maxItems: 12,
     tabs: () => ({ known: true, labels: [`${PFX}…`] }),   // un seul onglet pour deux sœurs
-    liveSessions: () => new Set(), sessionTitles: () => new Map(),
+    liveSessions: () => new Set(),
     ...extra,
   }, state.createTranscriptReader());
 

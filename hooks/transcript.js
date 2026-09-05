@@ -222,7 +222,13 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
     if (!lastPrompt && e.type === 'last-prompt' && e.lastPrompt) lastPrompt = e.lastPrompt;
     if (aiTitle && lastPrompt) break;
   }
-  if (aiTitle) return { title: aiTitle, source: 'ai-title' };
+  // `lastPrompt` (2026-09-04) : le dernier prompt BRUT, tel que le CLI l'écrit
+  // (`type:'last-prompt'`), coupé à 200 caractères — c'est le texte que
+  // l'extension officielle affiche comme LIBELLÉ D'ONGLET (24 car. + « … »)
+  // après toute réouverture, tant qu'aucun nouveau message n'est envoyé (cf.
+  // labels.js convMatchesLabel). Un troisième libellé possible, jamais un titre.
+  const lp = typeof lastPrompt === 'string' && lastPrompt.trim() ? lastPrompt.slice(0, 200) : null;
+  if (aiTitle) return { title: aiTitle, source: 'ai-title', lastPrompt: lp };
   let firstUser = null;
   scanHeadLines(filePath, HEAD_SCAN_MAX_BYTES, (e) => {
     if (e.type !== 'user' || e.isMeta || e.isSidechain || !e.message) return false;
@@ -232,9 +238,9 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
     firstUser = cleaned;
     return true;
   });
-  if (firstUser) return { title: firstUser, source: 'first-user' };
-  const lp = cleanTitle(lastPrompt);
-  return lp ? { title: lp, source: 'last-prompt' } : { title: null, source: null };
+  if (firstUser) return { title: firstUser, source: 'first-user', lastPrompt: lp };
+  const lpTitle = cleanTitle(lastPrompt);
+  return lpTitle ? { title: lpTitle, source: 'last-prompt', lastPrompt: lp } : { title: null, source: null, lastPrompt: lp };
 }
 
 // PREMIER message user d'un transcript, brut (enveloppes injectées retirées,

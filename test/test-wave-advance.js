@@ -186,6 +186,10 @@ writeTranscript('w1c', 'Groupe C vague une terminée');
 // entrée hooks) — la situation exacte de l'incident : l'user ferme l'onglet, la
 // ligne disparaît, l'état s'évapore, et l'affichage conclut « terminée ».
 writeTranscript('w1d', 'Groupe D vague une sans etat');
+// Groupe E (lot D, 2026-09-05) : les MÊMES faits que D — aucune source ne parle
+// plus — mais la preuve avait été OBSERVÉE avant la fermeture de l'onglet et
+// ÉCRITE dans le store (`doneProven: true`). Seul le store distingue D de E.
+writeTranscript('w1e', 'Groupe E vague une prouvee puis fermee');
 
 const STATE_FILE = path.join(SANDBOX, '.claude', 'sessions-state.json');
 const now = Date.now();
@@ -235,6 +239,12 @@ WORKSPACE_STORE.set('batchGroups', [
     id: 'gD', name: 'Groupe D', createdAt: now, collapsed: false, waveMode: 'auto',
     masterSessionId: null, masterTitle: '',
     members: [member('m1', 1, 'wave1d', 'w1d', now), member('m2', 2, 'PROMPT-D-WAVE2', null, null)],
+  },
+  // Groupe E : AUTO, jumeau de D, preuve de fin déjà dans le store (lot D).
+  {
+    id: 'gE', name: 'Groupe E', createdAt: now, collapsed: false, waveMode: 'auto',
+    masterSessionId: null, masterTitle: '',
+    members: [{ ...member('m1', 1, 'wave1e', 'w1e', now), doneProven: true }, member('m2', 2, 'PROMPT-E-WAVE2', null, null)],
   },
 ]);
 
@@ -298,6 +308,36 @@ async function run() {
   check('groupe D (auto) : vague 2 PAS lancée sur un état absent',
     !launched('gD', 'm2'), JSON.stringify(memberOf('gD', 'm2')));
 
+  console.log('\n4bis. Lot D (2026-09-05) : la preuve ÉCRITE dans le store suffit — et ne lance qu\'une fois');
+  // Mêmes faits que D (aucune source), mais le store porte `doneProven: true`
+  // pour le membre de la vague 1 : le moteur lit le store d'abord, la vague 2
+  // part. C'est ce qui manquait sur capture (« 0/3 done » sous trois ✓ après
+  // une fermeture/réouverture d'onglets).
+  check('groupe E (auto, preuve au store) : vague 2 lancée sur les MÊMES faits que D',
+    launched('gE', 'm2'), JSON.stringify(memberOf('gE', 'm2')));
+  // La preuve OBSERVÉE sur A (hooks `done` au boot) a été ÉCRITE dans le store à
+  // l'instant où member-truth l'a vue — c'est le câblage extension.js →
+  // groups.js markDoneProven, testé ici de bout en bout.
+  check('groupe A : la preuve observée au boot est PERSISTÉE dans le workspaceState',
+    memberOf('gA', 'm1') && memberOf('gA', 'm1').doneProven === true, JSON.stringify(memberOf('gA', 'm1')));
+  check('groupe D : rien n\'a été écrit (aucune preuve observée, seulement un silence)',
+    memberOf('gD', 'm1') && memberOf('gD', 'm1').doneProven !== true, JSON.stringify(memberOf('gD', 'm1')));
+  check('groupe B : pas prouvé non plus (busy)',
+    memberOf('gB', 'm1') && memberOf('gB', 'm1').doneProven !== true, JSON.stringify(memberOf('gB', 'm1')));
+  // Un doneProven du store ne déclenche jamais DEUX fois une vague : après le
+  // lancement, plusieurs recomputes de plus (événements d'onglet) ne doivent
+  // rien relancer — markLaunched a verrouillé m2, et il n'y a pas de vague 3.
+  await waitFor(function () { return clips.includes('PROMPT-E-WAVE2'); });
+  const eLaunchedAt = memberOf('gE', 'm2').launchedAt;
+  for (let i = 0; i < 3; i++) {
+    emitTabs({ closed: [], opened: [], changed: [claude('Groupe B vague une en cours')] });
+    await sleep(250);
+  }
+  check('groupe E : un seul lancement tenté (prompt au presse-papier une fois)',
+    clips.filter((c) => c === 'PROMPT-E-WAVE2').length === 1, JSON.stringify(clips));
+  check('groupe E : launchedAt de la vague 2 inchangé après trois recomputes',
+    memberOf('gE', 'm2').launchedAt === eLaunchedAt, JSON.stringify(memberOf('gE', 'm2')));
+
   // Le repli presse-papier du lancement de gA/m2 est asynchrone : on attend
   // qu'il ait écrit (condition, pas durée), puis on vérifie qu'un lancement a
   // bien été TENTÉ (et pas seulement le flag posé).
@@ -308,6 +348,7 @@ async function run() {
     !clips.includes('PROMPT-B-WAVE2'), JSON.stringify(clips));
   check('groupe C : rien au presse-papier (manuel)', !clips.includes('PROMPT-C-WAVE2'), JSON.stringify(clips));
   check('groupe D : rien au presse-papier (état non prouvé)', !clips.includes('PROMPT-D-WAVE2'), JSON.stringify(clips));
+  check('groupe E : lancement réellement tenté (preuve du store)', clips.includes('PROMPT-E-WAVE2'), JSON.stringify(clips));
 
   console.log('\n5. AUTO : la transition busy→done de la vague 1 (groupe B) lance la vague 2');
   // Vague 1 du groupe B se termine MAINTENANT (extension allumée) : session
@@ -335,6 +376,8 @@ async function run() {
     !launched('gC', 'm2') && !clips.includes('PROMPT-C-WAVE2'), JSON.stringify(clips));
   check('groupe D : toujours rien non plus',
     !launched('gD', 'm2') && !clips.includes('PROMPT-D-WAVE2'), JSON.stringify(clips));
+  check('groupe B : sa preuve observée (hooks done) est écrite au store à son tour',
+    memberOf('gB', 'm1') && memberOf('gB', 'm1').doneProven === true, JSON.stringify(memberOf('gB', 'm1')));
 
   console.log('\n6. MANUEL → AUTO : basculer l\'interrupteur ouvre enfin la vague en attente');
   // Le mode vit dans le workspaceState : on le bascule comme le fait le clic

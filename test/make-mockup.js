@@ -64,7 +64,7 @@ const GROUPS = [{
   launchedWave: 2,
   nextWave: 3,
   waveNotice: null,
-  master: { convId: 'm0', title: 'Plan the payroll form', tabTitle: null, listed: true, status: 'done', hint: '' },
+  master: { convId: 'm0', title: 'Plan the payroll form', listed: true, status: 'done', hint: '' },
   members: [
     { key: 'w1', prompt: 'Data model for the prefilled payslip. A payslip may exist in the database without having been worked.', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'g1a', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
     { key: 'w2', prompt: 'Prefill the payslip form from the roster. Depends on the data model batch already delivered.', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: 'g1b', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: stub.l10n.t('Queued — opens when this wave starts.') },

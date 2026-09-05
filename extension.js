@@ -32,7 +32,7 @@ const { createAckTracker } = require('./ack');
 // ack-journal.js pour le pourquoi de la méthode.
 const { logEvent: logAckEvent } = require('./ack-journal');
 const { convMatchesLabel } = require('./labels');
-const { createSessionTitles, createOpenSessionIds, createRendererActive } = require('./session-titles');
+const { createOpenSessionIds, createRendererActive } = require('./session-titles');
 const { createSoundPlayer } = require('./sounds');
 // Fenêtre de stabilisation du tout premier rendu (lot micro-allègements
 // 2026-07-24) — cf. warmup.js pour le pourquoi (flash de conv fantôme post-reload).
@@ -143,16 +143,19 @@ const GROUP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // candidats, donc pas à chaque écriture d'un transcript occupé.
 const ATTACH_RETRY_MS = 2000;
 let lastAttachTry = 0;
-// Retour visible d'un « Create » : compteur pendant, message après. Jamais de
-// popup pour le cas nominal (le panneau EST la surface).
+// Retour visible d'un « Create » : le compteur PENDANT l'ouverture, un échec
+// s'il y en a un, rien d'autre. Jamais de popup pour le cas nominal (le
+// panneau EST la surface).
+//
+// 2026-09-04 (demande user) — le bandeau ne DÉCRIT plus un lot déjà lancé.
+// Ses trois phrases répétaient toutes ce que la ligne du membre porte déjà,
+// deux lignes plus haut : « pas encore envoyée » (l'onglet est là, prompt
+// inséré, et le membre le note), « lien perdu — utilisez Relancer » (le
+// bouton Relancer EST sur la ligne), « non identifiées — utilisez Link… »
+// (le bouton Link… aussi). Sont partis avec : le recompte à chaque push,
+// son suffixe statique et le cycle de vie qu'il fallait pour qu'un message
+// figé ne devienne pas faux. Un lot qui va mal se voit sur ses membres.
 let batchStatus = { busy: false, notice: null };
-// Dernier lot lancé avec succès, pour recalculer le message d'ouverture à
-// chaque push d'état plutôt que de le figer au moment du « Create » (lot 6,
-// correctif §3 — un member envoyé/fermé rendait l'ancien message faux).
-// `trackedSessionIds` ne porte que les membres RATTACHÉS (étage 1) : les
-// tâches jamais identifiées restent dans le texte statique `staticSuffix`,
-// inchangé, comme avant ce lot.
-let batchLastLaunch = null;
 // Annonce d'ouverture de vague (lot 4, décision 5 : « une ouverture auto est
 // annoncée dans le panneau »). En mémoire, par groupe — un texte transitoire,
 // pas une donnée à survivre au reload (contrairement aux groupes eux-mêmes).
@@ -376,7 +379,11 @@ function activate(context) {
         sessionId, title: msg && msg.title, isTrusted: !!(msg && msg.isTrusted),
         convState: c ? c.state : null,
       });
-      focusConversation(msg).then((label) => {
+      // `refused` (lot D, 2026-09-05) : le refus d'ambiguïté de focus.js était
+      // juste mais MUET à l'écran (banc réel du 2026-09-05 : badge ≈ éteint à
+      // l'instant du clic). Le webview allume le badge de CETTE ligne.
+      const refused = {};
+      focusConversation(msg, refused).then((label) => {
         if (label && tabTracker) {
           // `sessionId` (2026-08-29) : l'acte porte désormais l'IDENTITÉ visée,
           // pas seulement le libellé activé — sans quoi un clic exact sur l'une
@@ -385,6 +392,7 @@ function activate(context) {
           // `actIdentity`.
           tabTracker.reportActivation(label, { sessionId });
         }
+        if (refused.labels && panelProvider) panelProvider.post({ type: 'focusRefused', id: sessionId, labels: refused.labels });
         if (stateEngine) stateEngine.refresh();
       }).catch(() => {});
       ackConversationById(msg && msg.id);
@@ -501,13 +509,11 @@ function activate(context) {
   ackTracker = createAckTracker({});
   context.subscriptions.push({ dispose: () => ackTracker.dispose() });
 
-  // Titres d'onglet RÉELS (2026-07-22) : seul l'hôte d'extension peut situer le
-  // state.vscdb du workspace, d'où ce câblage ici plutôt qu'un défaut dans
-  // state.js. Absent (pas de workspace, layout VS Code différent) → table vide,
-  // comportement d'avant ce lot.
+  // Seul l'hôte d'extension peut situer le state.vscdb du workspace, d'où ce
+  // câblage ici plutôt qu'un défaut dans state.js. Absent (pas de workspace,
+  // layout VS Code différent) → aucune identité d'onglet, repli par libellé.
   const stateDbPath = resolveStateDbPath(context);
-  const sessionTitles = createSessionTitles(stateDbPath);
-  // Même state.vscdb, table sœur : sessionId → ouvert dans CETTE fenêtre (lot
+  // sessionId → ouvert dans CETTE fenêtre (lot
   // « clic par identifiant »). focus.js s'en sert pour n'appeler l'API
   // officielle de focus que là où le panneau qu'elle cible existe déjà —
   // jamais à l'aveugle, cf. focus.js `tryOfficialFocus`.
@@ -527,7 +533,7 @@ function activate(context) {
   // conversation (photo périmée) ou personne (onglet renommé — l'identité
   // gagne). Cf. labels.js `labelNamesAnother`.
   setListedConversationsSource(() => (stateEngine
-    ? stateEngine.getSnapshot().conversations.map((c) => ({ sessionId: c.sessionId, title: c.title, tabTitle: c.tabTitle || null }))
+    ? stateEngine.getSnapshot().conversations.map((c) => ({ sessionId: c.sessionId, title: c.title, lastPrompt: c.lastPrompt || null }))
     : []));
   // Vérité du RENDERER (refactor surlignage 2026-08-27, « le renderer est le
   // juge ») : l'éditeur ACTIF de cette fenêtre par IDENTITÉ, écrit par le
@@ -569,7 +575,6 @@ function activate(context) {
     // republient leurs libellés (cf. ACTIVATION_GRACE_MS). Figé une fois, pas
     // un thunk : c'est une date, pas un état.
     activatedAt: Date.now(),
-    sessionTitles: () => sessionTitles.get(),
     // Source de vérité de la présence (lot « présence par identifiant »,
     // 2026-08-26) : même Set que focus.js `tryOfficialFocus`, réutilisé ici
     // pour que pairTabs (labels.js) désambiguïse deux sœurs au titre tronqué
@@ -602,6 +607,10 @@ function activate(context) {
       const truthWatcher = fs.watch(path.dirname(stateDbPath), (_evt, filename) => {
         if (!filename || !String(filename).startsWith('state.vscdb')) return;
         rendererActive.bump();
+        // Même flush, même fraîcheur pour la photo des POSITIONS (2026-09-04) :
+        // le clic la relisait à la demande, le surlignage et la présence
+        // attendaient la cadence de 30 s — cf. session-titles.js `bump`.
+        openSessionIds.bump();
         clearTimeout(truthDebounce);
         truthDebounce = setTimeout(() => { if (stateEngine) stateEngine.refresh(); }, 400);
       });
@@ -929,7 +938,7 @@ const DEMO_GROUPS = [{
   launchedWave: 1,
   nextWave: null,
   waveNotice: null,
-  master: { convId: 'd3', title: 'Add a PDF export button to the invoice page', tabTitle: null, listed: true, status: 'done', hint: '' },
+  master: { convId: 'd3', title: 'Add a PDF export button to the invoice page', listed: true, status: 'done', hint: '' },
   members: [
     { key: 'm1', prompt: 'Wire the new billing client into checkout', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'd8', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
     { key: 'm2', prompt: 'Add smoke tests for invoice PDFs', wave: 1, asked: { model: 'haiku', effort: 'low' }, convId: 'd9', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
@@ -1142,6 +1151,23 @@ function redirectMember(m, superseded) {
   const to = m && m.sessionId && superseded && superseded[m.sessionId];
   return to ? { ...m, sessionId: to } : m;
 }
+// Vérités des membres d'UN groupe — la seule fabrique, partagée par le rendu
+// (groupsState), le moteur de vagues (maybeAdvanceWaves) et la relance
+// (relaunchMemberTruth) : trois lectures séparées de la même table divergeraient
+// (règle « un fait d'affichage doit avoir UNE source », CLAUDE.md).
+// C'est ICI, et nulle part ailleurs, que la preuve de fin observée s'ÉCRIT dans
+// le store (lot D, 2026-09-05 — cf. member-truth.js bug n°7, groups.js
+// markDoneProven) : à l'instant où la table voit un `done` écrit par une source,
+// il devient un fait du lot, que la fermeture de l'onglet n'efface plus. La
+// table le relit d'abord (`m.doneProven`) — le compteur d'en-tête et
+// l'enchaînement des vagues lisent donc le store avant la preuve vivante.
+function memberTruths(g, sources, superseded) {
+  return g.members.map((m) => {
+    const t = memberTruth(redirectMember(m, superseded), sources);
+    if (t.doneProven && !m.doneProven && groupStore) groupStore.markDoneProven(g.id, m.key);
+    return t;
+  });
+}
 // Reverse : successeur → husks qu'il supplante. Sert à rattacher au bon groupe
 // une conversation resumée dont le membre stocké pointe encore l'ancien id
 // (sinon elle réapparaîtrait, orpheline, dans la liste plate).
@@ -1196,7 +1222,6 @@ function conversationsState() {
     return {
       id: c.sessionId,
       title: c.title,
-      tabTitle: c.tabTitle || null,
       model: c.model,
       effort: c.effort || null,
       ctx: c.ctx,
@@ -1270,7 +1295,7 @@ function groupsState(convs, sources, superseded) {
     // `rm` = membres à sessionId redirigé (husk→successeur après un reload) :
     // statut, chip et cible de fermeture visent la conv VIVANTE, pas le husk.
     const rm = g.members.map((m) => redirectMember(m, sup));
-    const truths = rm.map((m) => memberTruth(m, src));
+    const truths = memberTruths(g, src, sup);
     const abstract = rm.map((m, i) => ({ wave: m.wave, status: truths[i].waveStatus }));
     const master = masterState(g, src, convById, sup);
     memberStatuses.set(g.id, truths.map((t) => t.status));
@@ -1427,7 +1452,6 @@ function masterState(g, src, convById, superseded) {
     // forme rendue, seule chose que nesting.js consomme (il ne lit pas le
     // store, cf. son en-tête).
     linkedAt: Number.isFinite(g.masterLinkedAt) ? g.masterLinkedAt : 0,
-    tabTitle: (conv && conv.tabTitle) || null,
     hint: t.hint ? vscode.l10n.t(t.hint) : t.hint,
     // Statut canonique (member-truth.js) de la maîtresse — exposé pour que
     // `groupsState`/`maybeAutoCollapseGroups` partagent la MÊME résolution
@@ -1617,17 +1641,6 @@ function buildPanelState() {
   // dans le même instant — deux lectures ne pourraient que se contredire.
   const convById = new Map(convs.map((c) => [c.id, c]));
   const sources = memberSources((id) => convById.get(id));
-  // Point d'accrochage unique du cycle de vie du notice de batch (plan
-  // repli-auto étape 6) : AVANT composeBatchNotice()/composeBatchNoticeHint()
-  // ci-dessous, pour que les deux voient le MÊME batchLastLaunch déjà purgé
-  // si son groupe a disparu — jamais une seconde résolution divergente.
-  if (shouldPurgeBatchLaunch(batchLastLaunch, (id) => !!(groupStore && groupStore.get(id)))) {
-    batchLastLaunch = null;
-    // ...ET le texte de repli qui décrivait CE lot : sans lui, la ligne
-    // `if (!launch) return fallback` de computeBatchNoticeFromLaunch le
-    // réaffiche pour toujours, alors qu'il n'y a plus rien à recalculer.
-    if (!batchStatus.busy && batchStatus.notice) batchStatus = { busy: false, notice: null };
-  }
   return {
     conversations: convs,
     quota: quotaState(),
@@ -1643,19 +1656,16 @@ function buildPanelState() {
     },
     // Lot 13 §1 : indicateur discret, jamais de popup — voir checkTabCanary().
     canary: canaryActive,
-    // Formulaire de création groupée (lot 1). `notice` est recalculé à CHAQUE
-    // push (lot 6, correctif §3) plutôt que figé au moment du « Create » : sans
-    // ça, le message restait affiché après que tous les onglets aient été
-    // envoyés, fermés ou rouverts.
+    // Formulaire de création groupée (lot 1). `notice` ne porte plus que le
+    // retour d'un GESTE en cours ou raté (ouverture, ajout à un lot, échec) —
+    // plus aucune description d'un lot déjà lancé (2026-09-04, cf. batchStatus).
     batch: {
       envConflict: envConflictVars(),
       busy: batchStatus.busy,
-      notice: batchStatus.busy ? batchStatus.notice : composeBatchNotice(convs, sources),
-      // Disclaimer du menu officiel (plan repli-auto étape 6) : tooltip du
-      // notice, jamais concaténé au texte courant — `null` tant qu'il n'y a
-      // pas de dernier lot à décrire (busy, ou aucun Create depuis l'ouverture
-      // du panneau).
-      noticeHint: batchStatus.busy ? null : (batchLastLaunch ? batchLastLaunch.hint : null),
+      notice: batchStatus.notice,
+      // Disclaimer du menu officiel : tooltip pendant l'ouverture, le seul
+      // moment où l'on regarde le sélecteur modèle/effort officiel.
+      noticeHint: batchStatus.busy ? BATCH_MENU_HINT() : null,
       // Lot 12 §3, pré-sélection au lot 14 : relu à CHAQUE push, jamais mis en
       // cache — /effort dans n'importe quelle conversation fait dériver ce
       // défaut global (NOTES). { model: null, effort: null } si le fichier est
@@ -1961,7 +1971,6 @@ async function createBatch(msg) {
   try {
     result = await batchLauncher.launch(wave1);
   } catch (e) {
-    batchLastLaunch = null;
     batchStatus = { busy: false, notice: vscode.l10n.t('Batch failed: {0}', (e && e.message) || vscode.l10n.t('unknown error')) };
     pushPanelState();
     return;
@@ -1994,113 +2003,14 @@ async function createBatch(msg) {
     }
   }
 
-  const unlinked = result.launched.filter((r) => !r.sessionId).length;
-  const staticSuffix = buildBatchStaticSuffix({ unlinked, grouped: !!group, fallbackAt: result.fallbackAt });
-
-  batchLastLaunch = {
-    total: result.total,
-    trackedSessionIds: result.launched.filter((r) => r.sessionId).map((r) => r.sessionId),
-    staticSuffix,
-    // Hint discret (lot 7, livrable 3 ; déplacé en tooltip par le plan
-    // repli-auto étape 6) : la limite cosmétique du menu officiel (son
-    // sélecteur d'effort se cale sur le modèle par défaut PERSISTÉ tant que
-    // le premier tour n'a pas tourné, cf. README « Known limitations »). N'est
-    // plus jamais concaténé au texte courant — panel.js le pose en `title`
-    // du notice, jamais en texte visible en permanence.
-    hint: vscode.l10n.t('The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.'),
-    // Identité du groupe décrit par ce notice (plan repli-auto étape 6,
-    // « cycle de vie ») : sans elle, un groupe dissous/purgé laisse son
-    // texte affiché pour un objet qui n'existe plus — purgeStaleBatchLaunch()
-    // la relit à chaque push pour effacer le notice au bon moment. `null`
-    // pour un batch sans groupe (tâche unique) : rien à surveiller.
-    groupId: group ? group.id : null,
-  };
-  // Le texte VIVANT (« appuyez sur Entrée », « lien perdu ») est recalculé à
-  // chaque push par composeBatchNotice, juste en dessous — le FIGER ici en
-  // faisait un zombie : dès que la source du calcul disparaît (lot purgé avec
-  // son groupe, ou aucune session tracée), computeBatchNoticeFromLaunch
-  // retombe sur ce `fallback` et prescrit « appuyez sur Entrée dans son
-  // onglet » pour une conversation qui a envoyé depuis des heures — constat
-  // user 2026-08-18, exactement la classe d'erreur que member-truth.js
-  // documente déjà six fois (un état posé une fois, jamais réconcilié).
-  // `batchStatus.notice` ne garde donc plus que le CONSTAT statique, celui
-  // qu'aucun recompute ne saurait reproduire (tâches jamais identifiées,
-  // arrêt en cours de lot) : un constat périmé est muet, une prescription
-  // périmée envoie l'utilisateur chercher un onglet qui n'existe pas.
-  batchStatus = { busy: false, notice: staticSuffix.trim() || null };
+  // Le lot est lancé : le bandeau se TAIT (2026-09-04). Une tâche qui n'a pas
+  // pu être identifiée, ou un lot arrêté en route, se lisent sur les membres
+  // eux-mêmes (note « pas encore liée » + bouton « Link… ») et, pour l'arrêt,
+  // dans le message que le launcher a déjà affiché avec le prompt remis au
+  // presse-papiers. Un message de plus en bas du panneau ne faisait que
+  // répéter, puis vieillir.
+  batchStatus = { busy: false, notice: null };
   pushPanelState();
-}
-
-// Partie STATIQUE du message de « Create » (plan repli-auto étape 6) :
-// réduite à l'ACTIONNABLE — nom de groupe, maîtresse et progression des
-// vagues sont déjà montrés par la capsule d'en-tête (étape 3) ; les répéter
-// ici serait le même doublon d'affichage que l'anti-doublon des NOTES de
-// member-truth.js. Ne restent que les faits qu'aucun autre élément du
-// panneau ne dit déjà : tâches jamais identifiées, arrêt en cours de lot.
-// Pure (aucun état de module) : testable directement, cf. test-batch-notice.js.
-function buildBatchStaticSuffix({ unlinked, grouped, fallbackAt }) {
-  let s = '';
-  // Depuis le lot 2, « pas de fichier de session » n'est plus un cul-de-sac :
-  // l'étage 2 réessaie par le prompt dès que la conversation a démarré, et
-  // l'étage 3 (« Link… ») reste disponible dans le groupe.
-  if (unlinked) {
-    s += grouped
-      ? vscode.l10n.t(' {0} not identified yet — they will link themselves once started, or use “Link…” in the group.', unlinked)
-      : vscode.l10n.t(' {0} could not be identified (no session file) — model/effort mismatch badge unavailable for those.', unlinked);
-  }
-  if (fallbackAt != null) s += vscode.l10n.t(' Stopped at task {0} — see the message above.', fallbackAt + 1);
-  return s;
-}
-
-// Un groupe dissous ou purgé ne doit plus porter le notice qui le décrivait
-// (plan repli-auto étape 6, « cycle de vie ») — classe d'erreur connue du
-// projet : un état d'affichage posé une fois, jamais invalidé par la
-// disparition de son objet (member-truth.js en documente 5 précédents). Le
-// cas « tout est parti » (plus aucun membre pending/lost) s'efface déjà tout
-// seul via computeBatchNoticeFromLaunch (pending === 0 && !lost → null) —
-// celui-ci couvre le cas RESTANT : le groupe disparaît alors que des membres
-// sont encore trackés. `groupExists` est injecté (jamais `groupStore` lu
-// directement) pour rester testable sans mock vscode.
-//
-// Étape 14 — CARTOGRAPHIE des sorties de `batchLastLaunch` (le constat était :
-// « 0/2 conversation(s) opened — press Enter » qui persiste sur des onglets
-// qui n'existent plus). Toutes les façons dont le monde change sous ce
-// notice, et ce qui les couvre déjà :
-//   1. Un membre envoie son premier message → `sent` monte (hasTranscript/vue),
-//      couvert par le recompte de computeBatchNoticeFromLaunch à chaque push.
-//   2. Tous les membres ont envoyé → `pending === 0 && lost === 0` → `null`
-//      (déjà couvert, cf. tests 5/10).
-//   3. Le groupe qui portait ce lot est dissous ou purgé (⨯ explicite) →
-//      `shouldPurgeBatchLaunch` (ci-dessous) → `batchLastLaunch = null`.
-//   4. Un membre retiré via ✕ vide le groupe de son dernier membre →
-//      `groups.js` `removeMember` dissout lui-même (`dissolve(id)`) → même
-//      chemin que le cas 3, rien de plus à coder ici.
-//   5. Un onglet `inserted` (prompt jamais envoyé) se ferme et son process CLI
-//      meurt → le membre devient `unsent-lost` (member-truth.js) : il sort de
-//      `pending`, entre dans `lost`. AVANT ce lot, le texte affiché pour ce
-//      cas restait « press Enter in its tab (if still open) » — une
-//      prescription sur un onglet dont on ne sait justement plus rien une
-//      fois `pending === 0` (aucun membre n'est plus PROUVÉ `inserted`/vivant).
-//   6. Un lot SANS groupe (tâche unique, `groupId === null`) dont l'unique
-//      tâche devient `unsent-lost` : `relaunchMember`/`linkMember`
-//      (panel.js, relaunchChip/linkChip) et le ré-appariement automatique
-//      (`attachPendingMembers` ci-dessus, qui ne lit QUE `groupStore.pending()`
-//      /`pendingForRelink(groupStore.all(), …)`) sont des mécanismes DE
-//      GROUPE — un lot ungrouped n'a ni bouton ni ré-appariement pour un lien
-//      mort-né. Avant ce lot, le texte promettait quand même « use Relaunch »
-//      dans ce cas : une action qui n'existe nulle part dans l'UI.
-//
-// Les cas 5 et 6 n'avaient pas de case dédiée : ils partageaient la branche
-// « pending === 0 && lost > 0 » du texte, qui écrivait une prescription fixe
-// sans vérifier si elle restait possible. Invariant qui les remplace (voir
-// computeBatchNoticeFromLaunch) : chaque PHRASE du notice n'apparaît que si
-// l'action qu'elle prescrit est encore possible — « press Enter » exige un
-// membre PROUVÉ `inserted` (pending > 0, cas 5 exclu) ; « lien perdu » exige
-// en plus un groupe pour porter le remède (lost > 0 && groupId, cas 6 exclu).
-// Aucune action possible du tout → aucune phrase → `null`, le notice
-// disparaît au lieu de prescrire dans le vide.
-function shouldPurgeBatchLaunch(launch, groupExists) {
-  return !!(launch && launch.groupId && !groupExists(launch.groupId));
 }
 
 // Recalcule la partie vivante du message de « Create » : combien de membres du
@@ -2164,147 +2074,25 @@ function memberSources(getConv) {
     // markClosed), avant même que le registre des sessions ou les hooks aient
     // eu le temps de purger leur propre trace. Sans ce signal, member-truth
     // retombe sur la course hooks/registre (bug n°6, cf. member-truth.js).
-    // …complété par l'onglet prouvé ABSENT du dernier snapshot (2026-08-24) :
-    // `isTabClosed` ne connaît que les fermetures observées EN DIRECT, donc ni
-    // celles faites pendant que la fenêtre était éteinte, ni le cas du process
-    // orphelin (un CLI survit à son onglet — cf. CLAUDE.md du dossier). Sans
-    // ça, un membre de lot restait « ouverte » indéfiniment et retenait son lot
-    // à l'écran alors que la conversation, elle, avait bien quitté la liste.
+    // Un second verdict le complétait du 2026-08-24 au 2026-09-05
+    // (`stateEngine.isTabGone` : identité publiée par le store d'onglets +
+    // aucun onglet apparié), pour ce qu'`isTabClosed` ne voit pas — fermeture
+    // faite fenêtre éteinte, process orphelin. Il est parti avec le store, qui
+    // ne publiait plus rien (2 entrées pour 7 onglets, mesuré) : ces deux cas
+    // ne sont plus couverts, et rien ne les remplace ici.
     tabClosed(id) {
       if (!stateEngine) return false;
-      if (typeof stateEngine.isTabClosed === 'function' && stateEngine.isTabClosed(id)) return true;
-      return !!(typeof stateEngine.isTabGone === 'function' && stateEngine.isTabGone(id));
+      return !!(typeof stateEngine.isTabClosed === 'function' && stateEngine.isTabClosed(id));
     },
   };
 }
 
-function computeBatchNoticeFromLaunch(launch, convs, aliveIds, fallback, hasTranscript) {
-  if (!launch) return fallback;
-  // `total` n'est plus lu depuis 2026-08-15 (le texte compte le reste à faire,
-  // pas une progression) — le champ reste posé par launchBatch, personne ne le
-  // déstructure plus ici.
-  const { trackedSessionIds, staticSuffix, groupId } = launch;
-  // Aucun membre rattaché à suivre (tout non identifié dès le départ, ou lot
-  // 100% en repli presse-papier) : rien à recalculer, le texte d'origine reste
-  // affiché tel quel — dégradation silencieuse, pas de régression.
-  if (!trackedSessionIds.length) return fallback;
-
-  // `sessionId` (snapshot de state.js) OU `id` (conversationsState, ce que
-  // reçoit réellement buildPanelState) : indexer sur le seul `sessionId`
-  // fabriquait une Map à clé `undefined` — la vue ne comptait donc jamais, et
-  // seul le transcript du lot 9 sauvait le calcul.
-  const byId = new Map((convs || []).map((c) => [c.sessionId || c.id, c]));
-  // `aliveIds` accepte un Set (appel historique, bancs) ou un prédicat — les
-  // sources partagées de memberSources() exposent une fonction.
-  const isLive = aliveIds && typeof aliveIds.has === 'function'
-    ? (id) => aliveIds.has(id)
-    : (typeof aliveIds === 'function' ? aliveIds : () => false);
-  const sources = {
-    isLive,
-    hasTranscript: typeof hasTranscript === 'function' ? hasTranscript : () => false,
-    getConv: (id) => byId.get(id),
-  };
-
-  // Classement par la table de vérité (lot 10), plus par une chaîne de `if`
-  // locale : « en attente d'Entrée » = statut `inserted`, « lien perdu sans
-  // rien envoyer » = `unsent-lost`, tout le reste a envoyé (et n'est plus
-  // compté depuis 2026-08-15, cf. le segment « pas encore envoyée » ci-dessous).
-  // Les trois autres consommateurs répondent exactement pareil.
-  let pending = 0, lost = 0;
-  for (const id of trackedSessionIds) {
-    const t = memberTruth({ sessionId: id, launchedAt: 1 }, sources);
-    if (t.status === 'inserted') pending++;
-    else if (t.status === 'unsent-lost') lost++;
-  }
-
-  // Invariant (étape 14, cf. commentaire de shouldPurgeBatchLaunch juste
-  // au-dessus pour la cartographie complète) : chaque segment du notice
-  // n'est écrit que si l'action qu'il prescrit est encore possible. Deux
-  // segments indépendants, jamais une chaîne de `if` qui statue sur le
-  // message ENTIER à la place d'une seule phrase à la fois.
-  const segments = [];
-  // « press Enter » : exige un membre PROUVÉ `inserted` (live && !sent). Un
-  // `unsent-lost` n'en fait plus partie par définition (son process est
-  // mort) — pending === 0 signifie qu'aucun onglet n'est plus prouvé ouvert,
-  // donc plus aucune raison d'écrire cette phrase.
-  //
-  // Ce que la phrase COMPTE (2026-08-15, demande user) : le RESTE À FAIRE,
-  // jamais une progression « sent/total ». Un « 0/1 » posait une devinette là
-  // où il n'y a qu'une action — et son total, figé au lancement de la vague 1,
-  // devenait faux dès qu'une vague suivante ouvrait ses propres onglets
-  // (cf. mergeLaunchedWaveMembers). `pending` est le seul nombre que le
-  // panneau puisse prouver à l'instant : des onglets vivants qui n'ont rien
-  // envoyé. Singulier/pluriel séparés, comme le segment « lien perdu ».
-  if (pending > 0) {
-    segments.push(pending > 1
-      ? vscode.l10n.t('{0} conversations not sent yet — press Enter in their tabs.', pending)
-      : vscode.l10n.t('{0} conversation not sent yet — press Enter in its tab.', pending));
-  }
-  // « lien perdu » : exige au moins un `unsent-lost` ET un groupe pour porter
-  // son remède — relaunchChip/linkChip (panel.js) et le ré-appariement
-  // automatique (attachPendingMembers, groupStore.pending()/pendingForRelink)
-  // sont tous les trois des mécanismes DE GROUPE. Un lot ungrouped
-  // (`groupId === null`, tâche unique) n'a rien de tout ça : mentionner
-  // « Relancer » y promettrait un bouton qui n'existe nulle part.
-  if (lost > 0 && groupId) {
-    segments.push(lost > 1
-      ? vscode.l10n.t('{0} tasks lost their link before sending — use “Relaunch”.', lost)
-      : vscode.l10n.t('{0} task lost its link before sending — use “Relaunch”.', lost));
-  }
-  // Rien d'actionnable du tout (ex. lot ungrouped entièrement unsent-lost) :
-  // aucun segment, aucun texte — le notice s'efface au lieu de prescrire dans
-  // le vide, exactement le symptôme constaté (onglets qui n'existent plus).
-  if (!segments.length) return null;
-  // `staticSuffix` ne décrit que ce qui accompagne « press Enter » (non
-  // identifiés, arrêt en cours de lot, cf. buildBatchStaticSuffix) — il ne
-  // s'accroche donc qu'à ce segment, comme avant ce lot.
-  return segments.join(' ') + (pending > 0 ? staticSuffix : '');
-}
-
-// Un lot à plusieurs vagues OUVRE des conversations longtemps après son
-// « Create » : `trackedSessionIds` est figé sur la vague 1 (launchBatch), et
-// launchWaveForGroup rattache les vagues suivantes au GROUPE sans jamais les y
-// ajouter. Le bandeau décrivait donc une vague révolue pendant qu'un onglet
-// fraîchement ouvert attendait son Entrée — constat user 2026-08-15 : « une
-// nouvelle conv "non envoyé" apparaît, mais le label ne se met pas à jour ».
-//
-// Même classe d'erreur que les cinq déjà documentées en tête de
-// shouldPurgeBatchLaunch : un état posé une fois, jamais réconcilié avec le
-// monde qui bouge dessous. La parade est de ne plus jamais faire confiance à
-// la liste de naissance : les membres LANCÉS du groupe (`launchedAt != null`,
-// posé par markLaunched avant même l'ouverture) sont la seule source qui suive
-// le lot dans le temps. On les UNIT à la liste d'origine plutôt que de la
-// remplacer — un lot sans groupe (tâche unique) n'a que celle-là.
-//
-// Pure et injectée (jamais `groupStore` lu ici) : testable sans VS Code.
-function mergeLaunchedWaveMembers(launch, members) {
-  if (!launch) return launch;
-  const ids = new Set(launch.trackedSessionIds || []);
-  const before = ids.size;
-  for (const m of members || []) {
-    if (m && m.sessionId && m.launchedAt != null) ids.add(m.sessionId);
-  }
-  // Même jeu d'identifiants → on rend l'objet d'origine (pas de copie inutile
-  // à chaque push, et l'identité de `batchLastLaunch` reste comparable).
-  if (ids.size === before) return launch;
-  return { ...launch, trackedSessionIds: [...ids] };
-}
-
-// `sources` = celles du recompute en cours (buildPanelState) quand il y en a —
-// sinon on en fabrique : ce chemin sert aussi juste après un « Create », hors
-// de tout push.
-function composeBatchNotice(convs, sources) {
-  const s = sources || memberSources();
-  const g = batchLastLaunch && batchLastLaunch.groupId && groupStore
-    ? groupStore.get(batchLastLaunch.groupId)
-    : null;
-  return computeBatchNoticeFromLaunch(
-    mergeLaunchedWaveMembers(batchLastLaunch, g && g.members),
-    convs,
-    (id) => s.isLive(id),
-    batchStatus.notice,
-    (id) => s.hasTranscript(id)
-  );
+// Limite cosmétique du menu officiel (README « Known limitations ») : son
+// sélecteur d'effort se cale sur le modèle par défaut PERSISTÉ tant que le
+// premier tour n'a pas tourné. Posé en TOOLTIP du compteur d'ouverture,
+// jamais en texte visible.
+function BATCH_MENU_HINT() {
+  return vscode.l10n.t('The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.');
 }
 
 // ── Moteur de vagues (lot 4), statuts résolus par la table de vérité (lot 10) ─
@@ -2433,7 +2221,12 @@ function maybeAdvanceWaves() {
   for (const g of groupStore.all()) {
     // Membres redirigés (husk→successeur) : une vague ne se déclare pas
     // « terminée » sur un husk mort alors que la conv a repris et travaille.
-    const truths = g.members.map((m) => memberTruth(redirectMember(m, superseded), sources));
+    // memberTruths lit le store d'abord (lot D) : une vague dont la preuve de
+    // fin a été observée une fois reste finie même si l'user a fermé ses
+    // onglets depuis — et ne peut pas repartir deux fois pour autant :
+    // launchWaveForGroup ne prend que les membres `launchedAt == null`, et
+    // markLaunched les verrouille avant toute attente.
+    const truths = memberTruths(g, sources, superseded);
     const members = g.members.map((m, i) => ({ wave: m.wave, status: truths[i].waveStatus }));
     // ── La garde qui manquait (2026-08-26) ────────────────────────────────
     // L'enchaînement automatique ouvrait des onglets que l'user venait de
@@ -2680,7 +2473,7 @@ function relaunchMemberTruth(id, key) {
   if (!m) return null;
   const convs = stateEngine ? stateEngine.getSnapshot().conversations : [];
   const byId = new Map(convs.map((c) => [c.sessionId, c]));
-  return memberTruth(redirectMember(m, currentSuperseded()), memberSources((sid) => byId.get(sid)));
+  return memberTruths(g, memberSources((sid) => byId.get(sid)), currentSuperseded())[g.members.indexOf(m)];
 }
 
 async function relaunchMember(id, key) {
@@ -3219,7 +3012,5 @@ function fetchUsageViaOAuth(token) {
 function hhmm(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
 
 module.exports = {
-  activate, deactivate, computeBatchNoticeFromLaunch, computeLastChoiceFromTasks,
-  buildBatchStaticSuffix, shouldPurgeBatchLaunch, shouldCreateGroup,
-  mergeLaunchedWaveMembers, findChainTarget,
+  activate, deactivate, computeLastChoiceFromTasks, shouldCreateGroup, findChainTarget,
 };

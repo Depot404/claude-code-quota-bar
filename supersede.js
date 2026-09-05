@@ -72,7 +72,10 @@ const { looksLikeSamePrompt, identifiesConversation } = require('./attach');
 // Mêmes sources que state.js MATCHABLE_TITLE_SOURCES : un titre qui PEUT porter
 // un libellé d'onglet, donc dont l'égalité entre deux convs est une identité
 // fiable. Le repli (`first-message`, `last-prompt`…) en est exclu.
-const RELIABLE_TITLE_SOURCES = new Set(['ai-title', 'tab-store']);
+// `tab-store` en faisait partie jusqu'en 2.114.0 : plus aucune conversation ne
+// peut porter cette source depuis le retrait du store d'onglets VS Code
+// (mesuré mort) — le paragraphe ci-dessous en garde la leçon générale.
+const RELIABLE_TITLE_SOURCES = new Set(['ai-title']);
 
 // Un groupe de ≥ 2 convs candidates à la supplantation → { husk: succ, ... }
 // pour ce groupe, vide si aucune ne prouve la continuité (successeur ni vivant
@@ -148,6 +151,9 @@ function resolveGroup(group, out) {
       // husk n'en revendiquait aucun). Conséquences constatées : la vieille
       // conversation amputée de la liste, et son lot réduit à une poignée seule
       // (sa ligne rendue par le lot voisin, cf. panel.js `rowOwner`).
+      // Ce store est retiré depuis 2.114.0, mais le VETO reste : un titre
+      // d'IA identique sur deux conversations distinctes suffit à reproduire
+      // le fold, et c'est le premier message qui les sépare.
       // Dégradation silencieuse conservée : un seul des deux `firstUser`
       // manquant (transcript illisible, appelant qui ne les fournit pas) ⇒ aucun
       // veto, comportement d'avant à l'octet près.

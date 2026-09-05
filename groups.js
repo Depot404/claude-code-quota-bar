@@ -50,6 +50,15 @@
 //     (la tête bascule vers lui) — jugé sur `createdAt`, le geste serait muet.
 // Seule interdiction : elle ne peut pas être en même temps membre du MÊME
 // groupe (ce serait la même conversation à deux places dans la même section).
+//
+// PREUVE DE FIN D'UN MEMBRE (lot D, 2026-09-05) — `doneProven` : posé à `true`
+// par `markDoneProven` quand member-truth.js a OBSERVÉ un `done` écrit par une
+// source (extension.js l'appelle à cet instant). Il survit à la fermeture de
+// l'onglet, au reload, à la purge des hooks — c'est tout son objet : « 0/3
+// done » sous trois ✓ venait de ce que la preuve partait avec l'onglet. Il ne
+// retombe à `false` que quand le LIEN change (`relink` : attach, detach, rearm,
+// dropMisattachedIntents) — une preuve appartient à une conversation, pas à
+// une clé de membre.
 // ============================================================================
 
 // Teintes stables dérivées du nom : la même liste de convs regroupée sous le
@@ -102,7 +111,15 @@ function memberOfTask(task, key, at) {
     wave,
     sessionId: (task && task.sessionId) || null,
     launchedAt: wave === 1 ? at : null,
+    doneProven: false,
   };
+}
+
+// Tout changement de LIEN passe ici : la preuve de fin (cf. en-tête) décrit la
+// conversation qu'on quitte, jamais celle qu'on rejoint.
+function relink(m, sessionId) {
+  m.sessionId = sessionId;
+  m.doneProven = false;
 }
 
 // Nettoyage défensif de ce qui sort du stockage : workspaceState garde du JSON
@@ -127,6 +144,9 @@ function sanitizeGroup(g) {
       wave: Number.isFinite(m.wave) && m.wave >= 1 ? Math.floor(m.wave) : 1,
       sessionId: typeof m.sessionId === 'string' && m.sessionId ? m.sessionId : null,
       launchedAt: Number.isFinite(m.launchedAt) ? m.launchedAt : null,
+      // Absent d'un stockage antérieur au lot D : `false`, la preuve se
+      // réobserve au prochain rendu si la source parle encore. Zéro migration.
+      doneProven: m.doneProven === true,
     }));
   // Numérotation contiguë dès la LECTURE, pas seulement au prochain clic
   // (2026-08-22) : un stockage écrit avant ce lot peut porter un trou — une
@@ -235,7 +255,7 @@ function createGroupStore(deps = {}) {
     if (!m || m.sessionId === sessionId) return false;
     if (g.masterSessionId === sessionId) return false;
     if (attachedIds().has(sessionId)) return false;
-    m.sessionId = sessionId;
+    relink(m, sessionId);
     persist();
     return true;
   }
@@ -355,8 +375,22 @@ function createGroupStore(deps = {}) {
       if (!g) return false;
       const m = g.members.find((x) => x.key === key);
       if (!m || m.launchedAt == null) return false;
-      m.sessionId = null;
+      relink(m, null);
       m.launchedAt = Number.isFinite(at) ? at : now();
+      persist();
+      return true;
+    },
+
+    // Preuve de fin OBSERVÉE (cf. en-tête) : écrite une fois, relue par
+    // member-truth.js avant toute source vivante. Rend false quand rien ne
+    // change (déjà prouvé, membre non lié) — l'appelant n'a alors rien à
+    // re-pousser.
+    markDoneProven(id, key) {
+      const g = find(id);
+      if (!g) return false;
+      const m = g.members.find((x) => x.key === key);
+      if (!m || !m.sessionId || m.doneProven) return false;
+      m.doneProven = true;
       persist();
       return true;
     },
@@ -540,6 +574,7 @@ function createGroupStore(deps = {}) {
         // moteur de vagues) — `null` la ferait compter comme `queued` et
         // fausserait launchedWave/moveQueuedMember (lot 4).
         launchedAt: now(),
+        doneProven: false,
       });
       persist();
       return true;
@@ -657,7 +692,7 @@ function createGroupStore(deps = {}) {
       if (!g) return false;
       const m = g.members.find((x) => x.key === key);
       if (!m || !m.sessionId) return false;
-      m.sessionId = null;
+      relink(m, null);
       persist();
       return true;
     },
@@ -741,7 +776,7 @@ function createGroupStore(deps = {}) {
           try { started = startedAtOf(m.sessionId); } catch { started = null; }
           if (!Number.isFinite(started) || started <= 0) continue;
           if (started >= at - waitMs) continue;
-          m.sessionId = null;
+          relink(m, null);
           n++;
         }
       }

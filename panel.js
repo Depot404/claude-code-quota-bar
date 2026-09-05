@@ -10,10 +10,7 @@ const vscode = require('vscode');
 //   {
 //     conversations: [{
 //       id: string,           // session_id, clé de rendu
-//       title: string,        // nom de l'ONGLET si connu (state.vscdb), sinon
-//                             // entrée `ai-title` du JSONL, sinon 1er prompt
-//       tabTitle: string|null,// libellé brut du store d'onglets — jamais rendu,
-//                             // renvoyé tel quel au clic (matching de focus)
+//       title: string,        // entrée `ai-title` du JSONL, sinon 1er prompt
 //       model: string|null,   // « Opus 4.8 », ou l'id brut si non reconnu
 //       effort: string|null,  // effort RÉEL du dernier tour (transcript)
 //       asked: { model, effort } | null,   // ce qu'on avait demandé au lancement
@@ -1446,7 +1443,7 @@ function renderHtml(webview) {
      16px+1fr déjà stylée plus bas) plutôt que d'inventer une mise en page —
      seuls titre + tooltip (hint member-truth) sont montrés, jamais de nœud
      manquant. */
-  .grp-master-fallback.conv { cursor: pointer; }
+  .grp-fallback.conv { cursor: pointer; }
   /* Corps du groupe : ALIGNÉ sur la colonne des conversations plates, aucune
      indentation propre (décision 2) — l'ancien filet (border-left + margin-
      left + padding-left) disparaît, remplacé par le rail P1 ci-dessous.
@@ -2226,6 +2223,23 @@ function renderHtml(webview) {
   // garde donc les nœuds vivants et on ne touche que ce qui change (mêmes
   // garde-fous : aucune donnée non fiable hors textContent).
   const rows = new Map();   // id → nœuds réutilisés d'un rendu à l'autre
+  // Refus d'ambiguïté VISIBLE (lot D, 2026-09-05). Mesuré au banc réel : le clic
+  // sur l'une de deux sœurs homonymes est refusé à raison (focus.js, verdict
+  // ambiguous-here), mais rien ne le montrait — le badge ≈ n'est allumé que
+  // sur une ambiguïté MESURÉE par state.js, absente à l'instant du clic. Le
+  // message focusRefused de l'extension allume le badge de la ligne cliquée ;
+  // updateRow le garde jusqu'au premier état poussé sans ambiguïté, 5 s minimum.
+  // Aucun élément nouveau : même badge, même infobulle. (Pas de backtick dans
+  // ce commentaire : on est DANS le template literal du webview.)
+  const FOCUS_REFUSED_MIN_MS = 5000;
+  const focusRefusedAt = new Map();   // convId → instant du refus
+  function onFocusRefused(msg) {
+    const id = msg && msg.id;
+    if (!id) return;
+    focusRefusedAt.set(id, Date.now());
+    const row = rows.get(id);
+    if (row) row.amb.classList.add('show');
+  }
 
   // Seuils de coloration de la barre de contexte (settings ctxRedMin/
   // ctxYellowMin, défauts alignés sur package.json) — sur le POURCENTAGE de la
@@ -2384,7 +2398,7 @@ function renderHtml(webview) {
     // Ambiguïté d'appariement (lot 3, plan d'appariement) : signe discret
     // entre le titre et le coût, jamais une ligne de plus — cf. CSS .amb.
     const amb = el('span', 'amb', '≈');
-    amb.title = t('Same truncated tab title as another conversation — renaming or closing one would settle it');
+    amb.title = t('Two open tabs carry this name — click the tab itself, or wait a few seconds.');
     const cost = el('span', 'cost');
     // Marque « à relire » POSÉE (lot 2) : délibérément DANS le flux, devant
     // le titre — décalage assumé (décision 2), jamais réservé sur une ligne
@@ -2464,12 +2478,14 @@ function renderHtml(webview) {
         toggleExplicitMaster(row.data.id, row.data.title);
         return;
       }
-      // tabTitle : titre RÉEL de l'onglet quand il diverge de celui du
-      // transcript — sans lui, focus.js ne retrouve pas un onglet renommé.
+      // L'IDENTITÉ (id) est ce qui compte : le titre n'est plus qu'un repli
+      // pour une fenêtre voisine (relais). Le libellé du store d'onglets
+      // (tabTitle) voyageait ici jusqu'en 2.114.0 — store mort, retiré ;
+      // le dernier prompt, lui, est relu côté extension par identité.
       // isTrusted (2026-08-27, lot A surlignage) : distingue un vrai clic
       // humain d'un événement synthétique (dispatchEvent) — le journal doit
       // pouvoir le dire, cf. extension.js focus-click.
-      vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, tabTitle: row.data.tabTitle || null, isTrusted: !!(ev && ev.isTrusted) });
+      vscode.postMessage({ type: 'focusConv', id: row.data.id, title: row.data.title, isTrusted: !!(ev && ev.isTrusted) });
     });
     wireMasterPickHover(root, function () { return row.data; });
     linkMaster.addEventListener('click', function (e) {
@@ -2533,8 +2549,12 @@ function renderHtml(webview) {
     // Ambiguïté d'appariement onglet (lot 3) : signe discret, jamais de
     // surlignage sur cette ligne (state.js s'en charge déjà, il ne rend rien
     // ici) — juste rendre visible ce qui expliquerait « je clique et ça ne
-    // change pas ».
-    row.amb.classList.toggle('show', !!c.tabAmbiguous);
+    // change pas ». Le refus d'un CLIC (focusRefused, lot D) allume le même
+    // signe : il tient jusqu'au premier état poussé où l'ambiguïté n'est plus
+    // mesurée, 5 s au minimum — le temps de lire l'infobulle.
+    const refusedAt = focusRefusedAt.get(c.id);
+    if (refusedAt != null && !c.tabAmbiguous && Date.now() - refusedAt >= FOCUS_REFUSED_MIN_MS) focusRefusedAt.delete(c.id);
+    row.amb.classList.toggle('show', !!c.tabAmbiguous || focusRefusedAt.has(c.id));
     // Modèle ET effort RÉELS, lus du transcript (décision 6 du plan). L'effort
     // manque sur les conversations qui n'en portent pas : on n'écrit alors rien
     // de plus, jamais une valeur supposée.
@@ -2959,7 +2979,7 @@ function renderHtml(webview) {
   // Ruban de désignation/retrait de la maîtresse (2026-09-02) — même mécanique
   // que le ruban d'insertion dans un lot (showInsZone/showInsTag, ci-dessus) :
   // UN SEUL cadre affiché à la fois, jamais un second vocabulaire de survol.
-  // Posé sur toute ligne HORS LOT (createRow, createMasterFallback) : getConv
+  // Posé sur toute ligne HORS LOT (createRow, createFallbackRow) : getConv
   // est lu à l'INSTANT du survol, jamais figé à l'attache — la ligne peut
   // changer de conversation d'un rendu à l'autre (rows réutilisées).
   function wireMasterPickHover(root, getConv) {
@@ -3675,29 +3695,33 @@ function renderHtml(webview) {
     }).observe(document.body);
   }
 
-  // Point d'état du fallback dégradé de la master (hors de la fenêtre du
+  // Point d'état d'une ligne DÉGRADÉE (conversation hors de la fenêtre du
   // panneau — ni transcript ni onglet suivis) : memberTruth() renvoie le même
   // vocabulaire de statuts qu'un membre lié (busy/waiting/done/done-closed/
   // stale/unsent-lost/interrupted/idle…), mappé sur les MÊMES formes que la
-  // liste plate (icoClass). Quand la master EST listée, c'est rowFor() qui
-  // rend son icône réelle — ces deux fonctions ne servent plus qu'au repli.
-  function masterIcoClass(status) {
+  // liste plate (icoClass). Quand la conv EST listée, c'est rowFor() qui rend
+  // son icône réelle — ces deux fonctions ne servent qu'au repli : la tête de
+  // lot hors vue, et depuis le lot D (2026-09-05) le membre fini dont l'onglet
+  // est fermé.
+  function fallbackIcoClass(status) {
     if (status === 'busy' || status === 'inserted') return 'ico ico-busy';
     if (status === 'waiting') return 'ico ico-waiting';
     if (status === 'interrupted') return 'ico ico-interrupted';
     if (status === 'done' || status === 'done-closed' || status === 'idle') return 'ico ico-done read';
     return 'ico ico-stale'; // stale, unsent-lost, not-linked, queued, inconnu
   }
-  function masterIcoText(status) {
+  function fallbackIcoText(status) {
     return (status === 'done' || status === 'done-closed' || status === 'idle') ? '✓' : '';
   }
 
-  // Ligne dégradée d'une master DÉSIGNÉE mais absente de la vue (titre
-  // persisté, aucun transcript/onglet suivi) — réutilise le gabarit .conv
-  // (grille icône+corps déjà stylée) plutôt que la fabrique rowFor(), qui
+  // Ligne dégradée d'une conversation absente de la vue — réutilise le gabarit
+  // .conv (grille icône+corps déjà stylée) plutôt que la fabrique rowFor(), qui
   // exige un objet conversation complet (ctx, mismatch…) qu'on n'a pas ici.
-  function createMasterFallback() {
-    const root = el('div', 'conv grp-master-fallback');
+  // Deux usages, UN gabarit (lot D) : la master DÉSIGNÉE hors vue (titre
+  // persisté), et le membre TERMINÉ dont l'onglet est fermé (son prompt, barré,
+  // ✓ atténué — la famille visuelle de la ligne fermée de la liste plate).
+  function createFallbackRow() {
+    const root = el('div', 'conv grp-fallback');
     const ico = el('span', 'ico');
     const title = el('div', 'title');
     root.appendChild(ico);
@@ -3708,7 +3732,7 @@ function renderHtml(webview) {
       // Même geste que createRow() (2026-09-02) : cette ligne dégradée reste
       // hors de .grp-body, donc désignable au même titre qu'une ligne plate.
       if (composingMasterPick()) { toggleExplicitMaster(node.data.id, node.data.title); return; }
-      vscode.postMessage({ type: 'focusConv', id: node.data.id, title: node.data.title, tabTitle: node.data.tabTitle || null, isTrusted: !!(ev && ev.isTrusted) });
+      vscode.postMessage({ type: 'focusConv', id: node.data.id, title: node.data.title, isTrusted: !!(ev && ev.isTrusted) });
     });
     wireMasterPickHover(root, function () { return node.data; });
     return node;
@@ -3791,7 +3815,7 @@ function renderHtml(webview) {
     // placé dans .grp-body SEULEMENT quand g.master est désigné (renderGroups)
     // — premier enfant de flux, avant les vagues/membres, pour que son anneau
     // d'état soit le premier nœud du rail. slot = rowFor(conv réelle) si
-    // listée, sinon createMasterFallback() (paresseux, ci-dessous).
+    // listée, sinon createFallbackRow() (paresseux, ci-dessous).
     const masterHead = el('div', 'grp-master-head');
     const masterSlot = el('div', 'grp-master-slot');
     // ⤴ = RETRAIT de la ligne maîtresse — exactement le glyphe, le gabarit et
@@ -3830,7 +3854,7 @@ function renderHtml(webview) {
     const node = {
       root, head, chev, label, count, tg, body, members: new Map(), id: g.id,
       mas, kill, waveHeaders: new Map(), waveCtrl: el('div', 'wave-ctrl'),
-      rail, masterConvId: null, masterTitle: null, masterTabTitle: null, ghostRow,
+      rail, masterConvId: null, masterTitle: null, ghostRow,
       masterHead, masterSlot, masterOut, masterFallback: null, solo: false,
     };
     head.addEventListener('click', function (e) {
@@ -4381,7 +4405,6 @@ function renderHtml(webview) {
         const ms = g.master;
         node.masterConvId = ms.convId || null;
         node.masterTitle = ms.title || t('Master conversation');
-        node.masterTabTitle = ms.tabTitle || null;
         place(node.body, 0, node.masterHead);
         // …et jamais la conv qu'un MEMBRE encore rendu tient déjà (même
         // invariant que rowOwner ci-dessus) : la tête retombe alors sur son
@@ -4396,13 +4419,13 @@ function renderHtml(webview) {
           place(node.masterSlot, 0, rowFor(conv).root);
           while (node.masterSlot.children.length > 1) node.masterSlot.lastChild.remove();
         } else {
-          if (!node.masterFallback) node.masterFallback = createMasterFallback();
+          if (!node.masterFallback) node.masterFallback = createFallbackRow();
           const fb = node.masterFallback;
           place(node.masterSlot, 0, fb.root);
           while (node.masterSlot.children.length > 1) node.masterSlot.lastChild.remove();
-          fb.data = { id: node.masterConvId, title: node.masterTitle, tabTitle: node.masterTabTitle };
-          setClass(fb.ico, masterIcoClass(ms.status));
-          setText(fb.ico, masterIcoText(ms.status));
+          fb.data = { id: node.masterConvId, title: node.masterTitle };
+          setClass(fb.ico, fallbackIcoClass(ms.status));
+          setText(fb.ico, fallbackIcoText(ms.status));
           setText(fb.title, node.masterTitle);
           fb.title.classList.toggle('closed', ms.status === 'done-closed');
           fb.root.title = node.masterTitle + (ms.hint ? ' — ' + ms.hint : '');
@@ -4415,7 +4438,6 @@ function renderHtml(webview) {
       } else {
         node.masterConvId = null;
         node.masterTitle = null;
-        node.masterTabTitle = null;
         if (node.masterHead.parentElement) node.masterHead.remove();
       }
 
@@ -4830,18 +4852,13 @@ function renderHtml(webview) {
   // bouton ne connaît qu'UNE vague cible, il ne peut pas honorer la topologie
   // du bloc (pas de télescopage silencieux). Un prompt SIMPLE (une seule
   // tâche active, quelle que soit son origine) garde le comportement d'avant.
-  // Ce que le bloc collé porte et que le groupe CIBLE ne reprend pas. Dit
-  // après coup, en une bannière d'info — plus dans une confirmation à valider :
-  // c'est un constat, pas une décision (et ça n'arrive que sur un bloc nommé).
-  function ignoredBlockFields() {
-    const bits = [];
-    if (form.group) bits.push(t('The block’s group name “{0}” is ignored — this group keeps its own.', form.group));
-    // Rien à dire de la maîtresse ici (2026-09-02, §9a) : ce dépôt EST
-    // désormais le chemin normal d'un bloc « sœur » qui en porte une — sa
-    // provenance n'est pas perdue, elle devient l'appartenance même au lot
-    // (aucun champ « produit par » n'a de consommateur, décision explicite).
-    return bits.join('\\n');
-  }
+  // Plus AUCUNE bannière sur ce dépôt (2026-09-04, demande user). Celle qui
+  // annonçait « le nom du bloc est ignoré » était un constat sans geste
+  // associé, tronqué à l'affichage donc illisible, et il coûtait une ligne du
+  // panneau à chaque transfert. Qui porte l'information à sa place : la grip
+  // du lot, qui affiche le nom RÉELLEMENT retenu — celui du groupe cible.
+  // (Rien à dire de la maîtresse ici non plus, 2026-09-02 §9a : ce dépôt EST
+  // le chemin normal d'un bloc « sœur » qui en porte une.)
   function resolveForTransfer(tasks) {
     return tasks.map(function (tk) {
       return { prompt: tk.prompt, model: effectiveModel(tk), effort: effectiveEffort(tk), wave: tk.wave };
@@ -4855,13 +4872,12 @@ function renderHtml(webview) {
   // parce que c'est lui qui vient de MONTRER le résultat — le store n'a rien
   // à redeviner.
   function postTasksToGroup(gid, wave, mode, tasks, keepSelectors) {
-    const note = ignoredBlockFields();
     vscode.postMessage({ type: 'addTasksToGroup', id: gid, wave: wave, mode: mode || 'into', tasks: tasks });
     if (keepSelectors && form.tasks[0]) {
       form.tasks[0].prompt = '';
       form.errorBanner = null;
     } else {
-      form = { group: '', tasks: [blankTask(1)], banner: note || null };
+      form = { group: '', tasks: [blankTask(1)] };
     }
     renderForm();
   }
@@ -5140,7 +5156,6 @@ function renderHtml(webview) {
     const text = ta.value;
     const parsed = parseClaudeConvsBlock(text);
     form.errorBanner = null;
-    form.banner = null;
     // Un nouveau collage annule tout choix EXPLICITE du précédent (2026-09-02) :
     // même raison que le coup de masterSeq juste en dessous, un clic de
     // désignation ne doit pas survivre au texte qui l'a motivé.
@@ -5168,7 +5183,6 @@ function renderHtml(webview) {
       // Aucune banniere de SUCCES : les taches pre-remplies apparaissent juste
       // en dessous, la reconnaissance se voit donc toute seule. Seul l'echec a
       // besoin de mots (banniere d'erreur, plus bas).
-      form.banner = null;
     } else {
       form.masterPaste = null;
       form.masterSession = null;
@@ -5356,7 +5370,6 @@ function renderHtml(webview) {
     // l'autre bout du panneau par rapport au bouton cliqué ; ce qu'elle disait
     // est maintenant montré à l'endroit du geste (libellé + aperçu au survol).
     if (form.errorBanner) batchFormEl.appendChild(dismissibleBanner('banner', form.errorBanner, function () { form.errorBanner = null; renderForm(); }));
-    if (form.banner) batchFormEl.appendChild(dismissibleBanner('banner info', form.banner, function () { form.banner = null; renderForm(); }));
 
     const waves = [...new Set(form.tasks.map(function (t) { return t.wave; }))].sort(function (a, b) { return a - b; });
     waves.forEach(function (w) {
@@ -5666,6 +5679,7 @@ function renderHtml(webview) {
   window.addEventListener('message', function (event) {
     const msg = event.data;
     if (msg && msg.type === 'masterResolved') { onMasterResolved(msg); return; }
+    if (msg && msg.type === 'focusRefused') { onFocusRefused(msg); return; }
     if (!msg || msg.type !== 'state') return;
     // Preuve de vie du canal hôte→webview : tout état reçu remet l'horloge du
     // heartbeat à zéro et lève la dégradation (cf. checkFreshness).

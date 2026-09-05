@@ -82,7 +82,9 @@ t = memberTruth(linked, sources({ transcripts: ['s1'], hooks: { s1: 'done' } }))
 check('BUG 1 — lié + session morte + transcript + done → done·closed', t.status === 'done-closed', t.status);
 check('… Link… JAMAIS réaffiché (pas de rebranchement d\'une tâche finie)', t.canLink === false);
 check('… compte comme DONE pour la vague suivante', t.waveStatus === 'done', t.waveStatus);
-check('… note « ✓ done · closed »', t.note === '✓ done · closed', t.note);
+// Lot D (2026-09-05) : la ligne du membre RESTE dans le lot, avec son ✓ — la
+// note ne redit plus le glyphe, elle dit ce que la ligne ne montre pas.
+check('… note « tab closed »', t.note === 'tab closed', t.note);
 
 // | présent | morte | présent | pas done | stale (vrai stale) |
 t = memberTruth(linked, sources({ transcripts: ['s1'], hooks: { s1: 'busy' } }));
@@ -156,7 +158,7 @@ const deadDoneListed = sources({ transcripts: ['s1'], hooks: { s1: 'done' }, vie
 check('terminée+fermée : même statut qu\'on la liste ou non',
   memberTruth(linked, deadDone).status === memberTruth(linked, deadDoneListed).status);
 check('… seule la NOTE change (la ligne de conv la porte quand elle est visible)',
-  memberTruth(linked, deadDone).note === '✓ done · closed' && memberTruth(linked, deadDoneListed).note === '');
+  memberTruth(linked, deadDone).note === 'tab closed' && memberTruth(linked, deadDoneListed).note === '');
 
 // Une vague entière tout juste ouverte : rien n'est listé, tout est vivant.
 const fresh = sources({ live: ['s1', 's2', 's3'] });
@@ -283,6 +285,36 @@ t = memberTruth(linked, sources({ transcripts: ['s1'], hooks: { s1: 'busy' } }))
 check('une tâche qui tourne : jamais prouvée terminée', t.doneProven === false);
 t = memberTruth({ sessionId: null, launchedAt: null }, sources());
 check('un membre en file non plus', t.doneProven === false);
+
+console.log('\n6. Lot D (2026-09-05) — la preuve ÉCRITE dans le store prime sur les sources');
+// Le cas vu sur capture (« 0/3 done » sous trois ✓) : le membre a été prouvé
+// fini, puis l'user a fermé l'onglet (SessionEnd purge les hooks) et l'a
+// rouvert (CLI respawné, vivant, muet) — les sources ne disent plus `done`.
+// Le store, lui, s'en souvient : c'est lui que la table lit d'abord.
+const proven = { sessionId: 's1', launchedAt: 1000, doneProven: true };
+t = memberTruth(proven, sources({ live: ['s1'], transcripts: ['s1'], view: { s1: { state: 'idle', tabOpen: true } } }));
+check('rouvert, vivant, hooks muets (idle) + store prouvé → waveStatus done (le compteur suit les ✓)',
+  t.waveStatus === 'done', t.waveStatus);
+check('… doneProven vrai (la vague suivante peut partir sur cette preuve)', t.doneProven === true);
+check('… le statut d\'AFFICHAGE reste celui de l\'instant (idle : ✓ atténué de la ligne)', t.status === 'idle', t.status);
+t = memberTruth(proven, sources({ transcripts: ['s1'] }));
+check('onglet fermé, plus aucune source + store prouvé → done-closed, waveStatus done, PROUVÉ (plus une présomption)',
+  t.status === 'done-closed' && t.waveStatus === 'done' && t.doneProven === true, `${t.status}/${t.waveStatus}/${t.doneProven}`);
+check('… ligne conservée : note « tab closed »', t.note === 'tab closed', t.note);
+t = memberTruth(proven, sources({ live: ['s1'], transcripts: ['s1'], view: { s1: { state: 'busy' } } }));
+check('conversation reprise et busy + store prouvé → waveStatus reste done (ne repart que sur Relaunch)',
+  t.waveStatus === 'done' && t.doneProven === true, `${t.waveStatus}/${t.doneProven}`);
+check('… mais la ligne montre le vrai état (busy)', t.status === 'busy', t.status);
+t = memberTruth(proven, sources({ transcripts: ['s1'], hooks: { s1: 'busy' } }));
+check('process mort à mi-course + store prouvé → jamais stale pour le moteur (la vague ne se rebloque pas)',
+  t.waveStatus === 'done', t.waveStatus);
+// Le store ne fabrique rien : sans preuve écrite, comportement inchangé.
+t = memberTruth({ sessionId: 's1', launchedAt: 1000, doneProven: false }, sources({ live: ['s1'], transcripts: ['s1'], view: { s1: { state: 'idle', tabOpen: true } } }));
+check('témoin : même faits sans preuve écrite → launched, non prouvé (comme avant)',
+  t.waveStatus === 'launched' && t.doneProven === false, `${t.waveStatus}/${t.doneProven}`);
+t = memberTruth({ sessionId: null, launchedAt: 1000, doneProven: true }, sources());
+check('membre NON lié : une preuve orpheline (jamais écrite par le store, qui exige un lien) est ignorée',
+  t.status === 'not-linked' && t.waveStatus === 'launched' && t.doneProven === false, `${t.status}/${t.waveStatus}`);
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

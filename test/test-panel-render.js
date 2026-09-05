@@ -578,10 +578,10 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     hidden.groups[0] = {
       id: 'g1', name: 'Refonte paiements', hue: 210, collapsed: false,
       launchedWave: 2, nextWave: 3, waveNotice: null, done: false,
-      master: { convId: 'c-master', title: 'Cadrage du chantier', listed: false, tabTitle: null, hint: 'Running.', status: 'busy' },
+      master: { convId: 'c-master', title: 'Cadrage du chantier', listed: false, hint: 'Running.', status: 'busy' },
       members: [
-        { key: 'm1', prompt: 'Tâche 1 finie', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: null, status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '✓ done · closed', hint: '' },
-        { key: 'm2', prompt: 'Tâche 2 finie', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '✓ done · closed', hint: '' },
+        { key: 'm1', prompt: 'Tâche 1 finie', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'x-m1', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: 'tab closed', hint: 'Finished — its tab has been closed.' },
+        { key: 'm2', prompt: 'Tâche 2 finie', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'x-m2', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: 'tab closed', hint: 'Finished — its tab has been closed.' },
         { key: 'm3', prompt: 'Interrompue', wave: 2, asked: { model: null, effort: null }, convId: null, status: 'stale', waveStatus: 'stale', canLink: false, canClose: false, canRelaunch: false, note: 'interrupted — never finished', hint: '' },
         { key: 'm4', prompt: 'Lien mort-né', wave: 2, asked: { model: null, effort: null }, convId: null, status: 'unsent-lost', waveStatus: 'stale', canLink: true, canClose: false, canRelaunch: true, note: 'link lost before sending', hint: '' },
         { key: 'm5', prompt: 'Vague 3, pas encore lancée', wave: 3, asked: { model: null, effort: null }, convId: null, status: 'queued', waveStatus: 'queued', canLink: false, canClose: false, canRelaunch: false, note: '', hint: 'Queued — opens when this wave starts.' },
@@ -606,6 +606,29 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('des membres restent à faire : le lot est toujours rendu',
       await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 1);
 
+    // Le cas de la capture E-before.png (banc réel n°2) : lot à 3 membres sur 2
+    // vagues, « fermer tout » puis rouvrir UN seul onglet (m1 relisté, done).
+    // Les deux autres n'ont plus de ligne (2.116.0 : le filtre done-closed est
+    // rétabli) — mais le compteur, lui, reste juste : il compte waveStatus sur
+    // le store COMPLET, jamais sur ce qui est rendu. Jamais « 0/3 done ».
+    const reopenedOne = JSON.parse(JSON.stringify(grouped));
+    reopenedOne.groups[0] = {
+      id: 'g1', name: 'Refonte paiements', hue: 210, collapsed: false,
+      launchedWave: 2, nextWave: null, waveNotice: null, done: false,
+      master: { convId: 'c-master', title: 'Cadrage du chantier', listed: false, hint: 'Finished.', status: 'done' },
+      members: [
+        { key: 'm1', prompt: 'Tâche 1 finie', wave: 1, asked: { model: 'haiku', effort: null }, convId: 'c2', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: 'Finished.' },
+        { key: 'm2', prompt: 'Tâche 2 finie', wave: 1, asked: { model: 'haiku', effort: null }, convId: 'x-m2', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: 'tab closed', hint: 'Finished — its tab has been closed.' },
+        { key: 'm3', prompt: 'Tâche 3 finie', wave: 2, asked: { model: 'haiku', effort: null }, convId: 'x-m3', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: 'tab closed', hint: 'Finished — its tab has been closed.' },
+      ],
+    };
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: reopenedOne })}, '*')`);
+    await sleep(150);
+    check('un seul onglet rouvert : une seule ligne, les deux fermées n\'en ont plus',
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp .member').length`) === 1);
+    check('… et le compteur dit 3/3 done (waveStatus sur le store complet, jamais 0/3)',
+      await cdp.evaluate(`document.querySelector('#flow .grp-count').textContent`) === '3/3 done');
+
     // Onglet rouvert (extension.js relisterait la conv sous un id réel,
     // member-truth.js recalcule alors `done`, tabOpen vrai) : le membre repasse
     // le filtre et redevient une ligne normale, sans rien à réconcilier.
@@ -629,21 +652,21 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     allDoneMasterOpen.groups[0].done = true;   // ce que group-done.js conclut
     allDoneMasterOpen.groups[0].members.forEach(function (m) {
       m.status = 'done-closed'; m.waveStatus = 'done';
-      m.canLink = false; m.canClose = false; m.canRelaunch = false; m.note = '✓ done · closed';
+      m.canLink = false; m.canClose = false; m.canRelaunch = false; m.note = 'tab closed';
     });
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: allDoneMasterOpen })}, '*')`);
     await sleep(150);
     check("tous les membres finis+fermés : le lot n'est plus rendu, maîtresse vivante ou non",
       await cdp.evaluate(`document.querySelectorAll('#flow .grp').length`) === 0);
     check('… et plus aucune capsule de maîtresse ne traîne',
-      await cdp.evaluate(`document.querySelectorAll('#flow .grp-master-fallback').length`) === 0);
+      await cdp.evaluate(`document.querySelectorAll('#flow .grp-fallback').length`) === 0);
 
     // La maîtresse LISTÉE d'un lot ainsi retiré redevient une ligne plate —
     // c'est tout l'objet du changement : elle perd son « tag » de lot sans que
     // rien n'ait été écrit dans le store ni fermé.
     const freedMaster = JSON.parse(JSON.stringify(allDoneMasterOpen));
     freedMaster.groups[0].master = {
-      convId: 'c3', title: 'Terminée déjà lue', listed: true, tabTitle: null,
+      convId: 'c3', title: 'Terminée déjà lue', listed: true,
       hint: 'Finished.', status: 'done',
     };
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: freedMaster })}, '*')`);
@@ -1015,7 +1038,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
 
     // Clic sur le bouton de retrait d'un membre done + onglet ouvert → UN SEUL
     // message removeMember (étape 15 : métadonnées seules, plus jamais de
-    // fermeture d'onglet — ni titre ni tabTitle à transporter).
+    // fermeture d'onglet — pas même un titre à transporter).
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`document.querySelectorAll('.member')[0].querySelector('.m-out').click()`);
     const afterMergedClick = await cdp.evaluate(`window.__sent`);
@@ -1036,7 +1059,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     linkedOutOfView.conversations = [];
     Object.assign(linkedOutOfView.groups[0].members[0], {
       status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false,
-      note: '✓ done · closed', hint: 'Finished — its tab has been closed.',
+      note: 'tab closed', hint: 'Finished — its tab has been closed.',
     });
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: linkedOutOfView })}, '*')`);
     await sleep(150);
@@ -1427,6 +1450,50 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… avec une infobulle qui explique la collision', ambInfo.c2Title.length > 0, JSON.stringify(ambInfo));
     check('aucune ligne ajoutée pour autant — même gabarit qu\'une ligne plate ordinaire',
       await cdp.evaluate(`document.querySelectorAll('#flow > .conv').length`) === STATE.conversations.length);
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(150);
+
+    // Refus d'ambiguïté VISIBLE (lot D, 2026-09-05). Au banc réel, le clic sur
+    // l'une de deux sœurs homonymes était refusé à raison, mais le badge ≈ des
+    // deux lignes était ÉTEINT (l'ambiguïté n'était pas mesurée par state.js à
+    // cet instant) : rien à l'écran n'expliquait le clic sans effet. Le message
+    // `focusRefused` de l'extension allume le badge de la ligne cliquée, avec
+    // la MÊME infobulle, et il tient jusqu'au premier état poussé sans
+    // ambiguïté, 5 s au minimum.
+    const ambSel = (i) => `getComputedStyle(document.querySelectorAll('#flow > .conv')[${i}].querySelector('.amb')).display`;
+    check('témoin : sans refus, badge éteint sur c2', await cdp.evaluate(ambSel(1)) === 'none');
+    await cdp.evaluate(`window.postMessage({ type: 'focusRefused', id: 'c2', labels: ['Doublon…', 'Doublon…'] }, '*')`);
+    await sleep(50);
+    const refusedInfo = await cdp.evaluate(`(() => {
+      const rows = document.querySelectorAll('#flow > .conv');
+      return { c2: getComputedStyle(rows[1].querySelector('.amb')).display, c1: getComputedStyle(rows[0].querySelector('.amb')).display,
+               tip: rows[1].querySelector('.amb').title, ambNodes: document.querySelectorAll('#flow .amb').length };
+    })()`);
+    check('focusRefused → le badge ≈ de la ligne cliquée s\'allume, et d\'elle seule',
+      refusedInfo.c2 !== 'none' && refusedInfo.c1 === 'none', JSON.stringify(refusedInfo));
+    check('… avec l\'infobulle EXISTANTE (aucun élément nouveau)',
+      refusedInfo.tip.indexOf('Two open tabs carry this name') === 0 && refusedInfo.ambNodes === STATE.conversations.length, JSON.stringify(refusedInfo));
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+    await sleep(150);
+    check('un état poussé aussitôt (ambiguïté non mesurée) ne l\'éteint PAS : 5 s minimum',
+      await cdp.evaluate(ambSel(1)) !== 'none');
+    await cdp.evaluate(`window.postMessage({ type: 'focusRefused', id: 'nope-unknown' }, '*')`);
+    await cdp.evaluate(`window.postMessage({ type: 'focusRefused' }, '*')`);
+    check('un refus sur une conv inconnue, ou sans id, est sans effet ni erreur',
+      await cdp.evaluate(`document.querySelectorAll('#flow .amb.show').length`) === 1);
+    if (!SLOW) {
+      console.log('       (extinction du badge après 5 s — SAUTÉE, attente réelle ; --slow pour la jouer)');
+    } else {
+      await sleep(5100);
+      await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
+      await sleep(150);
+      check('--slow : après 5 s, le premier état poussé sans ambiguïté éteint le badge', await cdp.evaluate(ambSel(1)) === 'none');
+    }
+    // Remise à zéro pour la suite : un état où c2 est mesurée ambiguë garde le
+    // badge (le refus n'a rien à y ajouter), puis l'état de référence.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: ambiguousState })}, '*')`);
+    await sleep(150);
+    check('ambiguïté MESURÉE + refus : le badge reste allumé (une seule surface, deux raisons)', await cdp.evaluate(ambSel(1)) !== 'none');
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: STATE })}, '*')`);
     await sleep(150);
 
@@ -2170,7 +2237,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       id: 'g3', name: 'Lot déjà avancé', hue: 40, collapsed: false,
       launchedWave: 2, nextWave: 3, waveNotice: null,
       members: [
-        { key: 'n1', prompt: 'Conv au travail', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'c1', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '✓ done · closed', hint: '' },
+        { key: 'n1', prompt: 'Conv au travail', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'c1', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
         { key: 'n2', prompt: 'Vague 2 en cours', wave: 2, asked: { model: 'sonnet', effort: 'medium' }, convId: null, status: 'not-linked', waveStatus: 'launched', canLink: true, canClose: false, canRelaunch: true, note: 'not linked yet', hint: '' },
       ],
     }];
@@ -2410,7 +2477,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       type: 'state',
       state: { batch: {
         envConflict: [], busy: false,
-        notice: '2 conversations not sent yet — press Enter in their tabs.',
+        notice: '2 tasks lost their link before sending — use “Relaunch”.',
         noticeHint: 'The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.',
         inherit: { model: null, effort: null },
       } },
@@ -2421,7 +2488,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       return { text: n.textContent, title: n.title, shown: n.classList.contains('show') };
     })()`);
     check('texte du notice = EXACTEMENT le compteur actionnable, aucun texte de groupe/maîtresse/vagues concaténé',
-      noticeShown.text === '2 conversations not sent yet — press Enter in their tabs.', JSON.stringify(noticeShown));
+      noticeShown.text === '2 tasks lost their link before sending — use “Relaunch”.', JSON.stringify(noticeShown));
     check('disclaimer menu officiel posé en tooltip (title), jamais dans le texte visible',
       noticeShown.title.indexOf('official menu') !== -1 && noticeShown.text.indexOf('official menu') === -1, JSON.stringify(noticeShown));
     check('notice visible (classe show)', noticeShown.shown === true);
@@ -2448,7 +2515,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // groupe : chevron, compteur, seg auto/man, et le ⌂-focus SEULEMENT sans
     // master désignée.
     const withMaster = JSON.parse(JSON.stringify(grouped));
-    withMaster.groups[0].master = { convId: 'c3', title: 'Cadrage du chantier', listed: true, tabTitle: null, hint: 'Finished.', status: 'done' };
+    withMaster.groups[0].master = { convId: 'c3', title: 'Cadrage du chantier', listed: true, hint: 'Finished.', status: 'done' };
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: withMaster })}, '*')`);
     await sleep(150);
     const cap = await cdp.evaluate(`(() => {
@@ -2521,11 +2588,11 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // + tooltip member-truth, jamais de nœud manquant.
     const masterGone = JSON.parse(JSON.stringify(withMaster));
     masterGone.conversations = masterGone.conversations.filter((c) => c.id !== 'c3');
-    masterGone.groups[0].master = { convId: 'c3', title: 'Cadrage du chantier', listed: false, tabTitle: null, hint: 'Finished — its tab has been closed.', status: 'done-closed' };
+    masterGone.groups[0].master = { convId: 'c3', title: 'Cadrage du chantier', listed: false, hint: 'Finished — its tab has been closed.', status: 'done-closed' };
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: masterGone })}, '*')`);
     await sleep(150);
     const gone = await cdp.evaluate(`(() => {
-      const fb = document.querySelector('#flow .grp-master-fallback');
+      const fb = document.querySelector('#flow .grp-fallback');
       return {
         present: !!fb,
         text: fb ? fb.querySelector('.title').textContent : null,
@@ -3220,7 +3287,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(200);
     const fb = await cdp.evaluate(`(() => {
       const r = (n) => { const b = n.getBoundingClientRect(); return { l: +b.left.toFixed(2), r: +b.right.toFixed(2), t: +b.top.toFixed(2), b: +b.bottom.toFixed(2) }; };
-      const row = document.querySelector('#flow .grp-master-fallback');
+      const row = document.querySelector('#flow .grp-fallback');
       const grip = document.querySelector('#flow .grp-head');
       const head = document.querySelector('#flow .grp-master-head');
       const member = document.querySelector('#flow .member .conv');
@@ -3574,7 +3641,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // du groupe, simplement pas un membre. Master = l'onglet le plus à droite,
     // aucun membre lié → le bloc tombe à ce rang, pas en tête.
     const masterLast = JSON.parse(JSON.stringify(flowGroup));
-    masterLast.master = { convId: 'f3', title: 'Onglet 3 plate', listed: true, tabTitle: null, hint: '', status: 'idle' };
+    masterLast.master = { convId: 'f3', title: 'Onglet 3 plate', listed: true, hint: '', status: 'idle' };
     masterLast.members[0].convId = null;
     masterLast.members[0].status = 'not-linked';
     masterLast.members[0].canLink = true;
@@ -3584,7 +3651,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       await cdp.evaluate(FLOW_ORDER + '.join(" | ")'));
 
     const masterFirst = JSON.parse(JSON.stringify(masterLast));
-    masterFirst.master = { convId: 'f1', title: 'Onglet 1 plate', listed: true, tabTitle: null, hint: '', status: 'idle' };
+    masterFirst.master = { convId: 'f1', title: 'Onglet 1 plate', listed: true, hint: '', status: 'idle' };
     check('… et le bloc repasse en tête dès que sa maîtresse est l\'onglet le plus à gauche',
       await flowOrderOf('tabOrder', [flowConvs[0], flowConvs[2]], [masterFirst])
         === 'GROUPE | Onglet 3 plate',
@@ -3642,14 +3709,14 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     const mkA = () => ({
       id: 'A', name: 'Parent batch', hue: 210, collapsed: false, stamp: '14:12',
       launchedWave: 1, nextWave: null, waveNotice: null, done: false, nestedUnder: null,
-      master: { convId: 'am', title: 'A master', listed: true, tabTitle: null, hint: '', status: 'idle' },
+      master: { convId: 'am', title: 'A master', listed: true, hint: '', status: 'idle' },
       members: [nmember('m1', 'A task one', 'a1'), nmember('m2', 'A task two — opens B', 'a2'), nmember('m3', 'A task three', null)],
     });
     const mkB = (nested) => ({
       id: 'B', name: 'Child batch', hue: 30, collapsed: false, stamp: '15:40',
       launchedWave: 1, nextWave: null, waveNotice: null, done: false,
       nestedUnder: nested ? { groupId: 'A', memberKey: 'm2' } : null,
-      master: { convId: 'a2', title: 'A task two — opens B', listed: true, tabTitle: null, hint: '', status: 'idle' },
+      master: { convId: 'a2', title: 'A task two — opens B', listed: true, hint: '', status: 'idle' },
       members: [nmember('n1', 'B task one', 'b1'), nmember('n2', 'B task two', 'b2', { status: 'done', waveStatus: 'done' }), nmember('n3', 'B task three', null)],
     });
     const nestState = (groups, convs) => ({
@@ -3685,7 +3752,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       a2InMember: !!Array.from(document.querySelectorAll('#flow .member .conv .title'))
         .find(t => t.textContent === 'A task two — opens B'),
       // …et la tête de B affiche son repli dégradé plutôt qu'une capsule vide.
-      bMasterFallback: !!document.querySelector('.grp-master-fallback'),
+      bMasterFallback: !!document.querySelector('.grp-fallback'),
     }))()`);
     check('(témoin, sans filiation) deux blocs frères, AUCUN emplacement vide : le membre garde sa ligne',
       nestBefore.rootBlocks === 2 && nestBefore.emptySlots === 0 && nestBefore.a2InMember === true,
@@ -4072,7 +4139,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       id: 'C', name: 'Grandchild batch', hue: 120, collapsed: false, stamp: '16:05',
       launchedWave: 1, nextWave: null, waveNotice: null, done: false,
       nestedUnder: { groupId: 'B', memberKey: 'n1' },
-      master: { convId: 'b1', title: 'B task one', listed: true, tabTitle: null, hint: '', status: 'busy' },
+      master: { convId: 'b1', title: 'B task one', listed: true, hint: '', status: 'busy' },
       members: [nmember('o1', 'C task one', 'c1')],
     };
     await pushNest([mkA(), mkB(true), groupC], cConvs);
@@ -4167,7 +4234,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       master,
       members: [nmember('m1', 'A task one', 'a1'), nmember('m2', 'A task two', 'a2')],
     });
-    const claimHead = { convId: 'am', title: 'A master', listed: true, tabTitle: null, hint: '', status: 'idle' };
+    const claimHead = { convId: 'am', title: 'A master', listed: true, hint: '', status: 'idle' };
     const mkClaimB = () => ({
       id: 'B', name: 'Batch of 14:34', hue: 30, collapsed: false, stamp: '14:34',
       launchedWave: 1, nextWave: null, waveNotice: null, done: false, nestedUnder: null,
@@ -4814,7 +4881,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       launchedWave: 1, nextWave: 2, waveNotice: null, done: false,
       members: [
         // done-closed : renderGroups le retire de sa vague (filtre existant).
-        { key: 'm1', prompt: 'Membre fini ferme marque', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'c1', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '✓ done · closed', hint: '' },
+        { key: 'm1', prompt: 'Membre fini ferme marque', wave: 1, asked: { model: 'opus', effort: 'high' }, convId: 'c1', status: 'done-closed', waveStatus: 'done', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
         { key: 'm2', prompt: 'Membre encore ouvert', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'c2', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
       ],
     }];

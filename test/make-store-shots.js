@@ -197,7 +197,7 @@ const GROUPS = [{
   launchedWave: 1,
   nextWave: 2,
   waveNotice: null,
-  master: { convId: 'm0', title: 'Plan the payment refactor', tabTitle: null, listed: true, status: 'done', hint: '' },
+  master: { convId: 'm0', title: 'Plan the payment refactor', listed: true, status: 'done', hint: '' },
   members: [
     { key: 'w1a', prompt: 'Extract the billing client into packages/billing', wave: 1, asked: { model: 'sonnet', effort: 'medium' }, convId: 'g1a', status: 'busy', waveStatus: 'launched', canLink: false, canClose: false, canRelaunch: false, note: '', hint: '' },
     { key: 'w1b', prompt: 'Add a PDF export button to the invoice page', wave: 1, asked: { model: 'haiku', effort: null }, convId: 'g1b', status: 'done', waveStatus: 'done', canLink: false, canClose: true, canRelaunch: false, note: '', hint: '' },
