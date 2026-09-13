@@ -74,6 +74,44 @@ console.log('\n1. pendingResumeSignals : appariement lancement ↔ notification'
   const p4 = write('d.jsonl', [bashLaunch('toolu_B', 'b4wb778cz', T0), taskNotif('b4wb778cz', 'toolu_B', T0 + 5000)]);
   check('bash de fond notifié → rien en attente', pendingResumeSignals(p4).pendingTask === false);
 
+  // ARRÊT À LA MAIN (TaskStop, relevé en réel le 2026-09-06 sur la conv
+  // 673761d3 : commande lancée 13:34:59, arrêtée 13:35:56, AUCUNE notification
+  // ensuite — spinner 5 min après chaque fin de tour pendant l'heure suivante).
+  // Forme exacte du résultat de l'outil : un JSON dont le message COMMENCE par
+  // « Successfully stopped task: <id> (<commande>) ».
+  const taskStop = (toolUseId, taskId, ms) => ({
+    type: 'user', timestamp: iso(ms),
+    message: { role: 'user', content: [{ tool_use_id: toolUseId, type: 'tool_result', content: `{"message":"Successfully stopped task: ${taskId} (node build.js)","task_id":"${taskId}","task_type":"local_bash","command":"node build.js"}` }] },
+  });
+  const p4b = write('d2.jsonl', [bashLaunch('toolu_B', 'b7pipxp5q', T0), taskStop('toolu_S', 'b7pipxp5q', T0 + 57000), assistant(T0 + 58000)]);
+  check('bash de fond ARRÊTÉ par TaskStop (jamais notifié) → rien en attente', pendingResumeSignals(p4b).pendingTask === false, JSON.stringify(pendingResumeSignals(p4b)));
+  const p4c = write('d3.jsonl', [bashLaunch('toolu_B', 'b7pipxp5q', T0), bashLaunch('toolu_B2', 'zz11aa22b', T0 + 1000), taskStop('toolu_S', 'b7pipxp5q', T0 + 57000)]);
+  check('… mais l\'arrêt ne clôt QUE sa tâche : l\'autre lancement reste en attente', pendingResumeSignals(p4c).pendingTask === true && pendingResumeSignals(p4c).pendingTaskAt === T0 + 1000, JSON.stringify(pendingResumeSignals(p4c)));
+  // Citation du même message au milieu d'un texte (sortie de grep) : pas un arrêt.
+  const quoted = { type: 'user', timestamp: iso(T0 + 57000), message: { role: 'user', content: [{ tool_use_id: 'toolu_G', type: 'tool_result', content: `transcript.jsonl:12: {"message":"Successfully stopped task: b7pipxp5q (x)","task_id":"b7pipxp5q"}` }] } };
+  const p4d = write('d4.jsonl', [bashLaunch('toolu_B', 'b7pipxp5q', T0), quoted]);
+  check('une CITATION du message d\'arrêt (préfixe grep) ne clôt rien', pendingResumeSignals(p4d).pendingTask === true);
+
+  // TÂCHE SORTIE, notification pas encore livrée (mesuré le 2026-09-06 : build
+  // sorti 13:48 pendant que Claude travaillait, notification livrée 13:55 avec
+  // le message suivant de l'user) : le harnais a écrit « [exited with code N] »
+  // en fin de fichier de sortie — la tâche ne réveillera plus rien.
+  const bashLaunchTo = (toolUseId, bashId, ms, outputPath) => ({
+    type: 'user', timestamp: iso(ms),
+    message: { role: 'user', content: [{ tool_use_id: toolUseId, type: 'tool_result', content: `Command running in background with ID: ${bashId}. Output is being written to: ${outputPath}. You will be notified when it completes.` }] },
+  });
+  const outDone = path.join(SANDBOX, 'btfdqf66i.output');
+  fs.writeFileSync(outDone, '=== BUILD 7/7 ===\nquelque chose\n\n[exited with code 1]\n');
+  const p4e = write('d5.jsonl', [bashLaunchTo('toolu_B', 'btfdqf66i', T0, outDone), assistant(T0 + 1000)]);
+  check('tâche de fond SORTIE (fichier de sortie clos par « [exited with code N] »), non notifiée → rien en attente',
+    pendingResumeSignals(p4e).pendingTask === false, JSON.stringify(pendingResumeSignals(p4e)));
+  const outRunning = path.join(SANDBOX, 'running.output');
+  fs.writeFileSync(outRunning, '=== BUILD 3/7 ===\n  ok   quelque chose\n');
+  const p4f = write('d6.jsonl', [bashLaunchTo('toolu_B', 'runningid', T0, outRunning)]);
+  check('… fichier de sortie encore ouvert (pas de marqueur) → toujours en attente', pendingResumeSignals(p4f).pendingTask === true);
+  const p4g = write('d7.jsonl', [bashLaunchTo('toolu_B', 'absentid', T0, path.join(SANDBOX, 'absent.output'))]);
+  check('… fichier de sortie absent → le doute profite à l\'attente', pendingResumeSignals(p4g).pendingTask === true);
+
   // Appariement par tool-use-id SEUL (task-id absent du texte de lancement —
   // robustesse si le libellé agentId change) :
   const noId = { ...agentLaunch('toolu_C', 'zzz', T0) };

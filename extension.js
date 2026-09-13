@@ -397,6 +397,24 @@ function activate(context) {
       }).catch(() => {});
       ackConversationById(msg && msg.id);
     },
+    // Retrait manuel d'une ligne ORPHELINE (décision user 2026-09-09). Le moteur
+    // garde une ligne quand aucune preuve ne lui permet de conclure à la
+    // fermeture — CLI vivant sans onglet, état figé sur busy, aucun nom
+    // appariable : ce sont les échappatoires d'isGone, et elles existent pour
+    // couvrir « on ne peut pas ENCORE savoir ». L'user, lui, voit sa barre
+    // d'onglets : ce clic est cette preuve-là, et rien d'autre.
+    // Il emprunte le chemin EXACT de la fermeture observée (closeConversations :
+    // markClosed + purge de l'entrée hooks), jamais une liste de masquage à
+    // côté — sinon une ligne aurait deux façons de disparaître, donc deux à
+    // corriger le jour où l'une ment. Réversible par construction : une
+    // conversation qui écrit après la grâce purge sa propre marque et revient.
+    dropConversation: (msg) => {
+      const id = msg && msg.id;
+      if (!id || !stateEngine) return;
+      logAckEvent('drop-orphan', { sessionId: id });
+      stateEngine.markClosed([id]);
+      try { removeSession(id); } catch {}
+    },
     toggleSounds: () => toggleSounds(context),
     toggleCollapse: (msg) => toggleCollapse(msg && msg.section),
     setSortOrder: (msg) => setSortOrder(msg && msg.order),
@@ -1643,6 +1661,10 @@ function buildPanelState() {
   const sources = memberSources((id) => convById.get(id));
   return {
     conversations: convs,
+    // Conversations lancées d'ici, HORS LOT, qui n'ont pas encore de ligne
+    // (2026-09-06) : ouvertes par « Create », leur prompt attend Entrée dans
+    // l'onglet. Même table de vérité que les membres de lot.
+    pending: pendingLaunches(convById, sources),
     quota: quotaState(),
     sounds: { enabled: cfg.soundsEnabled },
     ui: {
@@ -1824,26 +1846,29 @@ function computeLastChoiceFromTasks(tasks) {
 }
 
 // Règle de création d'un groupe (lot A, plan « master conv isolée »
-// 2026-08-09) — PURE, testable sans mock vscode (cf. test-batch-notice.js).
+// 2026-08-09) — PURE, testable sans mock vscode (cf. test-create-group.js).
 // `tasks.length > 1` groupe toujours (décision 3 du plan groupes) ; pour une
-// tâche unique, un groupe ne naît que s'il a une RAISON (décision 5 du plan
-// isolée) : nom de groupe explicite, ou maîtresse résolue. Une tâche unique
-// tapée à la main sans l'un ou l'autre reste une ligne plate.
-// RÉTABLI le 2026-09-02 (règle CLAUDE.md « RETIRER = NOMMER qui porte
-// l'information à sa place ») : une version d'un jour retirait `!!groupName`
-// au motif que le nom n'est affiché nulle part (la grip montre l'heure de
-// création). Vrai, mais la régression n'était pas la où on la cherchait —
-// AVANT le premier Entrée dans l'onglet, le transcript n'existe pas encore
-// (la liste plate exige transcript + onglet), donc le LOT était le SEUL
-// porteur d'état de cette tâche. Lui refuser de naître laissait la tâche
-// lancée sans AUCUNE surface à l'écran — l'invariant que ce fichier doit
-// tenir. Le vrai grief (chrome pour un nom invisible) se traite dans le
-// rendu du panneau (panel.js, grip réduite pour un lot à un seul membre sans
-// maîtresse), jamais en refusant au lot le droit d'exister.
-function shouldCreateGroup(taskCount, groupName, hasMasterCandidate) {
+// tâche unique, un lot ne naît que s'il a quelque chose à PORTER que rien
+// d'autre ne porte : le lien vers la maîtresse (filiation, enchaînement des
+// Create suivants sur le même lot). Sinon, ligne plate.
+//
+// `groupName` NE FONDE PLUS RIEN (2026-09-09, signalé par l'user : « une
+// conversation isolée crée quand même un batch, ce n'est pas logique ») —
+// et cette fois la question « qui porte l'information à sa place ? » a une
+// réponse, ce qu'elle n'avait pas le 2026-09-02 :
+//  - la SURFACE de la tâche avant son premier Entrée, seul motif du
+//    rétablissement d'alors, est la ligne « en attente » de la liste plate
+//    depuis le 2026-09-06 (`pendingLaunches` ici, `state.pending` rendu par
+//    `pendingLine` dans panel.js) — le lot n'est plus son seul porteur ;
+//  - le NOM lui-même n'était affiché nulle part (la grip montre l'heure de
+//    création), et un lot d'un membre sans maîtresse ne sert ni vague, ni
+//    compteur, ni enchaînement : il ne restait que le chrome.
+// Un lot multi-tâches garde son nom (teinte du bloc, `hueOf`) : c'est là
+// qu'il en a un usage.
+function shouldCreateGroup(taskCount, hasMasterCandidate) {
   if (taskCount > 1) return true;
   if (taskCount !== 1) return false;
-  return !!groupName || !!hasMasterCandidate;
+  return !!hasMasterCandidate;
 }
 
 // Décision de chaînage (lot 3, plan gel-tabs) — PURE, testable sans mock
@@ -1945,11 +1970,10 @@ async function createBatch(msg) {
   batchStatus = { busy: true, notice: vscode.l10n.t('Opening {0} conversation(s)…', wave1.length) };
 
   // LE FORMULAIRE EST LE GROUPE (décision 3 du plan) — sauf pour une tâche
-  // unique, où un groupe n'apporte que du chrome SANS RAISON : il ne naît
-  // que si le formulaire porte un nom de groupe explicite OU qu'une maîtresse
-  // a été résolue (plan « master conv isolée » 2026-08-09, décision 5). Une
-  // tâche unique tapée à la main sans l'un ou l'autre reste une ligne plate,
-  // comme avant ce lot.
+  // unique, où un groupe n'apporte que du chrome SANS RAISON : il ne naît que
+  // si une maîtresse a été résolue (cf. shouldCreateGroup). Une tâche unique
+  // sans maîtresse — tapée à la main ou collée avec un `group:` — reste une
+  // ligne plate.
   //
   // Le groupe est créé AVANT le lancement, avec TOUTES les tâches (vagues à
   // venir comprises) : les ouvertures sont sérialisées et prennent une seconde
@@ -1958,7 +1982,7 @@ async function createBatch(msg) {
   // et se rattachent au fil des étages 1 puis 2 ; ceux des vagues suivantes
   // naissent `queued` (groups.js) tant que leur vague n'est pas ouverte.
   const groupName = msg && msg.groupName;
-  const group = shouldCreateGroup(tasks.length, groupName, masterCandidate) && groupStore
+  const group = shouldCreateGroup(tasks.length, masterCandidate) && groupStore
     ? groupStore.create(groupName, tasks)
     : null;
   // Enregistrement (effet de bord seul, plus de résolution ici) : la capsule
@@ -1999,7 +2023,10 @@ async function createBatch(msg) {
     // établir : l'intention vaut pour la session que le launcher a PROUVÉE
     // nôtre.
     if (group ? groupStore.attachByIndex(group.id, i, r.sessionId) : true) {
-      intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort });
+      // Le prompt aussi (2026-09-06) : hors lot, c'est l'intention qui porte
+      // la ligne « en attente » de la liste plate jusqu'au premier Entrée
+      // (pendingLaunches) — un membre de lot, lui, a sa ligne dans le lot.
+      intentStore.record(r.sessionId, { model: r.task.model, effort: r.task.effort, prompt: group ? null : r.task.prompt });
     }
   }
 
@@ -2085,6 +2112,48 @@ function memberSources(getConv) {
       return !!(typeof stateEngine.isTabClosed === 'function' && stateEngine.isTabClosed(id));
     },
   };
+}
+
+// La surface d'une tâche SOLO lancée par « Create » (cas tranché par l'user le
+// 2026-09-02, livré en 2.117.0) : une ligne « en attente » dans la liste
+// plate, de l'ouverture de l'onglet jusqu'à ce que la conversation soit
+// listée (transcript né au premier Entrée) ou que son process meure (onglet
+// fermé sans rien envoyer). Depuis 2.104.0 une tâche solo ne fonde plus de
+// lot, et la liste plate exige un transcript : entre les deux, PERSONNE ne
+// portait cette conversation — « Create » ne montrait rien.
+//
+// Une seule source pour dire « où en est-elle » : member-truth.js, la même
+// table que les membres de lot — `inserted` (onglet ouvert, rien envoyé),
+// `busy`/`idle`… (transcript né, pas encore dans la vue). Un process mort
+// sans transcript (`unsent-lost`) n'a plus rien à montrer ici : hors lot, il
+// n'y a rien à re-lier ni à relancer, la ligne s'en va avec l'onglet — comme
+// une conversation fermée quitte la liste plate.
+//
+// `intentStore` ne connaît que les conversations lancées d'ICI et n'en oublie
+// aucune tant que la fenêtre vit (le badge d'écart en dépend) : le filtre est
+// donc « pas listée, process vivant, hors lot », jamais l'âge de l'intention.
+function pendingLaunches(convById, sources) {
+  if (!intentStore) return [];
+  const out = [];
+  for (const [sessionId, intent] of intentStore.entries()) {
+    if (!intent || !intent.prompt) continue;
+    if (convById.has(sessionId)) continue;
+    if (groupStore && groupStore.groupIdOf(sessionId)) continue;
+    if (!sources.isLive(sessionId)) continue;
+    const truth = memberTruth({ sessionId, launchedAt: intent.at || 1 }, sources);
+    if (truth.listed || truth.status === 'unsent-lost') continue;
+    out.push({
+      id: sessionId,
+      prompt: intent.prompt,
+      asked: { model: intent.model, effort: intent.effort },
+      status: truth.status,
+      // Même note courte qu'un membre de lot non listé (« press Enter in the
+      // tab ») et même infobulle : une ligne, pas deux vocabulaires.
+      note: truth.note ? vscode.l10n.t(truth.note) : '',
+      hint: truth.hint ? vscode.l10n.t(truth.hint) : '',
+    });
+  }
+  return out;
 }
 
 // Limite cosmétique du menu officiel (README « Known limitations ») : son

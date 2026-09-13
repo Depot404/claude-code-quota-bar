@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { norm, convMatchesLabel, isClaudeTab, labelNamesAnother } = require('./labels');
+const { norm, convMatchesLabel, isClaudeTab, claudeTabWorld, labelNamesAnother } = require('./labels');
 const { validatePositions } = require('./tab-positions');
 // Instrumentation du clic (2026-09-03, PLAN_titre_onglet_divergent_2026-09-02.md
 // fait 2 : « le clic vise le mauvais onglet », cause non établie faute de
@@ -140,20 +140,10 @@ function lastPromptOf(sessionId) {
 // rang parmi les onglets Claude, groupes enchaînés dans l'ordre, exactement
 // comme `flatIndex` du memento et `activeIndex` de tabs.js.
 function worldTabs() {
-  const out = { claudeCount: 0, activeFlatIndex: null };
-  let active = null;
   try {
     const g = vscode.window.tabGroups.activeTabGroup;
-    active = g && g.activeTab;
-    for (const group of vscode.window.tabGroups.all) {
-      for (const tab of (group && group.tabs) || []) {
-        if (!isClaudeTab(tab)) continue;
-        if (tab === active) out.activeFlatIndex = out.claudeCount;
-        out.claudeCount++;
-      }
-    }
+    return claudeTabWorld(vscode.window.tabGroups.all, g && g.activeTab);
   } catch { return { claudeCount: -1, activeFlatIndex: null }; }
-  return out;
 }
 
 // Photo de TOUS les onglets Claude de cette fenêtre (groupe, index, libellé) —

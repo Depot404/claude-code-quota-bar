@@ -18,16 +18,23 @@
 // Durée : ~10 s (lancement de Brave compris). Aucune attente passive, donc pas
 // de `--slow` : ce banc regarde des pixels, il ne dort pas.
 //
-// ⚠️ TROU RESTANT, MESURÉ ICI LE 2026-09-02 (constat, pas une assertion) : la
-// parade de 2.105.0 tient au `group:` du bloc ou à une maîtresse. Un prompt
-// solo SANS l'un ni l'autre ne fonde toujours aucun lot et sa conversation
-// n'a, elle non plus, pas encore de transcript : mesuré par ce même harnais,
-// l'écran ne montre RIEN pour la tâche lancée (0 nœud, la conv n'est pas dans
-// l'état poussé). C'est le comportement d'avant les lots — reste à trancher
-// s'il tombe sous l'invariant ; l'assertion n'est pas écrite tant que la
-// décision (lot solo, ou ligne « en attente » dans la liste plate) n'est pas
-// prise, pour ne pas figer un choix de produit dans un banc.
+// §3 — LE TROU MESURÉ ICI LE 2026-09-02, tranché par l'user le 2026-09-06 et
+// livré en 2.117.0 : un prompt solo tapé à la main, sans bloc ni maîtresse, ne
+// fonde toujours aucun lot (2.104.0) — mais il suit désormais le MÊME chemin
+// qu'un bloc collé (aperçu, cibles au survol, dépôt d'un clic dans un lot) et,
+// une fois lancé, garde une ligne « en attente » dans la liste plate jusqu'à
+// ce que la conversation soit listée (transcript né au premier Entrée). Seule
+// différence avec un bloc : la place PAR DÉFAUT de l'aperçu, hors de tout lot.
+// L'assertion de l'invariant est écrite pour ce cas aussi, sur l'écran.
 const H = require('./harness-loop.js');   // ← doit rester le PREMIER require
+const path = require('path');
+const fs = require('fs');
+
+// Captures du §3 (aperçu du prompt solo, puis sa ligne « en attente ») : le
+// rendu se REGARDE, un banc de mesure ne suffit pas (règle du dossier). Hors
+// publication : test/out/ est ignoré par git.
+const OUT_DIR = path.join(__dirname, 'out');
+try { fs.mkdirSync(OUT_DIR, { recursive: true }); } catch {}
 
 let pass = 0, fail = 0;
 function check(name, cond, detail) {
@@ -137,21 +144,28 @@ async function run() {
       const txt = ${JSON.stringify(SOLO_PROMPT.slice(0, 40))};
       const hit = (n) => (n.textContent || '').indexOf(txt) !== -1;
       return {
-        // Les deux gabarits de surface : ligne de conversation (transcript
-        // déjà né) et ligne de tâche d'un lot (rien n'a encore été envoyé).
-        forTask: Array.from(document.querySelectorAll('#flow .member, #flow .conv')).filter(hit).length,
+        // Les trois gabarits de surface : ligne de conversation (transcript
+        // déjà né), ligne de tâche d'un lot, et ligne « en attente » de la
+        // liste plate (2026-09-06) — c'est celle-ci qui doit la porter ici.
+        forTask: Array.from(document.querySelectorAll('#flow .member, #flow .conv, #flow > .flat-pending')).filter(hit).length,
+        flat: Array.from(document.querySelectorAll('#flow > .flat-pending')).filter(hit).length,
         rows: document.querySelectorAll('#flow .conv').length,
         groups: document.querySelectorAll('#flow .grp').length,
       };
     })()`);
     const st = h.state() || {};
     const listed = (st.conversations || []).some((c) => c.id === launchedId);
-    // Témoin (mesuré le 2026-09-02) : le MÊME bloc privé de sa ligne `group:`
-    // sort cette assertion à 0 nœud — elle n'est donc pas verte d'office, elle
-    // sait dire « rien à l'écran ».
     check('INVARIANT — la tâche lancée a une surface à l\'écran (ligne, ligne « en attente » ou membre de lot)',
       surface.forTask === 1,
       `DOM ${JSON.stringify(surface)} · listée dans l'état : ${listed} · id ${launchedId}`);
+    // 2026-09-09 (signalé par l'user) : un `group:` sur une tâche UNIQUE ne
+    // fonde plus de lot — « BATCH hh:mm », rail et bloc autour d'une seule
+    // ligne, pour un nom affiché nulle part. La surface est la ligne « en
+    // attente », comme pour un prompt tapé (§3).
+    check('… et ce `group:` n\'a fondé AUCUN lot : la surface est la ligne « en attente » de la liste plate',
+      surface.flat === 1 && (st.groups || []).length === 1 && (st.groups || [])[0].id === 'gA'
+        && !(st.groups || []).some((g) => (g.members || []).some((m) => m.convId === launchedId)),
+      `DOM ${JSON.stringify(surface)} · lots ${JSON.stringify((st.groups || []).map((g) => g.id))}`);
 
     // ── §2 — dépôt sœur dans un lot vivant ──────────────────────────────────
     console.log('\n2. Un dépôt SŒUR dans un lot vivant');
@@ -196,6 +210,140 @@ async function run() {
     })()`);
     check('… et l\'écran la montre DANS le lot',
       shown.inGroup === 1 && shown.anywhere === 1, JSON.stringify(shown));
+
+    // ── §3 — prompt SOLO tapé à la main : sans bloc, sans lot, sans maîtresse ──
+    console.log('\n3. Un prompt SOLO tapé à la main (décision user 2026-09-06)');
+    // Texte inventé, comme toute fixture publiable (test-no-private-residue.js).
+    const TYPED = 'Billing export: one row per invoice and per day, with a foldable detail listing every line.';
+    const sentBefore3 = h.sent.length;
+    const openedBefore3 = h.opened.length;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const HIT = JSON.stringify(TYPED.slice(0, 30));
+    // input + paste, comme un collage réel : ce n'est pas un bloc, donc un
+    // prompt simple (applyBlockPaste), sans recherche de maîtresse.
+    await h.paste(PROMPT_FIELD, TYPED);
+    await h.settle();
+    check('un texte qui n\'est pas un bloc ne déclenche aucune recherche de maîtresse',
+      h.sent.slice(sentBefore3).every((m) => m.type !== 'resolveMasterPaste'),
+      JSON.stringify(h.sent.slice(sentBefore3).map((m) => m.type)));
+    const previewDefault = await h.eval(`(() => {
+      const p = document.querySelector('.master-preview');
+      return {
+        present: !!p,
+        underNewConv: !!p && !!p.closest('#newConvBody'),
+        inGroup: !!p && !!p.closest('.grp-body'),
+        lines: p ? p.querySelectorAll('.m-pending').length : 0,
+        waveHeaders: p ? p.querySelectorAll('.wave-hdr').length : 0,
+        text: p ? (p.textContent || '').indexOf(${HIT}) !== -1 : false,
+      };
+    })()`);
+    check('APERÇU — le prompt tapé est prévisualisé, par défaut HORS de tout lot, sous « New conversation »',
+      previewDefault.present && previewDefault.underNewConv && !previewDefault.inGroup
+        && previewDefault.lines === 1 && previewDefault.text,
+      JSON.stringify(previewDefault));
+    check('… sans séparateur de vague : aucun lot ne naîtra, la ligne annoncée est la ligne plate',
+      previewDefault.waveHeaders === 0, JSON.stringify(previewDefault));
+
+    // Survol d'une ligne du lot vivant (vague 2, encore ouverte au dépôt) :
+    // l'aperçu se déplace DANS le lot — mêmes cibles qu'un bloc collé.
+    await h.eval(`(() => {
+      const r = Array.from(document.querySelectorAll('#flow .grp-body [data-ins-wave]'))
+        .find((x) => Number(x.dataset.insWave) === 2);
+      if (!r) throw new Error('ligne de la vague 2 introuvable');
+      (r.querySelector('.conv, .m-pending') || r).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      return true;
+    })()`);
+    await wait(250);
+    const previewHover = await h.eval(`(() => {
+      const p = document.querySelector('.master-preview');
+      const tag = document.querySelector('.ins-tag');
+      return { present: !!p, inGroup: !!p && !!p.closest('.grp-body'), tag: tag ? tag.textContent : null, refused: !!document.querySelector('.ins-tag.no') };
+    })()`);
+    check('… au survol d\'une ligne du lot, l\'aperçu se pose DANS le lot, cible acceptée (même geste qu\'un bloc)',
+      previewHover.present && previewHover.inGroup && !previewHover.refused, JSON.stringify(previewHover));
+    await h.eval(`(() => { document.querySelector('#flow .grp-body').dispatchEvent(new MouseEvent('mouseleave')); return true; })()`);
+    await wait(250);
+    const previewBack = await h.eval(`(() => {
+      const p = document.querySelector('.master-preview');
+      return { present: !!p, underNewConv: !!p && !!p.closest('#newConvBody') };
+    })()`);
+    check('… et revient sous « New conversation » quand la souris quitte le lot',
+      previewBack.present && previewBack.underNewConv, JSON.stringify(previewBack));
+
+    // Create : conversation SEULE, aucun lot fondé, et une ligne « en attente »
+    // dans la liste plate — l'invariant, mesuré sur l'écran.
+    const groupsBefore3 = ((h.state() || {}).groups || []).length;
+    await h.shot(path.join(OUT_DIR, 'solo-1-apercu.png'));
+    await h.eval(CLICK_CREATE);
+    await h.settle();
+    const fresh3 = h.sent.slice(sentBefore3).map((m) => m.type);
+    check('Create ouvre la conversation seule (createBatch), sans dépôt dans un lot',
+      fresh3.includes('createBatch') && !fresh3.includes('addTasksToGroup'), JSON.stringify(fresh3));
+    check('une conversation a été ouverte avec ce prompt',
+      h.opened.length === openedBefore3 + 1 && h.opened[h.opened.length - 1].prompt === TYPED,
+      JSON.stringify(h.opened.slice(openedBefore3)));
+    const soloId = h.opened.length > openedBefore3 ? h.opened[h.opened.length - 1].sessionId : null;
+    const st3 = h.state() || {};
+    // Le §1 n'a fondé aucun lot non plus (depuis 2026-09-09) : le compte de
+    // lots ne doit simplement pas BOUGER au Create d'un prompt solo.
+    check('aucun lot n\'a été fondé pour elle (le compte de lots est inchangé, aucun membre ne la porte)',
+      (st3.groups || []).length === groupsBefore3
+        && !(st3.groups || []).some((g) => (g.members || []).some((m) => m.convId === soloId)),
+      JSON.stringify((st3.groups || []).map((g) => g.id)));
+    await h.shot(path.join(OUT_DIR, 'solo-2-en-attente.png'));
+    // Sur SA ligne, pas sur le compte : depuis le 2026-09-09 la tâche du §1
+    // (bloc à une section avec `group:`, sans maîtresse) attend là elle aussi.
+    const pending3 = (st3.pending || []).find((p) => p.id === soloId);
+    check('l\'état poussé porte sa ligne « en attente » : prompt, modèle demandé, statut inserted',
+      !!pending3 && pending3.prompt === TYPED && pending3.status === 'inserted' && !!pending3.asked,
+      JSON.stringify(st3.pending));
+    const surface3 = await h.eval(`(() => {
+      const hit = (n) => (n.textContent || '').indexOf(${HIT}) !== -1;
+      const flat = Array.from(document.querySelectorAll('#flow > .flat-pending')).filter(hit);
+      const kids = Array.from(document.querySelectorAll('#flow > *')).filter((k) => !k.classList.contains('empty'));
+      return {
+        flat: flat.length,
+        pulse: flat.length ? !!flat[0].querySelector('.ico-pending-wait') : false,
+        note: flat.length ? (flat[0].querySelector('.m-note') || {}).textContent || null : null,
+        inGroup: Array.from(document.querySelectorAll('#flow .grp-body .m-pending')).filter(hit).length,
+        preview: !!document.querySelector('.master-preview'),
+        last: kids.length ? kids[kids.length - 1].classList.contains('flat-pending') : false,
+      };
+    })()`);
+    check('INVARIANT — la tâche solo a sa surface : UNE ligne « en attente » dans la liste plate, hors lot, en fin de liste, qui pulse',
+      surface3.flat === 1 && surface3.pulse && surface3.inGroup === 0 && surface3.last, JSON.stringify(surface3));
+    check('… avec la même note courte qu\'un membre de lot : « press Enter in the tab »',
+      surface3.note === 'press Enter in the tab', JSON.stringify(surface3));
+    check('… et l\'aperçu du formulaire a disparu avec le Create',
+      surface3.preview === false, JSON.stringify(surface3));
+
+    // L'user appuie sur Entrée : le transcript naît, la conversation est
+    // listée comme n'importe quelle autre, la ligne d'attente s'efface.
+    if (soloId) {
+      H.writeTranscript(soloId, { title: 'Billing export refactor', firstUser: TYPED, mtimeMs: Date.now() });
+      H.writeSessionsState({
+        [MASTER_ID]: { state: 'done', since: now - 20 * 60 * 1000 },
+        [soloId]: { state: 'busy', since: Date.now() },
+      });
+    }
+    let listed3 = false;
+    for (let i = 0; i < 24 && !listed3; i++) {
+      await h.settle();
+      listed3 = ((h.state() || {}).conversations || []).some((c) => c.id === soloId);
+      if (!listed3) await wait(250);
+    }
+    const afterEnter = h.state() || {};
+    check('après Entrée (transcript né) : la conversation est listée comme une ligne ordinaire',
+      listed3, JSON.stringify((afterEnter.conversations || []).map((c) => c.id)));
+    check('… et sa ligne « en attente » a quitté l\'état poussé',
+      !(afterEnter.pending || []).some((p) => p.id === soloId), JSON.stringify(afterEnter.pending));
+    const domAfter = await h.eval(`(() => {
+      const hit = (n) => (n.textContent || '').indexOf(${HIT}) !== -1;
+      return { pending: Array.from(document.querySelectorAll('#flow .flat-pending')).filter(hit).length,
+               rows: document.querySelectorAll('#flow .conv').length };
+    })()`);
+    check('… et l\'écran : plus aucune ligne d\'attente pour elle',
+      domAfter.pending === 0, JSON.stringify(domAfter));
   } finally {
     await h.dispose();
   }

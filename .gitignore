@@ -1,3 +1,6 @@
 node_modules/
 *.vsix
 .DS_Store
+# Captures produites par les bancs (test-harness-loop.js §3) : regardées au
+# moment du lot, jamais versionnées ni publiées.
+test/out/

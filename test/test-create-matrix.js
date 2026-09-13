@@ -20,20 +20,18 @@
 //   E1 — P n'a de sens que si une maîtresse est RETENUE (M=search). Pour
 //        M=absente/détachée/désignée/ambiguë, aucune conversation n'est
 //        retenue comme maîtresse : P retombe sur une case unique.
-//   E2 — Le clic de DÉSIGNATION/DÉTACHEMENT (panel.js ~2515 : composingMasterPick()
-//        && !root.closest('.grp-body')) ne route QUE sur une ligne HORS
-//        .grp-body. Or la ligne d'un membre, ET la ligne de tête d'un lot
-//        (grp-master-slot, posée DANS .grp-body par `place(node.body, 0,
-//        node.masterHead)`, panel.js ~4374), sont TOUTES DEUX dans .grp-body.
-//        Donc désigner/détacher par clic n'est possible QUE sur une ligne
-//        plate : M=détachée et M=désignée forcent P=hors-lot.
-//   E3 — masterHostGroup() (panel.js) rend null si la maîtresse n'est PAS
-//        membre d'un lot vivant (hors lot), ou si elle en est déjà la TÊTE
-//        (masterGroupNode() prioritaire). rowInsertTarget refuse alors tout
-//        survol de groupe (host absent). Donc G=clic-sur-une-ligne-du-lot et
-//        G=clic-sur-la-maîtresse n'existent QUE quand P∈{membre, membre+vague
-//        suivante lancée} — et seulement quand M=search (E2 interdit déjà les
-//        autres M d'atteindre ces P).
+//   E2 — Le clic de DÉSIGNATION (panel.js masterPickable) ne route que sur une
+//        ligne PLATE ou sur la tête d'un lot qui EST déjà la maîtresse (pour la
+//        détacher) : désigner une conversation d'un lot est impossible, donc
+//        M=détachée et M=désignée forcent P=hors-lot.
+//   E3 — Hors de tout lot, il n'y a aucune ligne de lot à cliquer dans la
+//        fixture : G∈{rowClick, masterRowClick} n'ont pas d'objet.
+//   E4 — Quand la maîtresse est la TÊTE du lot, cliquer sa ligne la DÉTACHE
+//        (2026-09-13) au lieu de viser une vague : ce n'est pas un dépôt, il se
+//        mesure dans test-master-head-targets.js. Le clic sur une AUTRE ligne
+//        de son lot, lui, est une cible ordinaire depuis le même jour — avant,
+//        cette case était éliminée « par construction » sur le code d'alors,
+//        c'est-à-dire que le banc gravait le trou au lieu de le voir.
 // ============================================================================
 'use strict';
 
@@ -66,8 +64,9 @@ const P_LABEL = {
 const G_LABEL = { create: 'Create direct', rowClick: 'clic sur une ligne du lot', masterRowClick: 'clic sur la ligne de la maîtresse' };
 
 const REASON_E1 = 'E1 — aucune maîtresse retenue : la position n’a pas d’objet';
-const REASON_E2 = 'E2 — la ligne d’un membre (ou de tête) est dans .grp-body : le clic de désignation/détachement n’y route jamais';
-const REASON_E3 = 'E3 — pas de lot-hôte (masterHostGroup() nul) : tout survol de groupe est refusé';
+const REASON_E2 = 'E2 — une conversation de lot ne se désigne pas au clic : désignée/détachée forcent hors-lot';
+const REASON_E3 = 'E3 — hors lot : aucune ligne de lot à cliquer';
+const REASON_E4 = 'E4 — la tête maîtresse se DÉTACHE au clic (banc dédié test-master-head-targets.js)';
 
 // Verdict PUR d'une cellule (m,p,g) — appelé une fois par cellule du produit
 // cartésien P_VALUES×G_VALUES, jamais plus : c'est ce qui garantit que
@@ -79,12 +78,10 @@ const REASON_E3 = 'E3 — pas de lot-hôte (masterHostGroup() nul) : tout survol
 // cellule sert de représentante mesurée (p='hors-lot', g='create' — le
 // fixture le plus simple, aucun lot à construire) ; les 11 autres du même
 // (t,m) sont éliminées, même raison.
-// M∈{detachee, designee} : le clic de désignation/détachement ne route que
-// sur une ligne HORS .grp-body (panel.js ~2515) → position forcée à
-// 'hors-lot' (E2 pour les 3 autres valeurs de P) ; à 'hors-lot', G∈{rowClick,
-// masterRowClick} reste sans objet (E3, pas de lot-hôte).
-// M=search : P décide tout — host existe (masterHostGroup() non nul) SEULEMENT
-// pour P∈{membre, membre-avance} (E3 sinon).
+// M∈{detachee, designee} : position forcée à 'hors-lot' (E2) ; à 'hors-lot',
+// G∈{rowClick, masterRowClick} reste sans objet (E3, aucun lot).
+// M=search : toute position dans un lot ouvre ses lignes (membre, tête,
+// membre-avance) ; seule la ligne de la tête maîtresse n'est pas un dépôt (E4).
 function cellStatus(m, p, g) {
   if (m === 'absente' || m === 'ambigue') {
     if (p === 'hors-lot' && g === 'create') return { valid: true, naPosition: true };
@@ -96,9 +93,9 @@ function cellStatus(m, p, g) {
     return { valid: false, reason: REASON_E3 };
   }
   // m === 'search'
-  if (p === 'membre' || p === 'membre-avance') return { valid: true, naPosition: false };
-  if (g === 'create') return { valid: true, naPosition: false };
-  return { valid: false, reason: REASON_E3 };
+  if (p === 'hors-lot') return g === 'create' ? { valid: true, naPosition: false } : { valid: false, reason: REASON_E3 };
+  if (p === 'tete' && g === 'masterRowClick') return { valid: false, reason: REASON_E4 };
+  return { valid: true, naPosition: false };
 }
 
 function enumerateMatrix() {
@@ -355,7 +352,16 @@ async function checkInvariants(h, ctx, out) {
   ctx.taskTexts.forEach((txt) => {
     const inGroups = groups.some((g) => (g.members || []).some((m) => (m.prompt || '').indexOf(txt) !== -1));
     const inConvs = (st.conversations || []).some((c) => ctx.openedPrompts.has(c.id) && ctx.openedPrompts.get(c.id) === txt);
-    if (inGroups || inConvs) storeHits++;
+    // TROISIÈME SURFACE (ajoutée 2026-09-10) : la ligne « en attente » de la
+    // liste plate. Depuis 2.117.0/2.118.0, une tâche SEULE sans maîtresse ne
+    // fonde plus de lot et sa conversation n'entre dans `conversations` qu'au
+    // premier Entrée — elle n'était donc ni dans les lots, ni dans les convs,
+    // et I4 la déclarait refusée par le store alors qu'elle est à l'écran.
+    // C'est exactement l'invariant du CLAUDE.md du dossier (« ligne de conv,
+    // ligne en attente, ou membre de lot — jamais rien »), qui en comptait
+    // deux sur trois. Ce rapport n'avait pas été rejoué depuis (banc --slow).
+    const inPending = (st.pending || []).some((p) => (p.prompt || '').indexOf(txt) !== -1);
+    if (inGroups || inConvs || inPending) storeHits++;
   });
   check('I4 — le store a accepté toutes les tâches (jamais un tableau vide)', storeHits === ctx.taskTexts.length,
     `${storeHits}/${ctx.taskTexts.length} — groups=${JSON.stringify(groups.map((g) => ({ id: g.id, n: (g.members || []).length })))}`);
@@ -471,12 +477,21 @@ async function runCase(spec, report) {
     const openedPrompts = new Map();
     const preOpenedCount = h.opened.length;
 
+    // DEPUIS LE 2026-09-10, un clic sur une ligne ne dépose plus : il FIXE la
+    // cible, et « Create » reste le seul geste qui envoie (demande user — le
+    // départ immédiat ne laissait rien à relire). Les deux gestes de clic sont
+    // donc en DEUX temps ici, comme à l'écran ; ce que la matrice mesure
+    // ensuite (ce qui est ouvert, où, sous quel numéro) est inchangé.
     if (spec.g === 'create') {
       await h.eval(CLICK_CREATE);
     } else if (spec.g === 'rowClick') {
       await clickMemberByText(h, pos.siblingText);
+      await h.settle();
+      await h.eval(CLICK_CREATE);
     } else if (spec.g === 'masterRowClick') {
       await clickMemberByText(h, fx.masterTitle);
+      await h.settle();
+      await h.eval(CLICK_CREATE);
     }
     await h.settle();
 

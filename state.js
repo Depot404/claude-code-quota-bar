@@ -61,7 +61,7 @@ const { modelIdToDisplay, detectContextWindow } = require('./hooks/model-id.js')
 const { usageTokens, extractLastAssistant, extractTitleInfo, scanAiTitleIncremental, pendingInteractiveAt, interruptedAt, lastActivityTs, firstUserText, pendingResumeSignals } = require('./hooks/transcript.js');
 const { convMatchesLabel, pairTabs, isPlaceholderTabLabel, labelNamesAnother } = require('./labels.js');
 const { removeSession } = require('./hooks/sessions-state.js');
-const { liveSessionIds, foreignSessionIds, liveSessionEntries, SESSIONS_DIR } = require('./live-sessions.js');
+const { liveSessionIds, foreignSessionIds, liveSessionEntries, isForeignEntrypoint, SESSIONS_DIR } = require('./live-sessions.js');
 // Validation EN BLOC de la photo des positions d'onglets (2026-08-29) : même
 // juge pour le clic (focus.js) et pour le surlignage — une photo périmée
 // acceptée d'un côté et refusée de l'autre remettrait les deux en désaccord.
@@ -521,13 +521,14 @@ function resolveHasTabForPresence(sessionId, hasTab, isAmbiguous, misses) {
 
 // Sources de titre qui PEUVENT matcher un libellé d'onglet, donc dont l'absence
 // de correspondance est une information (elle prouve qu'aucun onglet ne porte
-// cette conv). Les titres de repli (1er message, dernier prompt) n'en sont pas :
-// l'extension officielle ne les met pas sur ses onglets.
+// cette conv).
 // `tab-store` en faisait partie jusqu'en 2.114.0 — plus aucune conversation ne
 // peut porter cette source depuis le retrait du store d'onglets (mesuré mort).
+// ⚠️ Ce Set ne suffit plus à décider : le TITRE n'est que l'un des deux noms
+// appariables — cf. l'exemption ci-dessous et `convMatchesLabel` (labels.js).
 const MATCHABLE_TITLE_SOURCES = new Set(['ai-title']);
 
-// c : { sessionId, title, titleSource, state, mtime }
+// c : { sessionId, title, titleSource, lastPrompt, state, mtime, entrypoint }
 // live    : Set des sessionId dont le process CLI tourne DANS UNE FENÊTRE VS CODE
 // foreign : Set des sessionId vivants dont l'origine prouve le contraire
 //           (Remote Control/mobile, terminal, agent SDK…) — cf. live-sessions.js
@@ -598,6 +599,21 @@ function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab) {
   // absent ou inconnu ⇒ l'ensemble ne la contient pas ⇒ rien ne change.
   if (foreign.has(c.sessionId)) return true;
 
+  // …et le MÊME fait, lu là où il survit au process (2026-09-09). Le registre
+  // ci-dessus ne connaît que les sessions VIVANTES : sa fiche disparaît avec le
+  // CLI, si bien qu'une conversation étrangère TERMINÉE n'avait plus aucune
+  // origine lisible et ne quittait le panneau que par le hasard d'un titre
+  // matchable (dernier test de cette fonction) — sinon elle y restait jusqu'à
+  // ses 4 h d'ancienneté, à consommer une des `maxItems` places. Le transcript,
+  // lui, porte l'origine écrite sur chaque ligne (cf. transcript.js
+  // extractTitleInfo). Une seule RÈGLE pour les deux canaux — isForeignEntrypoint
+  // —, jamais deux définitions de « cette conversation est-elle d'ici » : c'est
+  // exactement le partage que ce fichier documente déjà pour la présence.
+  // Placé APRÈS `hasTab` et `live` comme le test du registre : une preuve
+  // d'onglet d'ici l'emporte toujours (conversation SDK reprise dans VS Code).
+  // Origine absente/inconnue ⇒ rien ne change, comme partout dans ce module.
+  if (isForeignEntrypoint(c.entrypoint)) return true;
+
   // Sans onglet mais au travail : on garde, faute de savoir. Ce filet ne couvre
   // plus que les sessions ABSENTES du registre (process mort alors que les hooks
   // disent encore busy) — celles dont on connaît l'origine ont déjà tranché
@@ -606,11 +622,23 @@ function isGone(c, tabs, closedAt, live = NO_LIVE, foreign = NO_LIVE, hasTab) {
   // une conv fermée pendant que VS Code était éteint (SessionEnd n'ayant pas tiré).
   if (c.state === 'busy' || c.state === 'waiting') return false;
 
-  // Titre de repli : il ne peut PAS matcher un libellé d'onglet de façon fiable,
-  // donc son absence de correspondance ne prouve rien. Cette exemption était
-  // levée quand le store d'onglets publiait, lui, un titre matchable — elle
-  // redevient inconditionnelle avec son retrait (cf. l'en-tête).
-  if (!MATCHABLE_TITLE_SOURCES.has(c.titleSource)) return false;
+  // AUCUN nom appariable : l'absence de correspondance ne prouve rien, on ne
+  // conclut pas. Mais une conversation en a DEUX, et `convMatchesLabel`
+  // (labels.js) les teste tous les deux depuis 2.112.0 — le titre écrit par
+  // l'IA, et le DERNIER PROMPT, dont l'extension officielle nomme ses onglets
+  // (mesuré le 2026-09-04 sur les 6 onglets réels d'une fenêtre : 24 caractères
+  // + « … »). Ce test ne regardait que le premier, sur la foi d'un commentaire
+  // qui affirmait l'inverse de cette mesure : une conversation d'un seul tour,
+  // qui n'a pas encore de titre d'IA, était donc exemptée À VIE — donc
+  // IMMORTELLE dès que sa fermeture n'était pas observée en direct (fenêtre
+  // rechargée entre-temps, fermeture non attribuée), et sans aucun geste pour
+  // la retirer. Signalé par l'user le 2026-09-09 sur une conv Haiku d'un tour ;
+  // c'est le retour exact du symptôme du 2026-08-20, dont la parade d'alors
+  // (le store d'onglets) est partie en 2.114.0.
+  // Les deux moitiés du même appariement doivent bouger ENSEMBLE : élargir
+  // `convMatchesLabel` sans élargir ce filtre l'avait laissé nier une preuve
+  // que le matcheur savait déjà lire (même motif que `claudeTabWorld`, 2.119.0).
+  if (!MATCHABLE_TITLE_SOURCES.has(c.titleSource) && !c.lastPrompt) return false;
 
   return true;
 }
@@ -648,7 +676,7 @@ function createTranscriptReader() {
     const hit = cache.get(filePath);
     if (hit && hit.key === key) return hit.value;
 
-    let value = { title: null, titleSource: null, modelId: null, model: null, effort: null, ctx: null, mtime: stat.mtimeMs, activityTs: stat.mtimeMs, pendingInteractive: false, interrupted: false, pendingInteractiveAt: null, interruptedAt: null };
+    let value = { title: null, titleSource: null, modelId: null, model: null, effort: null, ctx: null, mtime: stat.mtimeMs, activityTs: stat.mtimeMs, pendingInteractive: false, interrupted: false, pendingInteractiveAt: null, interruptedAt: null, entrypoint: null };
     try {
       // Les deux faits sont DATÉS (ms epoch, `0` = présent mais non datable,
       // `null` = absent) : applyTranscriptTruth compare cette date à celle du
@@ -691,6 +719,10 @@ function createTranscriptReader() {
       value.titleSource = t.source;
       // Troisième libellé d'onglet possible (labels.js convMatchesLabel).
       value.lastPrompt = t.lastPrompt || null;
+      // Origine ÉCRITE de la conversation (cf. extractTitleInfo) : la seule qui
+      // survive à la mort du process, donc la seule qui puisse écarter une
+      // conversation étrangère DÉJÀ TERMINÉE.
+      value.entrypoint = t.entrypoint || null;
     } catch {}
 
     cache.set(filePath, { key, value });
@@ -1124,8 +1156,20 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // appliqué ici à la table entière plutôt qu'à une ligne.
   const tabLocations = (typeof opts.sessionTabLocations === 'function' && opts.sessionTabLocations()) || null;
   const labels = (tabs && tabs.labels) || [];
+  // ⚠️ LE MONDE EST CELUI DE CETTE FENÊTRE, PAS L'UNION DES LIBELLÉS PUBLIÉS
+  // (2026-09-09). `labels.length` comptait une AUTRE population que la photo :
+  // l'union publiée par toutes les fenêtres (~/.claude/panel-tabs/*.json),
+  // republiée avec retard, contre un memento qui ne décrit que les onglets
+  // d'ici. Les deux ne coïncidaient qu'entre deux mouvements d'onglets — donc
+  // jamais après un rechargement de fenêtre — et la photo était rejetée en
+  // bloc : plus aucune identité pour le surlignage, quand le CLIC (focus.js,
+  // qui comptait DÉJÀ le monde local) se réparait, lui, au flush suivant. C'est
+  // le « je peux changer de conversation, mais plus rien n'est surligné » de
+  // l'utilisateur. `tabs.claudeCount` absent (bancs d'avant ce lot, fournisseur
+  // sans l'API) ⇒ repli sur `labels.length`, comportement d'avant à l'octet près.
+  const worldCount = (tabs && typeof tabs.claudeCount === 'number') ? tabs.claudeCount : labels.length;
   const positionOf = validatePositions(tabLocations, {
-    claudeCount: labels.length,
+    claudeCount: worldCount,
     activeFlatIndex: (tabs && typeof tabs.activeIndex === 'number') ? tabs.activeIndex : null,
   });
   // Sessions dont l'onglet est NOMMÉ par le memento validé, par opposition à
@@ -1148,8 +1192,12 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       const loc = positionOf.get(p.c.sessionId);
       if (!loc) continue;
       const label = labels[loc.flatIndex];
-      if (label == null) continue;
-      if (labelNamesAnother(label, { sessionId: p.c.sessionId, title: p.title, lastPrompt: p.lastPrompt }, listed)) continue;
+      // Libellé pas encore publié à ce rang (les fichiers panel-tabs retardent
+      // sur l'API, surtout dans la minute qui suit un reload) : RIEN ne
+      // contredit l'identité, donc on la garde — sauter ici, c'était perdre la
+      // seule preuve disponible au moment précis où le texte n'en est pas une.
+      if (label != null
+        && labelNamesAnother(label, { sessionId: p.c.sessionId, title: p.title, lastPrompt: p.lastPrompt }, listed)) continue;
       pairing.index.set(p.c.sessionId, loc.flatIndex);
       pairing.ambiguous.delete(p.c.sessionId);
       indexFromMemento.add(p.c.sessionId);
@@ -1242,7 +1290,11 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
         presenceMisses
       );
     const gone = isGone(
-      { sessionId: c.sessionId, title, titleSource, state, mtime: c.mtime },
+      // `lastPrompt` voyage avec le titre : c'est le SECOND nom qu'un onglet
+      // peut porter, donc la seconde preuve appariable (cf. isGone).
+      // `entrypoint` : l'origine écrite du transcript — la preuve d'appartenance
+      // qui survit au process (cf. isGone).
+      { sessionId: c.sessionId, title, titleSource, lastPrompt, state, mtime: c.mtime, entrypoint: (t && t.entrypoint) || null },
       tabs, closedAt, live, foreign, presenceHasTab
     );
     // Onglet prouvé fermé ⇒ ligne retirée, SANS exception (décision user
@@ -1264,7 +1316,12 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
       dropped.push({
         id: c.sessionId, rule: 'gone', state, labelMatch: hasTab, memento: openIds.has(c.sessionId),
         live: live.has(c.sessionId),
-        foreign: foreign.has(c.sessionId), closed: closedAt.has(c.sessionId), src: titleSource,
+        // `foreign` dit le VERDICT d'appartenance, quel que soit le canal qui
+        // l'a rendu (registre des vivantes ou origine écrite du transcript) —
+        // sinon le journal ne saurait pas dire pourquoi une conversation
+        // étrangère a quitté le panneau.
+        foreign: foreign.has(c.sessionId) || isForeignEntrypoint((t && t.entrypoint) || null),
+        closed: closedAt.has(c.sessionId), src: titleSource,
       });
       continue;
     }
@@ -1351,6 +1408,11 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
         settling,
         openIds: openIds.size,
         labels: labels.length,
+        // `world` (compte local frais) vs `labels` (union publiée, en retard) :
+        // leur écart est ce qui faisait rejeter la photo du memento, et il
+        // n'était visible nulle part. `posOk` dit le verdict qui en découle.
+        world: worldCount,
+        posOk: !!positionOf,
         placeholders: labels.filter(isPlaceholderTabLabel).length,
         tabsKnown: !!tabs.known,
         aged: [...aged],
@@ -1436,7 +1498,16 @@ function buildSnapshot(opts, readTranscript, readFirstUser) {
   // comparant le libellé à cet index à `activeLabel`.
   const activeLabel = (tabs && tabs.activeLabel) || null;
   const rawActiveIndex = tabs && typeof tabs.activeIndex === 'number' ? tabs.activeIndex : null;
-  const activeIndex = (rawActiveIndex != null && tabs.labels && tabs.labels[rawActiveIndex] === activeLabel)
+  // Le contrôle vérifie que les libellés locaux sont bien le PRÉFIXE de l'union
+  // (tabs.js `allLabels()`). Un rang PAS ENCORE PUBLIÉ ne l'infirme pas : dans
+  // la minute qui suit un reload, les fichiers panel-tabs retardent sur l'API et
+  // `labels[rawActiveIndex]` est simplement absent — traiter ce blanc comme un
+  // désaccord jetait le seul index dont on disposait, au moment précis où le
+  // texte n'est plus une preuve (2026-09-09). Un libellé PRÉSENT et DIFFÉRENT
+  // reste, lui, un vrai désaccord : l'index est alors écarté comme avant.
+  const rawActiveTabLabel = (tabs && tabs.labels) ? tabs.labels[rawActiveIndex] : undefined;
+  const activeIndex = (rawActiveIndex != null
+    && (rawActiveTabLabel === activeLabel || rawActiveTabLabel == null))
     ? rawActiveIndex : null;
   let highlightVia = 'none';
   let highlightSessionId = null;

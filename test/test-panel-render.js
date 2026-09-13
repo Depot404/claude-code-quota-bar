@@ -115,12 +115,18 @@ const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 // Le contrat d'état, tel qu'extension.js le pousse (cf. tête de panel.js).
 const STATE = {
   conversations: [
-    { id: 'c1', title: 'Conv au travail', model: 'Opus 4.8', ctx: { pct: 34 }, state: 'busy', acked: true, active: true },
+    // `tabOpen` sur CHACUNE (2026-09-09) : le contrat d'état le garantit
+    // toujours booléen (extension.js `tabOpen: !!c.tabOpen`), et une conv rendue
+    // a normalement son onglet. Il ne servait qu'au barré, où son absence
+    // passait inaperçue ; depuis la croix de retrait, une ligne sans onglet est
+    // « orpheline » et perd ses deux autres gestes — un jeu d'essai muet
+    // décrivait donc six lignes orphelines sans le dire.
+    { id: 'c1', title: 'Conv au travail', model: 'Opus 4.8', ctx: { pct: 34 }, state: 'busy', acked: true, active: true, tabOpen: true },
     { id: 'c2', title: 'Terminée jamais lue', model: 'Sonnet 5', ctx: { pct: 20 }, state: 'done', acked: false, active: false, tabOpen: true },
     { id: 'c3', title: 'Terminée déjà lue', model: 'Sonnet 5', ctx: { pct: 12 }, state: 'done', acked: true, active: false, tabOpen: true },
-    { id: 'c4', title: 'Sans état hooks', model: null, ctx: null, state: 'idle', acked: true, active: false },
-    { id: 'c5', title: 'Attend une réponse', model: 'Haiku 4.5', ctx: { pct: 8 }, state: 'waiting', acked: true, active: false },
-    { id: 'c6', title: 'Coupée au clavier', model: 'Opus 4.8', ctx: { pct: 41 }, state: 'interrupted', acked: true, active: false },
+    { id: 'c4', title: 'Sans état hooks', model: null, ctx: null, state: 'idle', acked: true, active: false, tabOpen: true },
+    { id: 'c5', title: 'Attend une réponse', model: 'Haiku 4.5', ctx: { pct: 8 }, state: 'waiting', acked: true, active: false, tabOpen: true },
+    { id: 'c6', title: 'Coupée au clavier', model: 'Opus 4.8', ctx: { pct: 41 }, state: 'interrupted', acked: true, active: false, tabOpen: true },
   ],
   quota: {
     windows: [
@@ -1524,6 +1530,18 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // UNE seule tâche au formulaire : le bloc tient en une vague, il REJOINT
     // donc la vague survolée (mode 'into') au lieu de s'insérer derrière elle.
     await cdp.evaluate(`(() => { const ta = document.querySelector('.task-top textarea.inp'); ta.value = 'Nouvelle tache en file'; ta.dispatchEvent(new Event('input')); })()`);
+    // Modèle et effort choisis explicitement : depuis que c'est « Créer » qui
+    // dépose (2026-09-10), le dépôt passe par le même garde que tout lancement
+    // — bouton désactivé tant qu'aucune valeur concrète n'est résolue
+    // (refreshCreateBtn/unresolvedTask). Le clic sur une ligne, lui, ne
+    // consultait rien : il déposait même sans modèle.
+    await sleep(100);
+    // Un clic par evaluate, le nœud RELU : le premier choix re-rend le
+    // formulaire et détache la carte capturée d'avance.
+    await cdp.evaluate(`document.querySelector('#batchForm .task').querySelector('button[title="sonnet"]').click()`);
+    await sleep(80);
+    await cdp.evaluate(`document.querySelector('#batchForm .task').querySelector('button[title="medium"]').click()`);
+    await sleep(120);
     const lastWave = await cdp.evaluate(`(() => {
       const rows = Array.from(document.querySelectorAll('#flow [data-ins-wave]'));
       const r = rows[rows.length - 1];
@@ -1544,13 +1562,38 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('… et le champ prompt s allume : c est SON contenu qui va tomber la',
       hov.hl === true, JSON.stringify(hov));
 
+    // LE CLIC FIXE, « CRÉER » ENVOIE (2026-09-10, demande user). Il déposait
+    // directement : rien ne pouvait plus être relu entre le geste et le départ
+    // des conversations. Deux moitiés à tenir, donc deux mesures : le clic
+    // n'envoie RIEN, et la cible qu'il pose SURVIT à la sortie de la ligne
+    // (sans quoi elle ne vaudrait que tant qu'on ne bouge pas la souris).
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`(() => {
       const rows = Array.from(document.querySelectorAll('#flow [data-ins-wave]'));
       rows[rows.length - 1].click();
     })()`);
+    await sleep(150);
+    const afterPin = await cdp.evaluate(`window.__sent`);
+    check('clic sur la ligne : rien n est envoye, la cible est seulement FIXEE',
+      Array.isArray(afterPin) && afterPin.length === 0, JSON.stringify(afterPin));
+    // Souris sortie du lot : une cible SURVOLÉE s'éteindrait ici.
+    await cdp.evaluate(`document.querySelector('#flow .grp-body').dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }))`);
+    await sleep(150);
+    const stillPinned = await cdp.evaluate(`(() => ({
+      zones: document.querySelectorAll('.ins-zone').length,
+      tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+      btn: (function () { const b = document.querySelector('#batchForm button.pri'); return b ? b.textContent : null; })(),
+    }))()`);
+    check('… et elle TIENT quand la souris quitte la ligne (cadre + ruban toujours la)',
+      stillPinned.zones === 1 && !!stillPinned.tag, JSON.stringify(stillPinned));
+    check('… le bouton « Creer » nomme la vague visee, la ou l on valide',
+      !!stillPinned.btn && stillPinned.btn.indexOf('wave ' + lastWave) !== -1, JSON.stringify(stillPinned));
+
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('#batchForm button.pri').click()`);
+    await sleep(150);
     const afterAdd = await cdp.evaluate(`window.__sent`);
-    check('clic sur la ligne -> addTasksToGroup, mode into, sur la vague de la ligne',
+    check('« Creer » depose alors addTasksToGroup, mode into, sur la vague de la ligne',
       Array.isArray(afterAdd) && afterAdd.length === 1 && afterAdd[0].type === 'addTasksToGroup'
       && afterAdd[0].id === 'g1' && afterAdd[0].mode === 'into' && afterAdd[0].wave === lastWave
       && afterAdd[0].tasks.length === 1 && afterAdd[0].tasks[0].prompt === 'Nouvelle tache en file',
@@ -1647,6 +1690,9 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
         tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
         refusedStyle: !!document.querySelector('.ins-tag.no'),
         prevNext: p && p.nextElementSibling ? p.nextElementSibling.className : null,
+        present: !!p,
+        inNewConv: !!p && !!p.closest('#newConvBody'),
+        inGroup: !!p && !!p.closest('.grp-body'),
       };
     })()`);
     const pastHeaders = await cdp.evaluate(`Array.from(document.querySelectorAll('#flow .grp-body > .wave-hdr .wave-hdr-label')).map(function (n) { return n.textContent; })`);
@@ -1657,9 +1703,12 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       !!past.tag && /already past/.test(past.tag) && past.refusedStyle === true, JSON.stringify(past));
     // Le contrat n'est pas « il n'a pas bouge depuis la mesure d'avant » (un
     // survol precedent pouvait encore le deplacer) mais « il est a sa place PAR
-    // DEFAUT » : en fin de corps, la ou les taches iront reellement.
-    check('… et l apercu reste a sa place par defaut, en fin de lot',
-      past.prevNext === null || /ghost-line/.test(past.prevNext || ''), JSON.stringify(past));
+    // DEFAUT ». Ici le prompt est TAPE a la main, sans maitresse : sa place par
+    // defaut est HORS de tout lot, sous « New conversation » (decision user
+    // 2026-09-06 — avant, un prompt tape n'avait aucun apercu et cette
+    // assertion passait sur du vide, prevNext valant null faute d'apercu).
+    check('… et l apercu reste a sa place par defaut, hors du lot, sous New conversation',
+      past.present === true && past.inNewConv === true && past.inGroup === false, JSON.stringify(past));
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`(() => {
       const r = Array.from(document.querySelectorAll('#flow [data-ins-wave]'))
@@ -1801,11 +1850,17 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       hovered.tipY !== null && Math.abs(hovered.tipY - hovered.prevY) < 40, JSON.stringify(hovered));
     check('… et RIEN n\'a ete envoye : le survol montre, il n\'engage pas', hovered.sent === 0);
 
-    // CLIC sur la ligne : le geste EXACT que l'apercu montrait, sans confirmation.
+    // CLIC sur la ligne : il FIXE le geste EXACT que l'apercu montrait ; c'est
+    // « Creer » qui l'execute (2026-09-10).
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`${rowOfWave(1)}.click()`);
+    await sleep(120);
+    check('le clic seul n\'envoie rien (cible fixee, en attente de « Creer »)',
+      await cdp.evaluate(`(window.__sent || []).length`) === 0);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(150);
     const afterMultiWave = await cdp.evaluate(`window.__sent`);
-    check('clic sur la vague 1 -> UN addTasksToGroup, mode before, vague 2, vagues relatives et modeles conserves',
+    check('puis « Creer » -> UN addTasksToGroup, mode before, vague 2, vagues relatives et modeles conserves',
       Array.isArray(afterMultiWave) && afterMultiWave.length === 1 && afterMultiWave[0].type === 'addTasksToGroup'
       && afterMultiWave[0].id === 'g1' && afterMultiWave[0].wave === 2 && afterMultiWave[0].mode === 'before'
       && afterMultiWave[0].tasks.length === 2
@@ -1829,8 +1884,11 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await hoverWave(2);
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`${rowOfWave(2)}.click()`);
+    await sleep(120);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(150);
     const afterLastWave = await cdp.evaluate(`window.__sent`);
-    check('clic sur la DERNIERE vague -> le bloc se pose derriere elle (vague 3, mode before)',
+    check('clic sur la DERNIERE vague puis « Creer » -> le bloc se pose derriere elle (vague 3, mode before)',
       Array.isArray(afterLastWave) && afterLastWave.length === 1
       && afterLastWave[0].type === 'addTasksToGroup' && afterLastWave[0].wave === 3
       && afterLastWave[0].mode === 'before' && afterLastWave[0].tasks.length === 2,
@@ -1851,8 +1909,11 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       await cdp.evaluate(`(function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : ''; })()`));
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`${rowOfWave(1)}.click()`);
+    await sleep(120);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(150);
     const afterRunningClick = await cdp.evaluate(`window.__sent`);
-    check('… et le clic depose DIRECTEMENT dans la vague en cours (mode into, vague 1), sans confirmation',
+    check('… et « Creer » depose dans la vague en cours (mode into, vague 1), sans confirmation',
       Array.isArray(afterRunningClick) && afterRunningClick.length === 1
       && afterRunningClick[0].wave === 1 && afterRunningClick[0].mode === 'into'
       && afterRunningClick[0].tasks.length === 2, JSON.stringify(afterRunningClick));
@@ -1905,6 +1966,12 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     const pasteAndResolve = async function () {
       await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: twoLots })}, '*')`);
       await sleep(150);
+      // Cancel D'ABORD (2026-09-10) : depuis que le clic FIXE une cible au lieu
+      // de deposer, un scenario qui clique sans valider laisse cette cible
+      // derriere lui — et le suivant partirait avec. Le seul geste qui remet
+      // vraiment tout a zero (formulaire ET cible) est celui-la.
+      await cdp.evaluate(clickFormBtn('Cancel'));
+      await sleep(120);
       await pasteBlock(masterBlock);
       // Le numero de la question posee a l'extension au collage : c'est lui
       // que la reponse doit porter, sinon le webview la jette (recherche perimee).
@@ -1913,27 +1980,27 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       await sleep(200);
     };
 
-    // AVANT resolution : verrouille comme AVANT ce lot — la condition porte
-    // sur ce qui est ECRIT dans le formulaire, jamais sur une maitresse encore
-    // inconnue (sinon la cible s'ouvrirait puis se fermerait au retour de la
-    // reponse). Comportement INCHANGE, meme ruban qu'en 2.100.0.
+    // AVANT resolution : plus aucun verrou (2026-09-13, decision user « une
+    // seule fleche, un clic la deplace ») — une ligne de lot est une cible
+    // ordinaire, maitresse connue ou pas. Le ruban « sets the place » n'existe plus.
     await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: twoLots })}, '*')`);
     await sleep(150);
     await pasteBlock(masterBlock);
     await cdp.evaluate(`window.__sent = []`);
     await hoverWave(2);
-    const stillLocked = await cdp.evaluate(`(() => ({
+    const beforeResolve = await cdp.evaluate(`(() => ({
       tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
       refusedStyle: !!document.querySelector('.ins-tag.no'),
       zones: document.querySelectorAll('.ins-zone').length,
     }))()`);
-    check('avant resolution de la maitresse : verrouille comme avant (ruban « sets the place »)',
-      !!stillLocked.tag && /master conversation sets the place/.test(stillLocked.tag)
-      && stillLocked.refusedStyle === true && stillLocked.zones === 0, JSON.stringify(stillLocked));
+    check('avant resolution de la maitresse : cible ordinaire, ACCEPTEE (plus de « sets the place »)',
+      !!beforeResolve.tag && !/sets the place|sets the batch/.test(beforeResolve.tag)
+      && beforeResolve.refusedStyle === false && beforeResolve.zones === 1, JSON.stringify(beforeResolve));
     await cdp.evaluate(`${rowOfWave(2)}.click()`);
     await sleep(120);
-    check('… le clic est inerte tant que la maitresse n est pas resolue',
-      await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'addTasksToGroup'; }).length`) === 0);
+    check('… le clic FIXE la cible sans rien envoyer (Create seul envoie)',
+      await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'addTasksToGroup'; }).length`) === 0
+      && /wave/.test(await cdp.evaluate(`(document.querySelector('#batchForm button.pri') || {}).textContent || ''`)));
 
     // DEFAUT, rien survole : l'apercu est SOEUR, a PLAT dans le corps de g1 —
     // vague de la maitresse (1) + 1, donc vagues 2 et 3 pour ce bloc a 2 vagues.
@@ -1978,13 +2045,15 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       && !!sisterHover.tag && /insert after this wave/.test(sisterHover.tag), JSON.stringify(sisterHover));
     await cdp.evaluate(`${rowOfPrompt('Terminée jamais lue')}.click()`);
     await sleep(120);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(150);
     const sentSisterHover = await cdp.evaluate(`window.__sent`);
-    check('… et le clic depose bien addTasksToGroup dans g1 (jamais createBatch)',
+    check('… et le clic puis « Creer » deposent bien addTasksToGroup dans g1 (jamais createBatch)',
       Array.isArray(sentSisterHover) && sentSisterHover.length === 1
       && sentSisterHover[0].type === 'addTasksToGroup' && sentSisterHover[0].id === 'g1', JSON.stringify(sentSisterHover));
 
-    // SURVOL D'UN AUTRE LOT (g2) : toujours refuse, ruban REFORMULE (« batch »,
-    // plus « place ») puisqu'une place par defaut existe deja ailleurs.
+    // SURVOL D'UN AUTRE LOT (g2) : cible ordinaire (2026-09-13) — la
+    // maitresse reste la place PAR DEFAUT, un clic ailleurs deplace la fleche.
     await pasteAndResolve();
     await cdp.evaluate(`window.__sent = []`);
     await hoverEl(rowOfPrompt('Tache independante'));
@@ -1993,13 +2062,17 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       refusedStyle: !!document.querySelector('.ins-tag.no'),
       zones: document.querySelectorAll('.ins-zone').length,
     }))()`);
-    check('survol d\'un AUTRE lot : refuse, ruban reformule « the master conversation sets the batch »',
-      otherLot.refusedStyle === true && otherLot.zones === 0
-      && !!otherLot.tag && /master conversation sets the batch/.test(otherLot.tag), JSON.stringify(otherLot));
+    check('survol d\'un AUTRE lot : ACCEPTE (plus de « sets the batch »)',
+      otherLot.refusedStyle === false && otherLot.zones === 1
+      && !!otherLot.tag && !/sets the batch|sets the place/.test(otherLot.tag), JSON.stringify(otherLot));
     await cdp.evaluate(`${rowOfPrompt('Tache independante')}.click()`);
     await sleep(120);
-    check('… le clic est inerte : aucun autre lot ne peut recevoir la maitresse',
-      await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'addTasksToGroup'; }).length`) === 0);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(150);
+    const sentOther = await cdp.evaluate(`window.__sent`);
+    check('… clic puis « Creer » : addTasksToGroup dans g2 (la fleche a change de lot)',
+      Array.isArray(sentOther) && sentOther.length === 1 && sentOther[0].type === 'addTasksToGroup'
+      && sentOther[0].id === 'g2', JSON.stringify(sentOther));
 
     // SURVOL DE LA LIGNE DE LA MAITRESSE ELLE-MEME : SEUL geste qui produit
     // encore l'imbrication (comportement de 2.98.0/2.100.0, plus jamais en silence).
@@ -2073,8 +2146,10 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await hoverEl(rowOfPrompt('Conv au travail'));
     await cdp.evaluate(`${rowOfPrompt('Conv au travail')}.click()`);
     await sleep(120);
+    await cdp.evaluate(clickFormBtn('Create'));
+    await sleep(150);
     const sentNestedClick = await cdp.evaluate(`window.__sent`);
-    check('clic sur la ligne de la maitresse en survol imbrique -> createBatch (jamais addTasksToGroup)',
+    check('clic sur la ligne de la maitresse puis « Creer » -> createBatch (jamais addTasksToGroup)',
       Array.isArray(sentNestedClick) && sentNestedClick.length === 1 && sentNestedClick[0].type === 'createBatch',
       JSON.stringify(sentNestedClick));
 
@@ -2542,16 +2617,95 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
 
     // Clic sur la ligne master → focusConv (id RÉEL de la conv, comme n'importe
     // quelle ligne standard) ; ne replie pas le groupe (nœud distinct de la grip).
+    // BROUILLON VIDÉ D'ABORD (2026-09-10) : la tête d'un lot est devenue une
+    // CIBLE d'insertion (« ⤓ nouvelle vague N »), donc son clic ne vaut
+    // « ouvrir l'onglet » que hors composition — exactement comme les autres
+    // lignes du lot depuis 2026-08-29. Le brouillon laissé par la section 12c
+    // ferait mesurer l'autre geste, testé juste en dessous.
+    await cdp.evaluate(`(() => {
+      const ta = document.querySelector('#batchForm .task textarea');
+      if (ta) { ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); }
+    })()`);
+    await sleep(120);
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`document.querySelector('#flow .grp-master-head .conv').click()`);
     const afterRowClick = await cdp.evaluate(`({
       sent: window.__sent,
       collapsed: document.querySelector('#flow .grp-body').classList.contains('collapsed'),
+      composing: document.body.classList.contains('composing'),
+      draft: document.querySelector('.task-top textarea.inp').value,
     })`);
     check('clic sur la ligne master → focusConv (id de la conv réelle)',
       Array.isArray(afterRowClick.sent) && afterRowClick.sent.some((m) => m.type === 'focusConv' && m.id === 'c3'),
-      JSON.stringify(afterRowClick.sent));
+      JSON.stringify(afterRowClick));
     check('… et NE replie PAS le groupe', afterRowClick.collapsed === false);
+
+    console.log('\n12bis. La TÊTE du lot est la cible « nouvelle vague » (2026-09-10, demande user)');
+    // Elle n'était cible de RIEN : le clic dessus ne faisait rien du tout
+    // pendant une composition (aucun data-ins-wave, et la désignation de
+    // maîtresse exclut tout ce qui est dans .grp-body). Or c'est le seul geste
+    // qui manquait — « si je clique sur une vague, ça doit rejoindre cette
+    // vague ; si je clique sur la master, ça doit créer une nouvelle vague ».
+    // Le numéro annoncé est le DÉFINITIF, lu sur le store (pas sur les vagues
+    // rendues : une vague entièrement finie-fermée n'a plus d'en-tête mais
+    // occupe toujours son numéro).
+    const maxWaveOfG1 = withMaster.groups[0].members.reduce((mx, m) => Math.max(mx, m.wave || 0), 0);
+    await cdp.evaluate(`(() => {
+      const ta = document.querySelector('#batchForm .task textarea');
+      ta.value = 'Tache pour une vague neuve'; ta.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await sleep(120);
+    // Un clic par evaluate, le nœud RELU à chaque fois : le premier choix
+    // re-rend le formulaire, une carte capturée d'avance serait détachée et le
+    // second clic n'irait nulle part (Create resterait « pick a model »).
+    await cdp.evaluate(`document.querySelector('#batchForm .task').querySelector('button[title="sonnet"]').click()`);
+    await sleep(80);
+    await cdp.evaluate(`document.querySelector('#batchForm .task').querySelector('button[title="medium"]').click()`);
+    await sleep(120);
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-master-head .conv').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))`);
+    await sleep(200);
+    const headHover = await cdp.evaluate(`(() => {
+      const prev = document.querySelector('.master-preview');
+      const btn = document.querySelector('#batchForm button.pri');
+      return {
+        btnText: btn ? btn.textContent : null,
+        btnOff: btn ? btn.disabled : null,
+        tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
+        refusedStyle: !!document.querySelector('.ins-tag.no'),
+        zones: document.querySelectorAll('.ins-zone').length,
+        waves: prev ? Array.from(prev.querySelectorAll('.wave-hdr-label')).map(function (n) { return n.textContent; }) : null,
+        sent: (window.__sent || []).length,
+      };
+    })()`);
+    check('survol de la tête : ruban « nouvelle vague N », accepté (jamais refusé)',
+      headHover.tag === '⤓ new wave ' + (maxWaveOfG1 + 1) && headHover.refusedStyle === false && headHover.zones === 1,
+      JSON.stringify(headHover));
+    check('… et l\'aperçu annonce CETTE vague, pas « vague 1 »',
+      !!headHover.waves && headHover.waves.join('|') === 'wave ' + (maxWaveOfG1 + 1) + ' — queued',
+      JSON.stringify(headHover));
+    check('… le survol seul n\'envoie toujours rien', headHover.sent === 0, JSON.stringify(headHover));
+
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelector('#flow .grp-master-head .conv').click()`);
+    await sleep(150);
+    check('clic sur la tête : la cible est fixée, rien n\'est envoyé (ni dépôt, ni focusConv)',
+      await cdp.evaluate(`(window.__sent || []).length`) === 0);
+    const btnBefore = await cdp.evaluate(`(() => {
+      const b = document.querySelector('#batchForm button.pri');
+      return { text: b ? b.textContent : null, off: b ? b.disabled : null, title: b ? b.title : null };
+    })()`);
+    await cdp.evaluate(`document.querySelector('#batchForm button.pri').click()`);
+    await sleep(150);
+    const afterNewWave = await cdp.evaluate(`window.__sent`);
+    check('puis « Créer » : addTasksToGroup en mode before sur la vague qui n\'existe pas encore',
+      Array.isArray(afterNewWave) && afterNewWave.length === 1
+      && afterNewWave[0].type === 'addTasksToGroup' && afterNewWave[0].mode === 'before'
+      && afterNewWave[0].wave === maxWaveOfG1 + 1 && afterNewWave[0].tasks.length === 1,
+      JSON.stringify([afterNewWave, btnBefore]));
+    check('… et le formulaire est reparti à zéro (plus de cible, plus de décor)',
+      await cdp.evaluate(`document.querySelectorAll('.ins-zone, .ins-tag, .master-preview').length`) === 0
+      && await cdp.evaluate(`document.querySelector('.task-top textarea.inp').value`) === '');
 
     // Onglet master fermé (tabOpen:false sur la conv RÉELLE) : le titre se
     // barre — DÉCOULE de tabOpen exactement comme une ligne plate (rowFor),
@@ -3374,6 +3528,15 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     const moveMouse = (x, y) => cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 });
     const masterCenter = await cdp.evaluate(`(() => { const b = document.querySelector('#flow .grp-master-head .conv').getBoundingClientRect();
       return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
+    // Brouillon vidé (2026-09-10) : ce qu'on mesure ici est la ligne master
+    // SURVOLÉE au repos. Depuis que la tête est une cible d'insertion, un
+    // brouillon resté d'une section précédente lui poserait cadre et ruban —
+    // on mesurerait alors le décor de composition, pas la bande teintée.
+    await cdp.evaluate(`(() => {
+      const ta = document.querySelector('#batchForm .task textarea');
+      if (ta) { ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); }
+    })()`);
+    await sleep(120);
 
     // Fonds de sélection/survol : absents des THEMES ci-dessus (qui ne servaient
     // qu'à l'anneau), et .conv.active/:hover n'a AUCUN repli dans panel.js — sans
@@ -3404,9 +3567,14 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       await sleep(180);
       await moveMouse(masterCenter[0], masterCenter[1]);
       await sleep(150);
+      const hoverDiag = await cdp.evaluate(`({
+        composing: document.body.classList.contains('composing'),
+        draft: (function () { const t = document.querySelector('.task-top textarea.inp'); return t ? t.value : null; })(),
+        insDecor: document.querySelectorAll('.ins-zone, .ins-tag').length,
+      })`);
       for (const side of ['left', 'right'])
         check(`thème ${name} — ligne master survolée : bande teintée ${side === 'left' ? 'gauche' : 'droite'} intacte`,
-          await band(side) === ref[side]);
+          await band(side) === ref[side], JSON.stringify(hoverDiag));
       await moveMouse(2, 2);
       await sleep(120);
       // (c) SUPPRIMÉ 2026-08-17 — « un fond d'enfant débordant ne peut pas
@@ -4853,6 +5021,40 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       goneProbe[2].closed === false, JSON.stringify(goneProbe[2]));
     check('aucune infobulle ne promet plus une reouverture (le panneau n ouvre plus rien)',
       !/reopen|rouvrir/i.test(goneProbe[0].tip), goneProbe[0].tip);
+
+    console.log('       27bis. ligne ORPHELINE : la croix de retrait REMPLACE le ⌂ et la marque (décision user 2026-09-09)');
+    // Le moteur garde parfois une ligne faute de pouvoir conclure à la fermeture
+    // (CLI vivant sans onglet, état figé sur busy, aucun nom appariable) : c'est
+    // la seule ligne où un retrait à la main a un sens, et l'user a tranché que
+    // la croix PREND LA PLACE des deux autres gestes — sans onglet, ni
+    // « rattacher comme maîtresse » ni « à relire » n'ont d'objet.
+    // On mesure `display` et non l'opacité : l'apparition au survol est déjà
+    // tenue au §26, ce qui se joue ici est quel geste EXISTE sur quelle ligne.
+    const dropProbe = await cdp.evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('#flow > .conv'));
+      const disp = (row, sel) => { const n = row.querySelector(sel); return n ? getComputedStyle(n).display : 'absent'; };
+      return rows.map((r) => ({
+        orphan: r.classList.contains('orphan'),
+        drop: disp(r, '.conv-drop'), link: disp(r, '.link-master'), set: disp(r, '.mk-set'),
+      }));
+    })()`);
+    check('ligne sans onglet : la croix de retrait est là',
+      dropProbe[0].orphan === true && dropProbe[0].drop !== 'none' && dropProbe[0].drop !== 'absent',
+      JSON.stringify(dropProbe[0]));
+    check('… et elle PREND LA PLACE des deux autres gestes (⌂ et marque masqués)',
+      dropProbe[0].link === 'none' && dropProbe[0].set === 'none', JSON.stringify(dropProbe[0]));
+    check('ligne AVEC onglet : aucune croix, les deux gestes habituels restent (non-régression)',
+      dropProbe[1].orphan === false && dropProbe[1].drop === 'none'
+      && dropProbe[1].link !== 'none' && dropProbe[1].set !== 'none',
+      JSON.stringify(dropProbe[1]));
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.evaluate(`document.querySelectorAll('#flow > .conv')[0].querySelector('.conv-drop').click()`);
+    await sleep(50);
+    const sentDrop = await cdp.evaluate(`window.__sent`);
+    check('clic sur la croix → dropConversation id=c1, et JAMAIS focusConv (le clic de ligne ne bulle pas)',
+      Array.isArray(sentDrop) && sentDrop.length === 1
+      && sentDrop[0].type === 'dropConversation' && sentDrop[0].id === 'c1',
+      JSON.stringify(sentDrop));
 
     console.log('       27a. le clic : rouvrir sur une ligne fermée, focus sur une ligne ordinaire');
     await cdp.evaluate(`window.__sent = []`);

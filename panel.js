@@ -1813,6 +1813,15 @@ function renderHtml(webview) {
     margin-top: 4px; width: 9px; height: 9px; justify-self: center; box-sizing: border-box;
     border: 1.5px dashed var(--muted); border-radius: 2px;
   }
+  /* Ligne « en attente » HORS LOT (2026-09-06) : même gabarit, même carré en
+     pointillés ; l'attente d'Entrée pulse ici sur la bordure du carré — hors
+     d'un lot il n'y a ni rail ni anneau à faire respirer. Même cadence que
+     grp-wait-pulse, même absence volontaire de @media reduced-motion. */
+  .flat-pending .ico-pending-wait { animation: flat-wait-pulse 2.5s ease-in-out infinite; }
+  @keyframes flat-wait-pulse {
+    0%, 100% { border-color: color-mix(in srgb, var(--muted) 45%, transparent); }
+    50% { border-color: var(--vscode-foreground); }
+  }
   .m-body { min-width: 0; }
   .m-prompt {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2022,6 +2031,30 @@ function renderHtml(webview) {
     color: var(--vscode-charts-yellow); flex: none; align-self: center; margin-right: -2px;
   }
   .conv.mk-pinned .mk-pin { display: flex; align-items: center; }
+  /* ── RETRAIT D'UNE LIGNE ORPHELINE (décision user 2026-09-09) ──────────────
+     Une conversation que le moteur garde faute de pouvoir conclure, alors
+     qu'aucun onglet ne la porte plus. La croix PREND LA PLACE des deux overlays
+     de la ligne (⌂ et marque) au lieu de s'ajouter à côté — sans onglet,
+     « rattacher comme maîtresse » et « à relire » n'ont plus d'objet, et c'est
+     l'user qui a tranché ainsi : « une croix à la place des boutons actuels ».
+     Même gabarit hover-only que .link-master, à sa place exacte (right:0), et
+     la même couleur de survol que .mk-set — c'est un geste de ligne comme eux,
+     pas un nouveau vocabulaire. */
+  .conv-drop {
+    position: absolute; top: calc(var(--sp-tight) - 1px); right: 0; z-index: 3;
+    display: none; border: 0; background: transparent; cursor: pointer; padding: 0 2px;
+    opacity: 0; transition: opacity .1s, color .1s; color: var(--muted);
+    align-items: center; height: 15px;
+  }
+  .conv.orphan .conv-drop { display: flex; }
+  .conv:hover .conv-drop, .conv-drop:focus-visible { opacity: 1; }
+  .conv-drop:hover { color: var(--vscode-foreground); }
+  .conv.orphan .link-master, .conv.orphan .mk-set { display: none; }
+  /* Dans un lot, le retrait d'un membre a déjà son geste (« Remove from this
+     group ») : deux façons de faire la même chose seraient une de trop.
+     Déclaré APRÈS .conv.orphan .conv-drop, à spécificité égale — c'est ce qui
+     le fait gagner, comme la règle jumelle de .link-master juste au-dessus. */
+  .m-slot .conv .conv-drop, .grp-master-slot .conv .conv-drop { display: none; }
   .chip {
     font-size: 10px; padding: 0 5px; border-radius: 8px; border: 0; cursor: default;
     background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
@@ -2387,6 +2420,8 @@ function renderHtml(webview) {
   // dans CETTE constante unique (décision 4) : en changer est une ligne.
   const MK_MARK_PATH = 'M4.2 1.8h7.6c.3 0 .5.2.5.5v11.4c0 .4-.4.6-.7.4L8 11.5l-3.6 2.6c-.3.2-.7 0-.7-.4V2.3c0-.3.2-.5.5-.5z'; // marque-page (bookmark)
   const MK_HOME_PATH = 'M8 2.2 1.6 7.5h1.7V14h3.2v-3.7h3v3.7h3.2V7.5h1.7L8 2.2z'; // ⌂ rattacher, redessiné en SVG
+  // ⨯ retrait d'une ligne orpheline (2026-09-09) — même jeu, même viewBox 16.
+  const MK_CLOSE_PATH = 'M3.6 4.5 4.5 3.6 8 7.1 11.5 3.6 12.4 4.5 8.9 8 12.4 11.5 11.5 12.4 8 8.9 4.5 12.4 3.6 11.5 7.1 8z';
   function mkIcon(pathD) { return '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="' + pathD + '"/></svg>'; }
 
   function createRow() {
@@ -2466,7 +2501,20 @@ function renderHtml(webview) {
     mkSet.innerHTML = mkIcon(MK_MARK_PATH);
     mkSet.title = t('Pin “to review” — stays until you unpin it, even after the tab closes');
     root.appendChild(mkSet);
-    const row = { root, ico, title, amb, cost, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, mkSet, mkPin, data: null };
+    // Retrait d'une ligne ORPHELINE (décision user 2026-09-09) — cf. CSS
+    // .conv-drop : le moteur garde une ligne quand aucune preuve ne lui permet
+    // de conclure à la fermeture (CLI vivant sans onglet, état figé sur busy,
+    // aucun nom appariable) ; l'user, lui, VOIT qu'il n'y a plus d'onglet. La
+    // croix est ce recours-là, et elle PREND LA PLACE des deux autres boutons
+    // au lieu de s'y ajouter : sans onglet, ni « rattacher comme maîtresse » ni
+    // « à relire » n'ont d'objet. Présente dans le DOM comme eux (rowFor est la
+    // fabrique unique), montrée par la seule classe .orphan posée au rendu.
+    const drop = el('button', 'conv-drop');
+    drop.type = 'button';
+    drop.innerHTML = mkIcon(MK_CLOSE_PATH);
+    drop.title = t('No tab carries this conversation any more — remove this line');
+    root.appendChild(drop);
+    const row = { root, ico, title, amb, cost, model, ctx, mismatch, ctxBar, fill: ctxBar.firstChild, linkMaster, mkSet, mkPin, drop, data: null };
     root.addEventListener('click', function (ev) {
       if (!row.data) return;
       // Désignation/retrait de la maîtresse (2026-09-02) : seulement HORS
@@ -2474,7 +2522,7 @@ function renderHtml(webview) {
       // qui a déjà tranché avant que ce clic ne bulle jusqu'ici, ou l'a laissé
       // passer tel quel pour une cible refusée — dans ce cas la ligne visée
       // est TOUJOURS dans .grp-body, donc jamais désignable ici non plus).
-      if (composingMasterPick() && !root.closest('.grp-body')) {
+      if (composingMasterPick() && masterPickable(root)) {
         toggleExplicitMaster(row.data.id, row.data.title);
         return;
       }
@@ -2498,6 +2546,10 @@ function renderHtml(webview) {
     }
     mkSet.addEventListener('click', togglePin);
     mkPin.addEventListener('click', togglePin);
+    drop.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (row.data) vscode.postMessage({ type: 'dropConversation', id: row.data.id });
+    });
     return row;
   }
 
@@ -2512,7 +2564,18 @@ function renderHtml(webview) {
     // chaque rendu, une classe ajoutée de l'extérieur serait effacée au
     // prochain push d'état (30 s au pire). renderMasterCue() la repose entre
     // deux rendus, en lisant la MÊME source (masterTargetId).
+    // orphan (2026-09-09) : plus aucun onglet ne porte cette conversation, et
+    // elle est pourtant rendue — donc le moteur la garde faute de pouvoir
+    // conclure. C'est la seule ligne où la croix de retrait a un sens, et
+    // tabOpen est exactement l'information que l'user lit à l'écran (c'est
+    // déjà elle qui barre le titre d'une conv terminée). Limite assumée, la
+    // même que partout ici : dans les secondes qui suivent un rechargement de
+    // fenêtre, un onglet restauré non encore visité n'est pas reconnu — la
+    // croix peut donc apparaître au survol d'une ligne qui a bien un onglet.
+    // Elle n'agit qu'au clic, et son geste est réversible : une conversation
+    // qui réécrit purge la marque de fermeture et revient d'elle-même.
     setClass(row.root, 'conv' + (c.active ? ' active' : '') + (c.pinned ? ' mk-pinned' : '')
+      + (c.tabOpen ? '' : ' orphan')
       + (masterTargetId() === c.id ? ' master-target' : ''));
     // Détail tarifaire ATTEIGNABLE au survol (2026-08-24, variante C choisie par
     // l'user sur maquette) : la boîte du montant est précisément celle que
@@ -2609,7 +2672,10 @@ function renderHtml(webview) {
   // rang est fondu dans celui de ce parent (renderGroups). layoutFlow n'a donc
   // rien de particulier à savoir de la filiation : il place des blocs, comme
   // avant, et il y en a simplement moins.
-  function layoutFlow(blocks, flat, convs, order, seen) {
+  // Lignes « en attente » HORS LOT (state.pending) : reconstruites à chaque
+  // push, comme celles des membres de lot (mn.slot.replaceChildren).
+  const pendingRows = [];
+  function layoutFlow(blocks, flat, convs, order, seen, pending) {
     countEl.textContent = convs.length ? String(convs.length) : '';
 
     const items = [];
@@ -2637,13 +2703,37 @@ function renderHtml(webview) {
       });
     }
 
+    // Conversations lancées d'ici, HORS LOT, dont le prompt attend Entrée
+    // (state.pending, 2026-09-06) : la même ligne « en attente » qu'un membre
+    // de lot (pendingLine), en FIN de liste — juste au-dessus de « New
+    // conversation », là où l'aperçu les annonçait avant le clic. Elles n'ont
+    // encore ni rang d'onglet (libellé générique « Claude Code » tant que rien
+    // n'est envoyé) ni coût : la fin est leur seule place honnête dans tous
+    // les tris. APRÈS le tri ci-dessus, donc jamais intercalées.
+    pendingRows.splice(0).forEach(function (node) { node.remove(); });
+    const pendingList = Array.isArray(pending) ? pending : [];
+    pendingList.forEach(function (p) {
+      // Même anatomie qu'un membre de lot : la ligne (pendingLine), puis le
+      // pied qui porte la note courte (« press Enter in the tab »).
+      const node = el('div', 'flat-pending');
+      node.appendChild(pendingLine(p));
+      if (p.note) {
+        const foot = el('div', 'm-foot');
+        foot.appendChild(el('span', 'm-note', p.note));
+        node.appendChild(foot);
+      }
+      pendingRows.push(node);
+      items.push({ node: node });
+    });
+
     items.forEach(function (it, i) { place(flowEl, i, it.node); });
 
     // « Aucune conversation » : en FIN de flux, jamais à la place d'un groupe —
     // un groupe dont aucune tâche n'est encore lancée n'a aucune conversation
-    // à montrer et doit quand même se rendre.
+    // à montrer et doit quand même se rendre. Une ligne « en attente » non
+    // plus : elle EST ce qu'il y a à montrer.
     let empty = flowEl.querySelector('.empty');
-    if (!convs.length) {
+    if (!convs.length && !pendingList.length) {
       if (!empty) empty = el('div', 'empty', t('No recent conversation here.'));
       place(flowEl, items.length, empty);
     } else if (empty) {
@@ -2715,6 +2805,15 @@ function renderHtml(webview) {
   // l'endroit visé : mêmes nœuds, même vocabulaire, juste une autre place.
   // C'est un état d'AFFICHAGE : aucun message n'est envoyé, seul le clic agit.
   let insertHover = null;
+  // CIBLE FIXÉE D'UN CLIC (2026-09-10, demande user) — même forme qu'une cible
+  // survolée, mais elle ne dépend plus de la souris. Le clic ENVOYAIT le bloc :
+  // il n'y avait donc rien à relire avant que ça parte (« ça ne permet pas de
+  // vérifier ce qu'on veut faire avant de valider »). Il FIXE désormais, et
+  // c'est le bouton « Créer » qui exécute — un seul déclencheur, cible fixée
+  // ou non. Le survol continue de prévisualiser librement par-dessus : en
+  // sortant de la ligne, le décor retombe sur la cible fixée au lieu de
+  // s'éteindre (restoreInsertHover), exactement comme une sélection.
+  let insertPin = null;
   // Nombre de vagues du bloc en préparation. Il décide du geste que portent
   // les boutons (rejoindre une vague / insérer devant), donc du libellé, du
   // mode envoyé et de l'aperçu — une seule source pour les quatre.
@@ -2772,6 +2871,21 @@ function renderHtml(webview) {
       if (after !== before && document.scrollingElement) document.scrollingElement.scrollTop += (after - before);
     }
   }
+  // Pose ou retire la cible FIXÉE, et remet le décor dessus. Un seul endroit
+  // qui touche insertPin en dehors de son nettoyage : le libellé du bouton et
+  // le décor en dépendent tous les deux, et deux écritures finiraient par ne
+  // plus dire la même chose.
+  function setInsertPin(p) {
+    insertPin = p || null;
+    setInsertHover(insertPin, null);
+    refreshCreateBtn();
+  }
+  // Ce que le décor montre quand la souris ne vise plus rien : la cible fixée
+  // s'il y en a une, sinon rien. C'est ce qui remplace le simple effacement au
+  // mouseleave — sans quoi le clic ne tiendrait que tant qu'on ne bouge pas.
+  function restoreInsertHover() {
+    setInsertHover(insertPin, null);
+  }
   // De combien le NUMÉRO affiché d'une vague est repoussé par l'insertion en
   // cours de survol. Zéro partout dès qu'aucune ligne n'est survolée.
   function waveShift(gid, w) {
@@ -2805,7 +2919,12 @@ function renderHtml(webview) {
   // elle. La vague en cours ne se laisse pas dépasser (le store refuse, et
   // ouvrir tout le bloc d'un coup serait pire que le refus) : le ruban le dit
   // au lieu de laisser une cible morte.
-  function rowInsertTarget(gid, wave, launchedWave, rowEl) {
+  // isNew : la ligne visée est la TÊTE du lot (sa maîtresse), et non une de
+  // ses conversations. Elle ne désigne aucune vague existante — elle en
+  // demande une NOUVELLE, à la fin du lot (2026-09-10, demande user : « si je
+  // clique sur la master, il faut que ça crée une nouvelle vague »). La tête
+  // n'était cible de rien jusqu'ici : le clic n'y faisait rien du tout.
+  function rowInsertTarget(gid, wave, launchedWave, rowEl, isNew) {
     // MAÎTRESSE MEMBRE D'UN LOT VIVANT — défaut SŒUR (2026-09-02, décision
     // déléguée à Claude, §9a de NOTES_audit_simplification_harmonisation).
     // Un bloc collé qui désigne une maîtresse a déjà une place par défaut
@@ -2819,35 +2938,42 @@ function renderHtml(webview) {
     //     cas restent chaînés/imbriqués côté extension, INCHANGÉS depuis
     //     2026-09-01) : tout survol de groupe reste alors verrouillé, comme
     //     avant ce lot.
-    // La condition d'entrée porte sur ce qui est ÉCRIT dans le formulaire,
-    // jamais sur la maîtresse résolue : la résolution arrive d'un
-    // aller-retour avec l'extension, et une cible qui s'ouvrirait puis se
-    // fermerait au retour de cette réponse serait une cible morte.
-    if (form.masterPaste || form.masterSession) {
-      const host = masterHostGroup();
-      if (!host || host.gid !== gid) {
-        return {
-          gid: gid, wave: wave, hotWave: wave, mode: 'into', rowEl: rowEl,
-          label: t(host ? 'the master conversation sets the batch' : 'the master conversation sets the place'),
-          refused: true,
-        };
-      }
-      // Survoler la ligne de la maîtresse ELLE-MÊME, dans son propre lot :
-      // seul geste qui produit encore l'imbrication (un sous-lot sous sa
-      // ligne, comme le défaut d'avant 2026-09-02) — plus jamais en silence.
-      const masterRow = masterTargetRow();
-      if (masterRow && rowEl && rowEl.contains(masterRow)) {
-        return {
-          // hotWave: -1 (jamais une vraie vague) — hotWaveNodes() n'y trouve
-          // rien, setInsertHover retombe alors sur [rowEl] SEUL : la cible est
-          // cette ligne précise, pas toute la vague qu'elle partage peut-être
-          // avec d'autres membres (l'imbrication ne touche qu'elle).
-          gid: gid, wave: host.wave, hotWave: -1, mode: 'nested', rowEl: rowEl,
-          label: t('⤷ nested under this conversation'), refused: false, nested: true,
-        };
-      }
-      // Sinon : une AUTRE ligne du MÊME lot — cible ordinaire (sœur), calculée
-      // ci-dessous exactement comme pour un bloc sans maîtresse.
+    // PLUS AUCUN VERROU DE MAÎTRESSE (2026-09-13, décision user : « une seule
+    // flèche, un clic sur une ligne la déplace là »). Jusqu'ici toute ligne
+    // d'un lot autre que celui de la maîtresse — ou de tout lot, maîtresse
+    // hors lot ou pas encore résolue — répondait « la place est fixée par la
+    // conversation maîtresse » : l'user ne pouvait plus RAMENER la flèche dans
+    // un lot après avoir désigné une maîtresse ailleurs. Ce que le verrou
+    // protégeait : rien — une cible FIXÉE part par addTasksToGroup (Create),
+    // qui n'a que faire de la maîtresse ; elle reste la place PAR DÉFAUT quand
+    // rien n'est fixé (insertSpot / masterChainGroup), et son cadre le dit.
+    // Reste UN geste propre à la maîtresse : survoler sa propre ligne dans le
+    // lot dont elle est MEMBRE imbrique un sous-lot sous elle (2026-09-02) —
+    // plus jamais en silence. (Sa ligne de TÊTE, elle, se détache :
+    // insTargetWave / masterPickable.)
+    const host = masterHostGroup();
+    const masterRow = masterTargetRow();
+    if (host && host.gid === gid && masterRow && rowEl && rowEl.contains(masterRow)) {
+      return {
+        // hotWave: -1 (jamais une vraie vague) — hotWaveNodes() n'y trouve
+        // rien, setInsertHover retombe alors sur [rowEl] SEUL : la cible est
+        // cette ligne précise, pas toute la vague qu'elle partage peut-être
+        // avec d'autres membres (l'imbrication ne touche qu'elle).
+        gid: gid, wave: host.wave, hotWave: -1, mode: 'nested', rowEl: rowEl,
+        label: t('⤷ nested under this conversation'), refused: false, nested: true,
+      };
+    }
+    // NOUVELLE VAGUE, en fin de lot. Rien de neuf côté store : c'est le geste
+    // que « + nouvelle vague » portait avant d'être retiré le 2026-08-29
+    // (groups.js addTasks, mode 'before' sur une vague qui n'existe pas encore
+    // — aucun membre à repousser, la vague naît). Le numéro annoncé est donc
+    // le DÉFINITIF, celui que l'aperçu écrira juste en dessous. Jamais
+    // refusée : une vague à naître ne peut être ni passée ni en cours.
+    if (isNew) {
+      return {
+        gid: gid, wave: wave, hotWave: -1, mode: 'before', rowEl: rowEl,
+        label: t('⤓ new wave {0}', wave), refused: false,
+      };
     }
     const insert = blockWaveCount() > 1;
     // Cible du STORE : toujours « la vague devant laquelle on s'installe ».
@@ -2882,33 +3008,56 @@ function renderHtml(webview) {
   function wireRowTargets(node, gid) {
     if (node._rowTargetsWired) return;
     node._rowTargetsWired = true;
+    // Deux familles de cibles, une seule délégation : les LIGNES du lot
+    // (data-ins-wave, la vague qu'elles occupent) et sa TÊTE (data-ins-new,
+    // qui n'occupe aucune vague et en demande une neuve).
     node.body.addEventListener('mouseover', function (e) {
       if (!activeTasks().length) return;
-      const host = e.target.closest ? e.target.closest('[data-ins-wave]') : null;
+      const host = e.target.closest ? e.target.closest('[data-ins-wave],[data-ins-new]') : null;
       if (!host || !node.body.contains(host)) return;
-      const w = Number(host.dataset.insWave);
+      const w = insTargetWave(node, host);
       if (!Number.isInteger(w)) return;
-      setInsertHover(rowInsertTarget(gid, w, node._launchedWave || 0, host), null);
+      setInsertHover(rowInsertTarget(gid, w, node._launchedWave || 0, host, host.dataset.insNew === '1'), null);
     });
     node.body.addEventListener('mouseleave', function () {
-      if (insertHover && insertHover.gid === gid && insertHover.rowEl) setInsertHover(null, null);
+      if (insertHover && insertHover.gid === gid && insertHover.rowEl) restoreInsertHover();
     });
-    // Le clic de la ligne insère au lieu d'ouvrir l'onglet, tant qu'un bloc est
-    // en préparation. En capture, car le handler de la ligne (focusConv) est
-    // posé sur elle.
+    // Le clic de la ligne FIXE la cible au lieu d'ouvrir l'onglet, tant qu'un
+    // bloc est en préparation. En capture, car le handler de la ligne
+    // (focusConv) est posé sur elle.
+    // Il n'ENVOIE plus rien (2026-09-10, demande user) : le dépôt partait au
+    // clic, sans qu'on puisse relire l'aperçu — « ça ne permet pas de vérifier
+    // ce qu'on veut faire avant de valider ». Qui porte l'envoi désormais : le
+    // bouton « Créer », seul et unique déclencheur, cible fixée ou non.
     node.body.addEventListener('click', function (e) {
       if (!activeTasks().length) return;
-      const host = e.target.closest ? e.target.closest('[data-ins-wave]') : null;
+      const host = e.target.closest ? e.target.closest('[data-ins-wave],[data-ins-new]') : null;
       if (!host || !node.body.contains(host)) return;
-      const h = insertHover;
-      if (!h || h.refused) return;
+      // Recalculée sur la ligne CLIQUÉE, jamais relue sur insertHover : le
+      // décor peut montrer la cible FIXÉE d'un clic précédent, pas forcément
+      // celle qu'on vient de viser.
+      const w = insTargetWave(node, host);
+      if (!Number.isInteger(w)) return;
+      const h = rowInsertTarget(gid, w, node._launchedWave || 0, host, host.dataset.insNew === '1');
+      if (h.refused) return;
       e.stopPropagation();
       e.preventDefault();
-      // Cible IMBRIQUÉE (survol de la ligne de la maîtresse elle-même) :
-      // même geste que le bouton Create, pas un dépôt dans un lot existant.
-      if (h.nested) { submitCreateBatch(); return; }
-      addTaskAtWave(h.gid, h.wave, false, h.mode);
+      // Re-clic sur la cible déjà fixée : elle se retire, on revient à la
+      // place par défaut. Même geste réversible que la désignation d'une
+      // maîtresse (toggleExplicitMaster) — un clic pose, le même reprend.
+      setInsertPin(insertPin && insertPin.rowEl === host ? null : h);
     }, true);
+  }
+
+  // La vague que DÉSIGNE une cible : celle de la ligne, ou la première vague
+  // LIBRE du lot pour sa tête. Une seule lecture pour le survol et pour le
+  // clic — deux calculs finiraient par ne plus dire la même chose.
+  function insTargetWave(node, host) {
+    // La tête qui EST la maîtresse n'est cible de rien : c'est la ligne à
+    // DÉTACHER, même clic qu'une ligne plate (masterPickable).
+    if (host.dataset.insNew === '1') return isMasterHead(host) ? null : (node._maxWave || 0) + 1;
+    const w = Number(host.dataset.insWave);
+    return Number.isInteger(w) ? w : null;
   }
 
   // Ruban de la ligne visée. Un seul nœud pour tout le panneau : il n'annote
@@ -2988,7 +3137,11 @@ function renderHtml(webview) {
     // clic de désignation écoute côté banc (hoverEl, test-panel-render.js).
     root.addEventListener('mouseover', function () {
       const c = getConv();
-      if (!c || !composingMasterPick() || root.closest('.grp-body')) return;
+      if (!c || !composingMasterPick() || !masterPickable(root)) return;
+      // La tête d'un lot vit DANS son corps : y arriver depuis un membre ne
+      // déclenche pas le mouseleave du corps, qui rendait le décor du membre
+      // (ligne allumée) — on le rend ici, comme lui (cible fixée ou rien).
+      restoreInsertHover();
       const label = masterTargetId() === c.id
         ? t('⤴ detach from this conversation')
         : t('⌂ set as the master conversation');
@@ -3075,11 +3228,27 @@ function renderHtml(webview) {
   // un clic sur une ligne HORS LOT (pas de closest('.grp-body') — flat ou
   // tête de lot, jamais un membre : ceux-là restent sous rowInsertTarget,
   // inchangé) écrase form.master localement et marque le choix EXPLICITE.
-  // Actif seulement PENDANT une composition qui porte un collage
-  // (form.masterPaste/masterSession posés) : sans bloc reconnu il n'y a rien à
-  // désigner, la ligne garde son clic normal (focusConv).
+  // Actif PENDANT toute composition (2026-09-06) : un prompt tapé à la main
+  // se désigne une maîtresse exactement comme un bloc collé — entre les deux,
+  // seule la place PAR DÉFAUT de l'aperçu diffère, jamais les gestes (décision
+  // user 2026-09-06). Sans prompt, la ligne garde son clic normal (focusConv).
   function composingMasterPick() {
-    return activeTasks().length > 0 && !!(form.masterPaste || form.masterSession);
+    return activeTasks().length > 0;
+  }
+  // Cette tête de lot porte-t-elle la maîtresse ?
+  function isMasterHead(headEl) {
+    const mr = masterTargetRow();
+    return !!mr && headEl.contains(mr);
+  }
+  // Où le clic désigne/détache la maîtresse : une ligne plate, ou la TÊTE d'un
+  // lot quand elle EST la maîtresse (la détacher — 2026-09-13, « cliquer sur
+  // la master n'efface pas la flèche »). Jamais un membre (cible d'insertion,
+  // rowInsertTarget), ni une tête qui n'est pas la maîtresse (cible « nouvelle
+  // vague », insTargetWave).
+  function masterPickable(root) {
+    if (root.closest('.member')) return false;
+    const head = root.closest('.grp-master-head');
+    return !head || isMasterHead(head);
   }
   // masterSeq (re)daté ICI, sans nouvelle requête : toute réponse masterResolved
   // encore en vol porte l'ANCIEN numéro et sera jetée par onMasterResolved
@@ -3109,7 +3278,10 @@ function renderHtml(webview) {
     // TOUT le décor en place autour d'un « 0 prompts », et seul « Annuler »
     // s'en débarrassait — constat user.
     if (!form || !form.tasks || !form.tasks.some(function (tk) { return tk.prompt.trim(); })) return null;
-    return (form.masterPaste && form.master && form.master.sessionId) ? form.master.sessionId : null;
+    // form.master vient de la réponse de l'extension (collage) OU d'un clic
+    // de désignation (setExplicitMaster) — un prompt tapé n'a que le second,
+    // et il compte autant (2026-09-06).
+    return (form.master && form.master.sessionId) ? form.master.sessionId : null;
   }
 
   // La LIGNE de cette conversation, si elle est réellement à l'écran. Une
@@ -3162,7 +3334,18 @@ function renderHtml(webview) {
   // qu'un lot neuf ou une vague a naitre ; depuis que le numero annonce est
   // celui d'une vague REJOINTE (mode 'into', correctif ci-dessus), ce test
   // ecrivait « — queued » sur la vague qui demarre a l'instant du clic.
-  function buildMasterPreview(offset, runningWave) {
+  // Le parametre flat (2026-09-06) : vrai quand « Create » ne fondera AUCUN lot
+  // — une tache seule, sans maitresse, hors de toute cible
+  // (miroir exact de shouldCreateGroup, extension.js). Elle deviendra une
+  // ligne « en attente » de la liste plate, sans separateur de vague : en
+  // annoncer un ici promettrait une forme que le panneau ne rendra jamais.
+  // Le parametre joins (2026-09-10) : le numero d'une vague qui EXISTE DEJA
+  // dans le lot d'accueil — celle que les taches vont REJOINDRE (mode 'into').
+  // Son separateur est deja a l'ecran, quelques lignes plus haut : en poser un
+  // second, du meme numero, faisait lire « VAGUE 3 » deux fois de suite et
+  // laissait croire a une vague de plus (constat user 2026-09-10, capture).
+  // L'apercu se colle donc sous les membres de cette vague, sans en-tete.
+  function buildMasterPreview(offset, runningWave, flat, joins) {
     const shift = Number.isInteger(offset) ? offset : 0;
     const running = Number.isInteger(runningWave) ? runningWave : 1;
     // La variable de boucle s'appelle tk et non t : dans ce webview, t est la
@@ -3177,18 +3360,21 @@ function renderHtml(webview) {
     box.appendChild(el('div', 'mp-rail'));
     let wave = null;
     tasks.slice().sort(function (a, b) { return a.wave - b.wave; }).forEach(function (tk) {
-      if (tk.wave !== wave) {
+      if (!flat && tk.wave !== wave) {
         wave = tk.wave;
         // Même vocabulaire que les séparateurs de vague d'un lot réel : une
         // vague au-delà de celle qui tourne naît « queued », et l'aperçu ne
         // peut pas dire autre chose que ce que le lot dira dans dix secondes.
         const num = wave + shift;
         // Le VRAI separateur de vague du panneau, pas un rendu maison : c'est
-        // celui-la que le lot posera dans dix secondes.
-        const hdr = el('div', 'wave-hdr');
-        hdr.appendChild(el('div', 'wave-hdr-label',
-          num > running ? t('wave {0} — queued', num) : t('wave {0}', num)));
-        box.appendChild(hdr);
+        // celui-la que le lot posera dans dix secondes. Sauf pour une vague
+        // REJOINTE : le lot n'en posera pas un second, il n'y en a qu'un.
+        if (num !== joins) {
+          const hdr = el('div', 'wave-hdr');
+          hdr.appendChild(el('div', 'wave-hdr-label',
+            num > running ? t('wave {0} — queued', num) : t('wave {0}', num)));
+          box.appendChild(hdr);
+        }
       }
       box.appendChild(pendingLine({
         status: 'queued',
@@ -3213,7 +3399,10 @@ function renderHtml(webview) {
     if (!mcueHost) { mcueHost = el('div', 'mcue'); document.body.appendChild(mcueHost); }
     mcueHost.replaceChildren();
     const list = (Array.isArray(targets) ? targets : [targets]).filter(function (x) { return x && x.node && x.node.isConnected; });
-    if (!list.length || (!form.masterPaste && !insertHover)) return;
+    // L'agrafe DIT une filiation (maîtresse désignée) ou une destination
+    // survolée ; sans l'une ni l'autre il n'y a rien à tracer — qu'il s'agisse
+    // d'un bloc collé ou d'un prompt tapé (2026-09-06).
+    if (!list.length || (!masterTargetId() && !insertHover)) return;
     const b = newConvHeadEl.getBoundingClientRect();
     const sy = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
     // Une ordonnée par cible : l'axe de la ligne pour une conversation, la
@@ -3302,9 +3491,21 @@ function renderHtml(webview) {
     // mouseleave reste ce qu'il a toujours ete, la sortie de ligne EN COURS de
     // composition.
     if (!composing) {
+      // Plus rien à poser, donc plus de cible : le bouton le redit tout de
+      // suite (refreshCreateBtn a déjà tourné, en amont de ce rendu).
+      if (insertPin) { insertPin = null; refreshCreateBtn(); }
       if (insertHover) { setInsertHover(null, null); return; }
       hideInsZone();
       hideInsTag();
+    }
+    // Cible FIXÉE dont la ligne n'est plus à l'écran (lot dissous, membre
+    // retiré, onglet fermé) : elle ne désigne plus rien, et le décor qu'elle
+    // tenait pendrait dans le vide. Le survol se retirait tout seul au
+    // mouseleave ; une cible qui ne dépend plus de la souris n'a que ce
+    // contrôle-ci, joué à chaque push d'état.
+    if (insertPin && insertPin.rowEl && !insertPin.rowEl.isConnected) {
+      setInsertPin(null);
+      return;
     }
     const id = masterTargetId();
     rows.forEach(function (row, rid) { row.root.classList.toggle('master-target', rid === id); });
@@ -3336,10 +3537,19 @@ function renderHtml(webview) {
     // la présence d'une LIGNE de maîtresse (row) mais sur le collage lui-même ;
     // la place, elle, est celle de la maquette validée : sous l'en-tête
     // « New conversation » (cf. la branche finale du placement plus bas).
-    if (spot || form.masterPaste) {
+    // PROMPT TAPÉ À LA MAIN (2026-09-06, décision user) : même aperçu, même
+    // place par défaut qu'un bloc sans maîtresse, mêmes cibles au survol — la
+    // condition est donc la composition elle-même (au moins un prompt), plus
+    // le collage. C'était le dernier endroit où « Create » ne montrait rien.
+    if (spot || composing) {
+      // Aucun lot a naitre (tache seule, sans maitresse, hors cible) :
+      // l'apercu est la ligne plate qu'elle deviendra, sans separateur. Un
+      // nom de lot (ligne group: du bloc) ne compte plus (2026-09-09) —
+      // miroir exact de shouldCreateGroup (extension.js).
+      const flat = !spot && !chain && activeTasks().length === 1 && !masterTargetId();
       masterPreviewEl = spot
-        ? buildMasterPreview(spot.wave - 1, spot.running)
-        : buildMasterPreview(chainOffset, chain ? (chain.launchedWave || 0) : 1);
+        ? buildMasterPreview(spot.wave - 1, spot.running, false, spot.joins)
+        : buildMasterPreview(chainOffset, chain ? (chain.launchedWave || 0) : 1, flat);
       // « À LEUR PLACE DÉFINITIVE » se prend au mot, et cette place n'est pas
       // toujours la ligne d'en dessous : quand la maîtresse est DÉJÀ la tête
       // d'un lot vivant, « Create » ne fonde pas un second lot — il enchaîne
@@ -3411,7 +3621,9 @@ function renderHtml(webview) {
   //     repos comme au survol ; la filiation reste dite par la respiration de
   //     la maîtresse, qui ne s'éteint jamais ;
   //   . les LIGNES du lot sont les cibles, clic entier : plus aucun bouton de
-  //     vague, donc plus rien qui prenne de la place pour un geste rare ;
+  //     vague, donc plus rien qui prenne de la place pour un geste rare — la
+  //     TÊTE du lot en est une depuis le 2026-09-10 (elle vise la vague qui
+  //     n'existe pas encore), et le clic FIXE la cible au lieu d'envoyer ;
   //   . l'aperçu se DEPLACE jusqu'à la cible — il occupe la place qu'il
   //     annonce, et comme le bloc se pose APRES la vague éclairée, la cible ne
   //     se dérobe pas sous la souris qui la vise ;
@@ -3482,7 +3694,11 @@ function renderHtml(webview) {
       // celle que l'insertion va repousser.
       // 'into'   : a la suite des membres de la vague w, donc devant la premiere
       //            vague qui la suit.
-      return spotAt(insertHover.gid, w, insertHover.mode === 'before' ? w : w + 1);
+      const s = spotAt(insertHover.gid, w, insertHover.mode === 'before' ? w : w + 1);
+      // Vague REJOINTE : son separateur est deja rendu, l'apercu n'en pose pas
+      // un second (buildMasterPreview, joins).
+      if (s && insertHover.mode === 'into') s.joins = w;
+      return s;
     }
     // Rien de survole, ou une cible refusee (elle ne repousse rien, cf.
     // waveShift) : la place PAR DEFAUT reste celle du lot-hote de la maitresse
@@ -4405,6 +4621,10 @@ function renderHtml(webview) {
         const ms = g.master;
         node.masterConvId = ms.convId || null;
         node.masterTitle = ms.title || t('Master conversation');
+        // La tête est une CIBLE, au même titre que les lignes du lot — mais
+        // elle n'occupe aucune vague : la sienne est celle qui n'existe pas
+        // encore (rowInsertTarget, isNew).
+        node.masterHead.dataset.insNew = '1';
         place(node.body, 0, node.masterHead);
         // …et jamais la conv qu'un MEMBRE encore rendu tient déjà (même
         // invariant que rowOwner ci-dessus) : la tête retombe alors sur son
@@ -4484,6 +4704,12 @@ function renderHtml(webview) {
       const hardBlocked = blockers.some(function (m) { return m.status === 'stale'; });
 
       node._launchedWave = g.launchedWave;
+      // Dernière vague du lot, lue sur le STORE et non sur ce qui est rendu :
+      // une vague dont tous les membres sont finis-onglet-fermé n'a plus
+      // d'en-tête (waveNums, plus bas) mais elle occupe toujours son numéro.
+      // C'est la formule de groups.js addTasks pour « à la fin » — la tête du
+      // lot vise la vague suivante, jamais un numéro déjà pris.
+      node._maxWave = g.members.reduce(function (mx, m) { return Math.max(mx, m.wave || 0); }, 0);
       wireRowTargets(node, g.id);
       const keys = new Set();
       // La ligne master (si présente) occupe déjà l'index 0 (placée plus
@@ -4895,18 +5121,21 @@ function renderHtml(webview) {
       if (ta) ta.focus();
       return;
     }
-    // Plus de confirmation pour la vague EN COURS (2026-08-29). Elle
-    // s'affichait dans le formulaire, tout en bas du panneau — loin du bouton
-    // qu'on venait de cliquer : l'user a conclu que le bouton ne faisait
-    // « absolument rien » et est allé cliquer ailleurs. Ce qu'elle protégeait
-    // (« ça va partir tout de suite ») est désormais dit DEUX fois là où le
-    // geste se passe : le libellé du bouton (« — démarre ») et l'aperçu qui
-    // apparaît sous le curseur avant même le clic. Une question posée hors du
-    // champ de vision ne protège personne.
+    // Plus de BANNIÈRE de confirmation pour la vague EN COURS (2026-08-29) :
+    // elle s'affichait dans le formulaire, tout en bas du panneau — loin du
+    // bouton qu'on venait de cliquer, si bien que l'user a conclu que le bouton
+    // ne faisait « absolument rien » et est allé cliquer ailleurs. Une question
+    // posée hors du champ de vision ne protège personne.
+    // Ce qu'elle protégeait est porté, depuis le 2026-09-10, par le GESTE
+    // lui-même : le clic ne fait plus que FIXER la cible (aperçu à sa place
+    // définitive, ligne visée éclairée, ruban), et c'est « Créer » qui envoie —
+    // un bouton qui nomme la vague visée. La vérification est donc à l'écran
+    // en permanence, au lieu d'une question à lire ailleurs.
     // Le decor de survol se demonte PAR SON CHEMIN NORMAL (surbrillance de la
     // ligne, ruban, renumerotation) : remettre la variable a null suffisait a
     // le rendre invisible du code, pas de l'ecran — mesure du 2026-08-29, la
     // ligne restait allumee avec son ruban apres l'insertion.
+    insertPin = null;
     setInsertHover(null, null);
     postTasksToGroup(gid, wave, mode, resolveForTransfer(tasks), tasks.length === 1);
   }
@@ -5077,7 +5306,12 @@ function renderHtml(webview) {
     if (!createBtn) return;
     const tasks = activeTasks();
     const n = tasks.length;
-    setText(createBtn, n > 1 ? t('Create {0}', n) : t('Create'));
+    // Cible FIXÉE : le bouton dit OÙ il va poser, à l'endroit même où on
+    // valide. C'est la seconde moitié de la confirmation demandée — l'aperçu
+    // montre le résultat en haut du panneau, le bouton le nomme en bas.
+    const pin = insertPin && !insertPin.nested ? insertPin : null;
+    setText(createBtn, pin ? t('Create → wave {0}', pin.wave)
+      : (n > 1 ? t('Create {0}', n) : t('Create')));
     const unresolved = n && tasks.some(unresolvedTask);
     createBtn.disabled = !n || batchState.busy || unresolved;
     createBtn.title = unresolved ? t('pick a model') : '';
@@ -5199,6 +5433,9 @@ function renderHtml(webview) {
     renderForm();
   }
 
+  // Rafraîchissement différé de l'aperçu pendant la frappe (voir l'écouteur
+  // input de taskCard).
+  let cueTypingTimer = 0;
   function taskCard(task, disabled) {
     const card = el('div', 'task');
     const top = el('div', 'task-top');
@@ -5213,9 +5450,14 @@ function renderHtml(webview) {
       task.prompt = ta.value;
       refreshCreateBtn();
       // Le décor d'insertion (cible surlignée, agrafe, aperçu) ne dépend que
-      // de « reste-t-il au moins un prompt » : on ne le refait qu'au passage
-      // vide ↔ non vide, jamais à chaque frappe (un reflow par caractère).
-      if (had !== !!task.prompt.trim()) renderMasterCue();
+      // de « reste-t-il au moins un prompt » : on le refait tout de suite au
+      // passage vide ↔ non vide. Entre deux, l'aperçu montre le DÉBUT du
+      // prompt (2026-09-06 : un prompt tapé a lui aussi son aperçu) — il se
+      // rafraîchit après une pause de frappe, jamais à chaque caractère (un
+      // reflow par touche).
+      if (had !== !!task.prompt.trim()) { renderMasterCue(); return; }
+      if (cueTypingTimer) clearTimeout(cueTypingTimer);
+      cueTypingTimer = setTimeout(function () { cueTypingTimer = 0; renderMasterCue(); }, 250);
     });
     ta.addEventListener('paste', function () { setTimeout(function () { applyBlockPaste(ta); }, 0); });
     ta.addEventListener('change', function () { applyBlockPaste(ta); });
@@ -5296,7 +5538,9 @@ function renderHtml(webview) {
   // autonome », « aucune retenue »), pas seulement le constat.
   function masterChip() {
     const m = form.master;
-    if (!form.masterPaste || !m || m.sessionId) return null;
+    // Aussi pour un prompt tapé (2026-09-06) : détacher d'un clic la
+    // maîtresse qu'on vient de désigner mérite la même pastille.
+    if (!m || m.sessionId || !activeTasks().length) return null;
     const chip = el('div', 'master-chip');
     // DÉTACHEMENT DÉLIBÉRÉ (2026-09-02) : un clic sur la ligne de la maîtresse
     // l'a retirée. Ce n'est pas un échec de recherche — afficher « aucune
@@ -5418,11 +5662,20 @@ function renderHtml(webview) {
       // (insertHover.nested) : ce survol EXPLICITE reste le seul chemin vers
       // l'imbrication, et Create fait alors ce qu'il a toujours fait
       // (submitCreateBatch, plus bas) — même geste que le clic sur cette ligne.
-      const nested = insertHover && insertHover.nested;
+      // CIBLE FIXÉE d'un clic (2026-09-10) : elle prime sur toute place par
+      // défaut — c'est un choix explicite de l'user, et l'aperçu la montre
+      // depuis ce clic. Une cible imbriquée reste le geste « Create » normal,
+      // comme avant : elle fonde un sous-lot, elle ne dépose pas dans un lot.
+      if (insertPin && !insertPin.nested) {
+        addTaskAtWave(insertPin.gid, insertPin.wave, false, insertPin.mode);
+        return;
+      }
+      const nested = (insertPin && insertPin.nested) || (insertHover && insertHover.nested);
       const host = nested ? null : masterHostGroup();
       if (host) {
         const tasks = activeTasks();
         if (!tasks.length) return;
+        insertPin = null;
         setInsertHover(null, null);
         // host.target (jamais host.wave + 1) : la vague suivant celle de la
         // maîtresse peut déjà être LANCÉE (correctif 2026-09-02, §b) — sans ce
@@ -5748,7 +6001,7 @@ function renderHtml(webview) {
       if (c.pinned && !seen.has(c.id)) return true;
       return !seen.has(c.id) && !c.groupId && !masterIds.has(c.id);
     });
-    layoutFlow(blocks, flat, convs, order, seen);
+    layoutFlow(blocks, flat, convs, order, seen, (msg.state && msg.state.pending) || []);
     // … ici, et pas avant : les blocs viennent seulement d'être posés dans le
     // flux. offsetTop/offsetHeight d'un nœud DÉTACHÉ du document valent 0 —
     // au tout premier rendu, mesurer depuis renderGroups posait donc un rail

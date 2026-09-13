@@ -34,25 +34,24 @@ function check(name, cond, detail) {
 
 console.log('\n1. Lot A (plan master-conv-isolée 2026-08-09) — groupe à une seule tâche');
 check('plusieurs tâches → groupe, toujours (inchangé)',
-  shouldCreateGroup(2, '', false) === true);
-check('1 tâche, sans nom de groupe ni maîtresse résolue → pas de groupe',
-  shouldCreateGroup(1, '', false) === false);
-// RÉTABLI le 2026-09-02 (régression de la même journée, cf. extension.js) :
-// refuser le groupe sur un simple `group:` laissait la tâche SANS AUCUNE
-// surface à l'écran — avant le premier Entrée le transcript n'existe pas
-// encore, le lot était son seul porteur d'état. Le vrai grief (le nom n'est
-// affiché nulle part) se règle par la CHROME de la grip (panel.js), pas en
-// empêchant le lot de naître.
-check('1 tâche + `group:` (nom non vide) → groupe',
-  shouldCreateGroup(1, 'Refonte paiement', false) === true);
-check('1 tâche + `group:` ET maîtresse → groupe (les deux raisons cumulées)',
-  shouldCreateGroup(1, 'Refonte paiement', true) === true);
+  shouldCreateGroup(2, false) === true);
+check('1 tâche, sans maîtresse résolue → pas de groupe',
+  shouldCreateGroup(1, false) === false);
+// 2026-09-09, signalé par l'user sur un vrai lancement (« une conversation
+// isolée crée quand même un batch, ce n'est pas logique ») : un bloc à UNE
+// section portant `group:` fondait un lot d'un seul membre, sans maîtresse —
+// donc une grip « BATCH hh:mm », un rail et un bloc autour d'une ligne, pour
+// un nom affiché nulle part. Le motif du rétablissement du 2026-09-02 (le lot
+// était la seule surface de la tâche avant son premier Entrée) est tombé le
+// 2026-09-06 : la ligne « en attente » de la liste plate la porte désormais.
+check('1 tâche + `group:` (nom non vide) → PAS de groupe, le nom ne fonde rien',
+  shouldCreateGroup(1, false) === false);
 check('1 tâche + maîtresse résolue (candidat non nul) → groupe',
-  shouldCreateGroup(1, '', true) === true);
-check('1 tâche, collage non résolu (candidat null/falsy) et sans nom → pas de groupe',
-  shouldCreateGroup(1, undefined, null) === false);
+  shouldCreateGroup(1, true) === true);
+check('1 tâche, collage non résolu (candidat null/falsy) → pas de groupe',
+  shouldCreateGroup(1, null) === false);
 check('0 tâche (garde défensive, ne devrait pas arriver après normalizeTasks) → pas de groupe',
-  shouldCreateGroup(0, 'Nom', true) === false);
+  shouldCreateGroup(0, true) === false);
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

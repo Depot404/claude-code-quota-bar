@@ -386,12 +386,22 @@ function createIntentStore() {
       byId.set(sessionId, {
         model: isModel(intent.model) ? intent.model : null,
         effort: isEffort(intent.effort) ? intent.effort : null,
+        // Le PROMPT lancé (2026-09-06) : hors lot, personne d'autre ne le garde
+        // — le lanceur l'envoie et l'oublie, et le transcript ne naît qu'au
+        // premier Entrée. C'est lui qui donne son titre à la ligne « en
+        // attente » de la liste plate (extension.js pendingLaunches) ; un
+        // membre de lot a le sien dans le store des groupes et n'en a pas
+        // besoin ici (null).
+        prompt: typeof intent.prompt === 'string' && intent.prompt.trim() ? intent.prompt : null,
         at: intent.at || Date.now(),
       });
     },
     get(sessionId) { return byId.get(sessionId) || null; },
     forget(sessionId) { byId.delete(sessionId); },
     size() { return byId.size; },
+    // [sessionId, intent] de toutes les conversations lancées d'ici, dans
+    // l'ordre des lancements (Map conserve l'ordre d'insertion).
+    entries() { return Array.from(byId.entries()); },
   };
 }
 

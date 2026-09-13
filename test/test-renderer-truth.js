@@ -170,6 +170,69 @@ console.log('\n4. Onglet RENOMMÉ, positions du memento validées → la ligne s
     JSON.stringify(activeOf(snap2)) === '["a"]', JSON.stringify(activeOf(snap2)));
 }
 
+console.log('\n5. La photo se valide contre le monde de CETTE fenêtre, jamais contre l\'union des libellés publiés (2026-09-09)');
+{
+  // Le défaut réel, mesuré au journal du poste : `validatePositions` recevait
+  // `claudeCount: labels.length` — l'UNION publiée par toutes les fenêtres
+  // (~/.claude/panel-tabs/*.json), republiée avec du retard — alors que la
+  // photo ne décrit que les onglets d'ICI. Les deux comptes ne coïncidaient
+  // qu'entre deux mouvements d'onglets, donc jamais après un reload : photo
+  // rejetée en bloc, plus aucune identité pour le surlignage, pendant que le
+  // CLIC (focus.js, qui comptait DÉJÀ le monde local) se réparait tout seul.
+  // « J'arrive à changer de conversation, mais plus rien n'est surligné. »
+  const positions = () => ({
+    byId: new Map([
+      ['a', { viewColumn: 1, index: 0, flatIndex: 0 }],
+      ['b', { viewColumn: 1, index: 1, flatIndex: 1 }],
+    ]),
+    activeFlatIndex: 1,
+  });
+  const mute = { sessionId: null, claude: false, flushedAt: null };   // juge MUET
+
+  // (a) une AUTRE fenêtre publie ses onglets : l'union en compte 3, il y en a 2 ici.
+  const other = build(
+    { labels: ['Conv A', 'ok go', 'onglet d\'une autre fenêtre'], activeLabel: 'ok go',
+      activeIndex: 1, claudeCount: 2, labelChangedAt: NOW - 100 },
+    mute, { sessionTabLocations: positions });
+  check('union plus grande que le monde local → la photo reste valable, la ligne s\'allume',
+    JSON.stringify(activeOf(other)) === '["b"]', JSON.stringify(activeOf(other)));
+
+  // (b) les libellés RETARDENT (un seul publié pour deux onglets réels) : à la
+  // position visée il n'y a aucun libellé. Rien ne contredit l'identité, donc
+  // elle tient — c'est l'état d'une fenêtre dans la minute qui suit un reload.
+  const late = build(
+    { labels: ['Conv A'], activeLabel: 'ok go', activeIndex: 1, claudeCount: 2,
+      labelChangedAt: NOW - 100 },
+    mute, { sessionTabLocations: positions });
+  check('libellés en retard sur l\'API → l\'identité tient quand même',
+    JSON.stringify(activeOf(late)) === '["b"]', JSON.stringify(activeOf(late)));
+
+  // (c) NON-RÉGRESSION : un appelant sans `claudeCount` (bancs d'avant ce lot,
+  // fournisseur d'onglets sans accès à l'API) garde le comportement d'avant.
+  const legacy = build(
+    { labels: ['Conv A', 'ok go'], activeLabel: 'ok go', activeIndex: 1, labelChangedAt: NOW - 100 },
+    mute, { sessionTabLocations: positions });
+  check('sans claudeCount, repli sur la longueur de l\'union (comportement d\'avant)',
+    JSON.stringify(activeOf(legacy)) === '["b"]', JSON.stringify(activeOf(legacy)));
+
+  // (d) Le compte local ne DÉSARME pas le contrôle : une photo réellement
+  // périmée (3 positions pour 2 onglets ici) reste rejetée en bloc.
+  const stale = () => ({
+    byId: new Map([
+      ['a', { viewColumn: 1, index: 0, flatIndex: 0 }],
+      ['b', { viewColumn: 1, index: 1, flatIndex: 1 }],
+      ['c', { viewColumn: 1, index: 2, flatIndex: 2 }],
+    ]),
+    activeFlatIndex: 1,
+  });
+  const rejected = build(
+    { labels: ['Conv A', 'ok go'], activeLabel: 'ok go', activeIndex: 1, claudeCount: 2,
+      labelChangedAt: NOW - 100 },
+    mute, { sessionTabLocations: stale });
+  check('photo périmée (3 positions, 2 onglets) → toujours rejetée en bloc',
+    activeOf(rejected).length === 0, JSON.stringify(activeOf(rejected)));
+}
+
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

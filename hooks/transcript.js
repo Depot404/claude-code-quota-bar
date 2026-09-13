@@ -211,6 +211,15 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
   const tail = parseSlice(readSlice(filePath, TAIL_BYTES, 'tail'));
   let lastPrompt = null;
   let aiTitle = precomputedAiTitle || null;
+  // Origine de la conversation, ÉCRITE et donc persistante (2026-09-09) : le CLI
+  // recopie `CLAUDE_CODE_ENTRYPOINT` sur chaque ligne user/assistant/attachment
+  // du transcript. C'est la même valeur que celle du registre des sessions
+  // vivantes (live-sessions.js), mais elle SURVIT au process — or le registre
+  // disparaît avec lui, si bien qu'une conversation étrangère morte n'avait plus
+  // aucune origine lisible et ne quittait le panneau que par accident (un titre
+  // matchable, cf. isGone). La DERNIÈRE ligne fait foi : une conversation reprise
+  // ailleurs porte les deux, et c'est là qu'elle vit maintenant.
+  let entrypoint = null;
   for (let i = tail.length - 1; i >= 0; i--) {
     const e = tail[i];
     if (!aiTitle && e.type === 'ai-title' && e.aiTitle) {
@@ -220,7 +229,8 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
       if (t) aiTitle = t;
     }
     if (!lastPrompt && e.type === 'last-prompt' && e.lastPrompt) lastPrompt = e.lastPrompt;
-    if (aiTitle && lastPrompt) break;
+    if (!entrypoint && typeof e.entrypoint === 'string' && e.entrypoint) entrypoint = e.entrypoint;
+    if (aiTitle && lastPrompt && entrypoint) break;
   }
   // `lastPrompt` (2026-09-04) : le dernier prompt BRUT, tel que le CLI l'écrit
   // (`type:'last-prompt'`), coupé à 200 caractères — c'est le texte que
@@ -228,7 +238,7 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
   // après toute réouverture, tant qu'aucun nouveau message n'est envoyé (cf.
   // labels.js convMatchesLabel). Un troisième libellé possible, jamais un titre.
   const lp = typeof lastPrompt === 'string' && lastPrompt.trim() ? lastPrompt.slice(0, 200) : null;
-  if (aiTitle) return { title: aiTitle, source: 'ai-title', lastPrompt: lp };
+  if (aiTitle) return { title: aiTitle, source: 'ai-title', lastPrompt: lp, entrypoint };
   let firstUser = null;
   scanHeadLines(filePath, HEAD_SCAN_MAX_BYTES, (e) => {
     if (e.type !== 'user' || e.isMeta || e.isSidechain || !e.message) return false;
@@ -238,9 +248,11 @@ function extractTitleInfo(filePath, precomputedAiTitle) {
     firstUser = cleaned;
     return true;
   });
-  if (firstUser) return { title: firstUser, source: 'first-user', lastPrompt: lp };
+  if (firstUser) return { title: firstUser, source: 'first-user', lastPrompt: lp, entrypoint };
   const lpTitle = cleanTitle(lastPrompt);
-  return lpTitle ? { title: lpTitle, source: 'last-prompt', lastPrompt: lp } : { title: null, source: null, lastPrompt: lp };
+  return lpTitle
+    ? { title: lpTitle, source: 'last-prompt', lastPrompt: lp, entrypoint }
+    : { title: null, source: null, lastPrompt: lp, entrypoint };
 }
 
 // PREMIER message user d'un transcript, brut (enveloppes injectées retirées,
@@ -520,6 +532,37 @@ const BG_AGENT_LAUNCH_RE = /^Async agent launched successfully/;
 const BG_AGENT_ID_RE = /agentId:\s*([A-Za-z0-9_-]+)/;
 const BG_BASH_LAUNCH_RE = /^Command running in background with ID:\s*([A-Za-z0-9_.-]+)/;
 const TASK_NOTIF_RE = /^<task-notification>/;
+// Arrêt EXPLICITE d'une tâche de fond (outil TaskStop, relevé en réel le
+// 2026-09-06) : une tâche tuée n'écrira JAMAIS sa notification de fin — son
+// résultat d'arrêt est la seule preuve que cette attente est close. Sans lui,
+// un lancement arrêté à la main restait « en attente » jusqu'au plafond d'une
+// heure, et chaque fin de tour affichait cinq minutes de spinner (le transcript
+// venant d'écrire, la conversation « donnait signe de vie », cf. state.js
+// PENDING_IDLE_MS). Ancré comme les lancements : le JSON du résultat COMMENCE
+// par ce message, une citation vit au milieu d'un texte.
+const TASK_STOP_RE = /^\{"message":"Successfully stopped task:\s*([A-Za-z0-9_.-]+)/;
+// Le harnais termine le fichier de sortie d'une commande de fond par
+// « [exited with code N] » (relevé en réel sur trois tâches, 2026-09-06). Une
+// tâche SORTIE ne réveillera plus rien d'elle-même : si sa notification n'est
+// pas dans le transcript, elle sera livrée au prochain tour de l'user — la
+// conversation, elle, est au repos. Sans ce test, une tâche finie PENDANT que
+// Claude travaillait (sortie 13:48, notification livrée 13:55 avec le message
+// suivant, mesuré) tenait le spinner jusqu'à cinq minutes après chaque fin de
+// tour (PENDING_IDLE_MS, state.js). Fichier absent ou sans marqueur → le doute
+// profite à l'attente, comme avant.
+const BG_BASH_OUTPUT_RE = /Output is being written to:\s*(.+?\.output)(?:\s|\.|$)/;
+function taskExited(outputPath) {
+  if (!outputPath) return false;
+  try {
+    const st = fs.statSync(outputPath);
+    const len = Math.min(st.size, 512);
+    if (!len) return false;
+    const fd = fs.openSync(outputPath, 'r');
+    const buf = Buffer.alloc(len);
+    try { fs.readSync(fd, buf, 0, len, st.size - len); } finally { fs.closeSync(fd); }
+    return /\[exited with code -?\d+\]\s*$/.test(buf.toString('utf8'));
+  } catch { return false; }
+}
 
 // Tout le texte d'un contenu (string brute ou blocs) — contrairement à
 // firstTextBlock, une notification peut cohabiter avec d'autres blocs.
@@ -618,18 +661,32 @@ function pendingResumeSignals(filePath) {
       // Lancement : UNIQUEMENT un tool_result, et ancré — cf. les regex.
       const txt = allText(b.content).trim();
       if (!txt) continue;
+      // Arrêt à la main (TaskStop) : clôt la tâche comme le ferait sa
+      // notification — Set, donc idempotent et sans ordre imposé.
+      const stopped = TASK_STOP_RE.exec(txt);
+      if (stopped) { notifiedTask.add(stopped[1]); continue; }
       if (BG_AGENT_LAUNCH_RE.test(txt)) {
         const m = BG_AGENT_ID_RE.exec(txt);
         launches.push({ toolUseId: b.tool_use_id || null, taskId: m ? m[1] : null, ts: entryTs });
         continue;
       }
       const bash = BG_BASH_LAUNCH_RE.exec(txt);
-      if (bash) launches.push({ toolUseId: b.tool_use_id || null, taskId: bash[1], ts: entryTs });
+      // Le libellé de lancement finit la phrase sur l'identifiant (« …ID:
+      // b7pipxp5q. Output is… ») et la classe de caractères admet le point :
+      // l'identifiant capturé portait donc le point final, et aucun appariement
+      // par task-id n'a jamais pu réussir — seul le tool-use-id des
+      // notifications sauvait la mise (mesuré le 2026-09-06 en écrivant le cas
+      // TaskStop, qui n'a QUE l'identifiant pour clore). Ponctuation ôtée.
+      if (bash) {
+        const out = BG_BASH_OUTPUT_RE.exec(txt);
+        launches.push({ toolUseId: b.tool_use_id || null, taskId: bash[1].replace(/[.,;:]+$/, ''), ts: entryTs, output: out ? out[1] : null });
+      }
     }
   }
   const pendingLaunches = launches.filter((l) =>
     !(l.taskId && notifiedTask.has(l.taskId)) &&
-    !(l.toolUseId && notifiedToolUse.has(l.toolUseId)));
+    !(l.toolUseId && notifiedToolUse.has(l.toolUseId)) &&
+    !taskExited(l.output));
   const pendingTask = pendingLaunches.length > 0;
   const pendingTaskAt = pendingTask
     ? pendingLaunches.reduce((latest, l) => Math.max(latest, l.ts || 0), 0)

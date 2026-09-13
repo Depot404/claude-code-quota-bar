@@ -46,8 +46,17 @@ check('busy sans onglet, origine INCONNUE → affichée (filet, cf. 3quinquies)'
   gone(conv({ state: 'busy' }), noTabs) === false);
 check('waiting sans onglet → affichée',
   gone(conv({ state: 'waiting' }), noTabs) === false);
-check('titre de repli (1er message) sans onglet → affichée (non matchable)',
+check('aucun nom appariable (titre de repli, aucun dernier prompt) sans onglet → affichée',
   gone(conv({ titleSource: 'first-user' }), noTabs) === false);
+// 2026-09-09, signalé par l'user sur une conv Haiku d'UN SEUL TOUR (« repond
+// ok ») : pas encore de titre d'IA, donc exemptée à vie par l'ancien test — sa
+// ligne est restée après la fermeture de l'onglet, sans aucun geste pour la
+// retirer. Or son onglet portait bien un nom appariable : son DERNIER PROMPT
+// (mesuré le 2026-09-04, `convMatchesLabel` le teste depuis 2.112.0).
+check('… mais titre de repli AVEC dernier prompt, sans onglet → MASQUÉE',
+  gone(conv({ titleSource: 'last-prompt', lastPrompt: 'repond ok' }), noTabs) === true);
+check('… et l\'onglet qui porte encore ce dernier prompt la garde (preuve fraîche)',
+  gone(conv({ titleSource: 'last-prompt', lastPrompt: 'repond ok' }), tabs('repond ok')) === false);
 check('titre de repli (last-prompt) sans onglet → affichée',
   gone(conv({ titleSource: 'last-prompt' }), noTabs) === false);
 check('titre absent (aucune source) sans onglet → affichée',
@@ -1197,6 +1206,59 @@ console.log('\n15. Onglet restauré JAMAIS VISITÉ : « Claude Code » n\'est pa
   check('fermeture observée : la sœur part au 1er recompute, la tolérance ne la retient plus',
     twinClosed.length === 1 && twinClosed[0].title.includes('reellement ouvert'),
     JSON.stringify(twinClosed.map((c) => c.title)));
+}
+
+// ── §17. L'ORIGINE ÉCRITE DU TRANSCRIPT SURVIT AU PROCESS (2026-09-09) ───────
+// Signalé par l'user : « les conversations du Secrétaire apparaissent dans les
+// lignes ». Le compagnon SecretaireUI se déclarait `claude-vscode` (héritage d'un
+// contournement d'auth de juin), donc indiscernable d'un onglet — corrigé chez lui.
+// Reste le trou générique, celui-ci : le registre des sessions (§3quinquies) ne
+// connaît que les VIVANTES, sa fiche disparaissant avec le CLI. Une conversation
+// étrangère TERMINÉE n'avait donc plus aucune origine lisible, et ne quittait le
+// panneau que par le hasard d'un titre matchable. Le transcript, lui, porte
+// l'origine sur chaque ligne : elle vaut morte comme vivante.
+console.log('\n17. Origine étrangère lue sur le TRANSCRIPT (process déjà mort)');
+{
+  // (a) la règle seule : rien de vivant nulle part, seule l'origine écrite parle.
+  check('conv terminée d\'origine sdk-py, sans onglet → MASQUÉE',
+    gone(conv({ state: 'idle', entrypoint: 'sdk-py' }), noTabs) === true);
+  check('… même sans titre matchable (repli), qui l\'exemptait jusqu\'ici',
+    gone(conv({ state: 'idle', titleSource: 'first-user', entrypoint: 'sdk-py' }), noTabs) === true);
+  check('… et même busy, le filet « au travail » ne joue plus',
+    gone(conv({ state: 'busy', entrypoint: 'sdk-cli' }), noTabs) === true);
+  check('origine VS Code → inchangée (affichée, c\'est le cas nominal)',
+    gone(conv({ state: 'busy', entrypoint: 'claude-vscode' }), noTabs) === false);
+  check('origine absente/inconnue → comportement d\'avant, jamais un masquage de plus',
+    gone(conv({ state: 'busy', entrypoint: null }), noTabs) === false
+    && gone(conv({ state: 'busy', entrypoint: 'entrypoint-de-demain' }), noTabs) === false);
+  check('reprise dans VS Code : l\'onglet ouvert l\'emporte sur l\'origine écrite',
+    gone(conv({ state: 'idle', entrypoint: 'sdk-py' }), tabs('Implement part 5 closed…')) === false);
+
+  // (b) bout en bout : c'est le transcript RÉEL qui doit porter l'information,
+  // sinon la règle ci-dessus ne s'exerce jamais sur le monde (le champ est écrit
+  // par le CLI sur les lignes user/assistant/attachment).
+  const ws = 'C:\\Users\\Test\\Projets VSCODE\\Origine';
+  const dir = state.projectDirFor(ws);
+  fs.mkdirSync(dir, { recursive: true });
+  const line = (o, ep) => Object.assign({}, o, ep ? { entrypoint: ep } : {});
+  // TITRE DE REPLI VOULU (aucun ai-title) : c'est le seul cas où les deux
+  // conversations seraient affichées sans ce lot — le dernier test d'isGone
+  // exempte un titre non matchable. L'origine est donc le SEUL écart mesuré,
+  // et ce banc était ROUGE avant la correction.
+  const writeConv = (id, ep, firstText) => fs.writeFileSync(path.join(dir, `${id}.jsonl`),
+    [line(userMsg(firstText), ep), line(assistant, ep)]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  writeConv('vs', 'claude-vscode', 'Conv nee dans VS Code');
+  writeConv('sec', 'sdk-py', 'Conv d un compagnon headless');
+  const snap = state.buildSnapshot({
+    workspacePath: ws, recentMs: 4 * 3600 * 1000, maxItems: 12,
+    tabs: () => ({ known: true, labels: [] }),   // aucun onglet : c'est le monde réel du compagnon
+    liveSessions: () => new Set(),               // et son process est déjà mort
+  }, state.createTranscriptReader()).conversations.map((c) => c.title);
+  check('témoin : le transcript VS Code au titre de repli reste listé',
+    snap.some((t) => t.includes('VS Code')), snap.join(' | '));
+  check('le transcript sdk-py ne l\'est JAMAIS, alors que rien d\'autre ne le masquait',
+    !snap.some((t) => t.includes('compagnon')), snap.join(' | '));
 }
 
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}

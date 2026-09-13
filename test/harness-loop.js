@@ -453,6 +453,13 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     state: lastState,
     groups: () => (lastState() || {}).groups || [],
     eval: (expr) => cdp.evaluate(expr),
+    // Capture PNG de la page telle qu'elle est (le rendu se regarde, il ne se
+    // déduit pas d'un compte de nœuds). Le fichier est écrit là où on le dit.
+    shot: async (file) => {
+      const r = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(file, Buffer.from(r.data, 'base64'));
+      return file;
+    },
 
     // Gestes dans le VRAI DOM.
     click: (sel) => cdp.evaluate(`(() => { const n = document.querySelector(${JSON.stringify(sel)});

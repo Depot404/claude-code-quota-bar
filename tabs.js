@@ -2,7 +2,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { isClaudeTab, claudeTabLabels } = require('./labels');
+const { isClaudeTab, claudeTabLabels, claudeTabWorld } = require('./labels');
 // « ce pid est-il vivant » : une seule vérité pour tout le projet (elle décide
 // aussi bien de l'union des onglets ici que de la présence d'une session dans
 // state.js) — cf. live-sessions.js.
@@ -109,17 +109,18 @@ function localActiveIndex() {
     const group = vscode.window.tabGroups.activeTabGroup;
     const activeTab = group && group.activeTab;
     if (!activeTab || !isClaudeTab(activeTab) || !activeTab.label) return null;
-    let idx = -1;
-    let i = 0;
-    for (const g of vscode.window.tabGroups.all) {
-      for (const t of (g && g.tabs) || []) {
-        if (!isClaudeTab(t)) continue;
-        if (t === activeTab) idx = i;
-        i++;
-      }
-    }
-    return idx >= 0 ? idx : null;
+    const w = claudeTabWorld(vscode.window.tabGroups.all, activeTab);
+    return w.activeFlatIndex;
   } catch { return null; }
+}
+
+// Nombre d'onglets Claude ouverts DANS CETTE FENÊTRE, lu en direct sur l'API.
+// C'est le monde contre lequel la photo du memento doit être validée — le même
+// que celui du clic (focus.js `worldTabs`), cf. labels.js `claudeTabWorld`.
+// À ne PAS confondre avec `allLabels().length`, l'union des libellés publiés par
+// toutes les fenêtres, qui compte une autre population et avec du retard.
+function localClaudeCount() {
+  try { return claudeTabWorld(vscode.window.tabGroups.all, null).claudeCount; } catch { return null; }
 }
 
 function publish(labels) {
@@ -379,6 +380,7 @@ function createTabTracker(handlers = {}) {
       if (disposed) {
         return {
           known: false, labels: allLabels(), activeLabel: null, activeIndex: null,
+          claudeCount: null,
           source: null, windowFocused, sinceFocusMs: Date.now() - lastFocusGainedAt,
           actSessionId: null, labelChangedAt,
         };
@@ -400,6 +402,9 @@ function createTabTracker(handlers = {}) {
       const activeIndex = fresh ? freshIndex : lastActiveIndex;
       return {
         known: true, labels: allLabels(), activeLabel, activeIndex,
+        // Le monde local frais, pour valider la photo du memento (state.js) —
+        // même population que le clic. Cf. labels.js `claudeTabWorld`.
+        claudeCount: localClaudeCount(),
         source: fresh ? 'fresh' : 'remembered',
         windowFocused, sinceFocusMs: Date.now() - lastFocusGainedAt,
         // Identité du dernier acte, servie UNIQUEMENT si l'onglet actif est
