@@ -199,7 +199,7 @@ async function run() {
   const file = path.join(dir, 'panel.html');
   fs.writeFileSync(file, html, 'utf8');
 
-  // 2. Brave Octopus, offscreen, éphémère.
+  // 2. Brave Octopus, headless, éphémère (pourquoi headless : harness-loop.js).
   const exe = BRAVE_CANDIDATES.find((p) => { try { return fs.existsSync(p); } catch { return false; } });
   if (!exe) { console.log('  SKIP  brave.exe introuvable'); return; }
   for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
@@ -208,7 +208,7 @@ async function run() {
   const child = spawn(exe, [
     `--remote-debugging-port=${PORT}`, `--user-data-dir=${USER_DATA_DIR}`, '--profile-directory=Default',
     '--no-first-run', '--no-default-browser-check', '--disable-default-apps',
-    '--window-position=-32000,-32000', '--window-size=420,900', 'about:blank',
+    '--headless=new', '--window-size=420,900', 'about:blank',
   ], { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
 
@@ -225,11 +225,11 @@ async function run() {
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
 
-    // Artefact du banc, à ne pas confondre avec le bug qu'on teste : une fenêtre
-    // posée hors écran (-32000) est « hidden » pour Chromium, qui GÈLE alors les
-    // animations — currentTime resterait à 0 même avec un CSS parfait (mesuré :
-    // hidden → 0 → 0 ; visible → 217 → 633). Le vrai panneau, lui, est à l'écran.
-    // On rend donc la page visible pour le moteur, sans jamais la montrer.
+    // Artefact du banc, à ne pas confondre avec le bug qu'on teste : une page
+    // « hidden » pour Chromium GÈLE ses animations — currentTime resterait à 0
+    // même avec un CSS parfait (mesuré : hidden → 0 → 0 ; visible → 217 → 633).
+    // En headless la page est déjà `visible` (mesuré 2026-09-14) ; l'émulation
+    // reste pour `document.hasFocus()`, vrai dans le vrai panneau.
     await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
 
     // acquireVsCodeApi n'existe qu'à l'intérieur de VS Code : le webview
@@ -3419,7 +3419,17 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       // Chromium (constaté flaky, thème tantôt dark tantôt light). Le membre
       // "done" (m2, jamais animé) porte exactement le même invariant d'anneau
       // opaque sans dépendre du minutage d'une pause d'animation.
-      const sels = { membre: '#flow .member .conv .ico-done', master: '#flow .grp-master-head .conv .ico' };
+      // Un seul sujet, et c'est délibéré : l'anneau de la maîtresse est ANIMÉ
+      // (busy), donc deux captures prises à deux instants y mesurent le minutage
+      // de l'animation, pas l'opacité — échecs intermittents changeant de thème
+      // d'un lancement à l'autre (2026-09-14 : 1 fail, 2 fails, 0 fail sur le
+      // même code ; figer les animations n'y change rien). Qui porte l'invariant
+      // à sa place : le membre `.ico-done`, jamais animé, et c'est justement
+      // l'état qui avait cassé (la master « ✓ déjà lue », dont l'opacity de
+      // glyphe rendait l'anneau translucide) — que la maîtresse en busy ne
+      // reproduisait même pas. Sa géométrie reste couverte par
+      // checkMasterGeometry, dans les deux thèmes.
+      const sels = { membre: '#flow .member .conv .ico-done' };
       const withRail = {};
       for (const [who, sel] of Object.entries(sels)) withRail[who] = await ringDisc(sel);
       await cdp.evaluate(`document.querySelector('#flow .grp-rail').style.display = 'none'`);

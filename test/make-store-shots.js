@@ -331,6 +331,14 @@ async function run() {
     child = spawn(exe, [
       `--remote-debugging-port=${PORT}`, `--user-data-dir=${USER_DATA_DIR}`, '--profile-directory=Default',
       '--no-first-run', '--no-default-browser-check', '--disable-default-apps',
+      // Fenetre hors ecran, PAS headless : cet outil fabrique des images
+      // PUBLIQUES qui doivent rendre exactement comme la fenetre de
+      // reference — en headless le texte se pose autrement et toutes les
+      // hauteurs enflent (mesure 2026-09-14 : les 4 captures plus hautes de
+      // 5 a 71 px css). Il se lance a la main, jamais dans la rafale de
+      // Publish.ps1, qui ne joue que les bancs `test-*.js` : rien a gagner
+      // ici a supprimer la fenetre. Les BANCS, eux, sont headless (regle du
+      // dossier, harness-loop.js).
       '--window-position=-32000,-32000', '--window-size=440,1200', 'about:blank',
     ], { detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();

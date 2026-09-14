@@ -239,7 +239,13 @@ function uuid() {
   return `00000000-0000-4000-8000-${n}`;
 }
 
-// ── Brave Octopus, offscreen (même montage que test-panel-render.js) ─────────
+// ── Brave Octopus, headless (même montage que test-panel-render.js) ──────────
+// `--headless=new`, JAMAIS une fenêtre hors écran (`--window-position=-32000`) :
+// une fenêtre, même invisible, est ACTIVÉE par Chromium à son lancement et vole
+// le focus clavier de l'user — signalé le 2026-09-14 pendant une publication
+// (67 bancs, un Brave par banc CDP, relance : « je ne peux plus écrire »).
+// Mesuré ce jour-là : headless + 5 captures d'écran = zéro passage au premier
+// plan. Vaut pour tout lanceur de Brave sous test/ (5 sites, même drapeau).
 const BRAVE_CANDIDATES = [
   process.env.BRAVE_EXE,
   'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
@@ -361,7 +367,7 @@ async function start(opts = {}) {
   const child = spawnReal(exe, [
     `--remote-debugging-port=${PORT}`, `--user-data-dir=${USER_DATA_DIR}`, '--profile-directory=Default',
     '--no-first-run', '--no-default-browser-check', '--disable-default-apps',
-    '--window-position=-32000,-32000', '--window-size=420,900', 'about:blank',
+    '--headless=new', '--window-size=420,900', 'about:blank',
   ], { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
 
@@ -379,9 +385,9 @@ async function start(opts = {}) {
   await cdp.connect();
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
-  // Fenêtre hors écran = « hidden » pour Chromium, qui gèle alors animations et
-  // rAF : on rend la page visible pour le moteur sans jamais la montrer (même
-  // artefact et même parade que test-panel-render.js).
+  // En headless la page est déjà `visible` (mesuré 2026-09-14) ; l'émulation de
+  // focus reste pour `document.hasFocus()`, vrai dans le vrai panneau (même
+  // montage que test-panel-render.js).
   await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
   // `acquireVsCodeApi` n'existe qu'à l'intérieur de VS Code. C'est notre point
   // d'interception : chaque message posté par le webview atterrit dans __sent,
