@@ -90,6 +90,15 @@ const globalState = {
 const OPEN_COMMAND = 'claude-vscode.editor.open';
 
 const tabListeners = [];
+// Réglages (`getConfiguration(section).get(k)`) : défauts, sauf ce qu'un banc
+// pose par setConfig — qui prévient aussi l'extension, comme VS Code.
+const CONFIG = new Map();
+const configListeners = [];
+function setConfig(key, value) {
+  CONFIG.set(key, value);
+  const evt = { affectsConfiguration: (sec) => key === sec || key.startsWith(sec + '.') };
+  for (const cb of configListeners) { try { cb(evt); } catch {} }
+}
 let GROUPS = [];
 let provider = null;
 // Ce que « le CLI » fait quand l'extension demande l'ouverture d'un onglet :
@@ -118,8 +127,11 @@ const vscodeStub = {
   ViewColumn: { Active: -1 },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: WORKSPACE_PATH } }],
-    getConfiguration: () => ({ get: (_k, d) => d }),
-    onDidChangeConfiguration: () => ({ dispose() {} }),
+    getConfiguration: (section) => ({ get: (k, d) => {
+      const key = section ? section + '.' + k : k;
+      return CONFIG.has(key) ? CONFIG.get(key) : d;
+    } }),
+    onDidChangeConfiguration: (cb) => { configListeners.push(cb); return { dispose() {} }; },
   },
   commands: {
     registerCommand: () => ({ dispose() {} }),
@@ -140,8 +152,12 @@ const vscodeStub = {
 };
 
 const netStub = { get: () => { throw new Error('network disabled in harness'); } };
+// Aucun process par défaut ; un banc qui teste un auxiliaire (dictée) l'ouvre
+// explicitement par allowSpawn(), et c'est alors le VRAI spawn qui part.
+let spawnAllowed = false;
+function allowSpawn(on = true) { spawnAllowed = !!on; }
 const procStub = {
-  spawn: () => { throw new Error('spawn disabled in harness'); },
+  spawn: (...a) => { if (spawnAllowed) return spawnReal(...a); throw new Error('spawn disabled in harness'); },
   execSync: () => { throw new Error('execSync disabled in harness'); },
 };
 
@@ -447,6 +463,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // Environnement (le décor reste modifiable en cours de banc).
     sandbox: SANDBOX, projectDir: PROJECT_DIR, workspacePath: WORKSPACE_PATH,
     writeTranscript, writeSessionsState, spawnSession, setGroups, setTabs, emitTabs, uuid,
+    setConfig, allowSpawn,
 
     // Journaux du cycle.
     pushed,          // extension → webview
@@ -496,5 +513,6 @@ module.exports = {
   start,
   // Décor, utilisable dès le require (donc AVANT start()).
   writeTranscript, writeSessionsState, spawnSession, setGroups, setTabs, uuid,
+  setConfig, allowSpawn,
   SANDBOX, PROJECT_DIR, WORKSPACE_PATH,
 };

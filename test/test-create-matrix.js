@@ -404,14 +404,13 @@ async function checkInvariants(h, ctx, out) {
     promptValue: (document.querySelector('${PROMPT_FIELD}') || {}).value || '',
     insTag: document.querySelectorAll('.ins-tag').length,
     insZone: document.querySelectorAll('.ins-zone').length,
-    masterChip: document.querySelectorAll('.master-chip').length,
     hotRows: document.querySelectorAll('.ins-hot').length,
     masterTarget: document.querySelectorAll('.master-target').length,
     masterPreview: document.querySelectorAll('.master-preview').length,
   }))()`);
   check('I7 — le formulaire est vide après Create', residue.promptValue === '', JSON.stringify(residue));
   check('I7 — aucun décor d’insertion résiduel (ruban/cadre/agrafe/surlignage)',
-    residue.insTag === 0 && residue.insZone === 0 && residue.masterChip === 0
+    residue.insTag === 0 && residue.insZone === 0
       && residue.hotRows === 0 && residue.masterTarget === 0 && residue.masterPreview === 0,
     JSON.stringify(residue));
 }

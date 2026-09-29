@@ -140,7 +140,7 @@ const QUOTA = {
 };
 
 const BATCH = {
-  envConflict: [], busy: false, notice: null, noticeHint: null,
+  envConflict: [], busy: false, notice: null,
   inherit: { model: 'sonnet', effort: 'medium' },
   lastModel: null, lastEffort: null,
 };
@@ -414,6 +414,13 @@ async function run() {
       const out = path.join(OUT_DIR, scene.file);
       fs.writeFileSync(out, Buffer.from(shot.data, 'base64'));
       console.log(`  wrote ${out}  (${Math.round(clip.width)}x${Math.round(clip.height)} css px @${SCALE}x)`);
+      // Le bloc collé ne doit pas déborder sur la scène suivante : depuis
+      // 2.126.1 son aperçu se pose en fin de liste, donc DANS le cadrage
+      // de la scène du lot. Cancel remet le formulaire à zéro, comme un user.
+      if (scene.paste) {
+        await cdp.evaluate(`document.querySelector('#batchActions .form-actions button').click()`);
+        await sleep(250);
+      }
     }
     // Empreinte des sources qui DESSINENT ces captures (cf. shots-fingerprint.js).
     // C'est elle qui permet à un banc de dire « la fiche a pris du retard »

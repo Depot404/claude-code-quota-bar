@@ -753,24 +753,6 @@ function renderHtml(webview) {
     border-bottom-left-radius: var(--hook-radius);
   }
 
-  /* ── Échec de la recherche : le formulaire le DIT ─────────────────────────
-     « 0 candidate » et « 2 candidates » sont fréquents (bloc écrit à la main,
-     conversation maîtresse fermée, jeton périmé) : un panneau muet se lirait
-     comme une panne. Variante E de MOCKUP_master_cible_collage. Le cas TROUVÉ
-     n'a pas de pastille — l'agrafe le dit déjà, et mieux. */
-  .master-chip {
-    display: flex; align-items: center; gap: 6px; margin: 0 0 6px;
-    padding: 4px 7px; border-radius: 4px; font-size: 12px;
-    background: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 14%, transparent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 55%, transparent);
-  }
-  .master-chip .who {
-    flex: 1 1 auto; min-width: 0; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; font-weight: 600;
-  }
-  .master-chip .tail { flex: none; opacity: .8; font-size: 11px; }
-  .master-chip .sign { flex: none; opacity: .85; }
-
   .conv .body { min-width: 0; }
   /* Coût estimé ($) — variante B de la maquette 2026-08-17, choisie par
      l'user : le montant vit sur la ligne du TITRE, à droite, et la ligne méta
@@ -1012,18 +994,27 @@ function renderHtml(webview) {
   /* ── En-têtes de section repliables ── */
   .sec-head {
     display: flex; align-items: center; gap: 6px;
-    margin: var(--sp-block) 0 var(--sp-tight); padding: 1px 2px;
+    margin: 10px 0 4px; padding: 3px 2px;
     border-radius: 3px; cursor: pointer; user-select: none;
   }
   .sec-head:hover { background: var(--vscode-list-hoverBackground); }
   .sec-head h2 { margin: 0; }
+  /* Variante A de MOCKUP_formulaire_boutons_entetes_2026-09-29 (choix user) :
+     les trois sections repliables étaient noyées dans le reste — titre en
+     couleur franche, chevron et trait d'accent jusqu'au bord. button.background
+     est le seul jeton dont la vivacité est garantie par tous les thèmes. */
+  .sec-head h2, .sec-head.sub h3 { color: var(--vscode-foreground); font-size: 11.5px; font-weight: 700; }
+  .sec-head .chevron { color: var(--vscode-button-background); font-weight: 700; }
+  .sec-head .rule {
+    flex: 1 1 auto; height: 2px; border-radius: 1px;
+    background: linear-gradient(90deg, var(--vscode-button-background), color-mix(in srgb, var(--vscode-button-background) 15%, transparent));
+  }
   /* Chevron : la maquette à 9px était illisible (retour user) — 13px reste
      discret à côté d'un h2 à 11px tout en restant une vraie cible de clic. */
   .chevron {
     flex: 0 0 auto; width: 14px; text-align: center;
     font-size: 13px; line-height: 1; color: var(--muted);
   }
-  .sec-head .spacer { flex: 1 1 auto; }
   .sort-select {
     font-size: 10px; padding: 1px 3px; border-radius: 3px;
     background: var(--vscode-dropdown-background, var(--vscode-input-background));
@@ -1035,11 +1026,7 @@ function renderHtml(webview) {
      que .sec-head (chevron + repli), gabarit plus discret — ce n'est pas une
      section de haut niveau comme Conversations/Quota, c'est une extension du
      lanceur, toujours dépliée par défaut. */
-  .sec-head.sub { margin: var(--sp-block) 0 var(--sp-tight); }
-  .sec-head.sub h3 {
-    margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .06em;
-    text-transform: uppercase; color: var(--muted);
-  }
+  .sec-head.sub h3 { margin: 0; letter-spacing: .06em; text-transform: uppercase; }
 
   /* ── Création groupée (lot 1) ─────────────────────────────────────────────
      Tout est bâti sur les variables de thème VS Code : le panneau doit rester
@@ -1061,10 +1048,14 @@ function renderHtml(webview) {
   }
   .btn.pri:hover { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
   .btn[disabled] { opacity: .45; cursor: default; }
+  /* Ne porte plus que les ÉCHECS de lancement (2026-09-29) : les messages
+     d'information (« Ouverture de N… », « Ajouté après le lot… ») sont partis,
+     le bouton Créer dit l'ouverture en cours et les lignes disent le reste. */
   .notice {
     display: none;
     margin: var(--sp-sep) 0; padding: 3px 6px; border-radius: 4px; font-size: 11px;
-    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+    background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 14%, transparent);
+    color: var(--vscode-errorForeground, #f14c4c);
   }
   .notice.show { display: block; }
   .banner {
@@ -1268,6 +1259,38 @@ function renderHtml(webview) {
     color: var(--muted); font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 3px;
   }
   .xdel:hover { color: var(--vscode-errorForeground, #f14c4c); background: var(--vscode-list-hoverBackground); }
+  /* Micro d'une case de prompt (2.126.0) — même place, même icône, mêmes états
+     que celui de l'extension Claude Code : coin haut-droit DANS la case, qui
+     réserve sa largeur ; en écoute, une pilule teintée avec trois barres de
+     niveau devant la pastille pleine (couleurs reprises de ses jetons
+     --app-recording-*). */
+  .ta-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+  .ta-wrap textarea.inp { padding-right: 28px; }
+  .ta-wrap.rec textarea.inp { padding-right: 50px; }
+  .mic-btn {
+    position: absolute; top: 3px; right: 3px; z-index: 1;
+    display: flex; align-items: center; gap: 2px; height: 22px; padding: 0;
+    border: 0; border-radius: 5px; background: transparent; cursor: pointer;
+    color: var(--muted); transition: background-color .2s, color .2s, padding .2s;
+  }
+  .mic-btn:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); transition: none; }
+  .mic-btn[disabled] { opacity: .45; cursor: default; }
+  .mic-puck { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 5px; transition: background-color .2s, color .2s; }
+  .mic-ico { width: 15px; height: 15px; }
+  .mic-bars { display: none; }
+  .mic-btn.rec, .mic-btn.busy {
+    padding-left: 5px;
+    background: var(--vscode-editorMarkerNavigationInfo-headerBackground, color-mix(in srgb, var(--vscode-charts-blue, #3b82f6) 20%, transparent));
+    color: var(--vscode-charts-blue, #3b82f6);
+  }
+  .mic-btn.rec .mic-bars, .mic-btn.busy .mic-bars { display: block; overflow: visible; }
+  .mic-btn.rec .mic-puck, .mic-btn.busy .mic-puck { background: var(--vscode-charts-blue, #3b82f6); color: var(--vscode-button-foreground, #fff); }
+  /* Transcription de la fin après l'arrêt : la pastille respire. Pas de
+     @media (prefers-reduced-motion) — ce poste le déclare en permanence, et
+     l'état « ça travaille » disparaîtrait (même raison que .ico-busy). */
+  .mic-btn.busy .mic-puck { animation: mic-busy 1s ease-in-out infinite alternate; }
+  @keyframes mic-busy { from { opacity: 1; } to { opacity: .45; } }
+  .mic-btn.err { color: var(--vscode-errorForeground, #f14c4c); }
   .seg {
     display: inline-flex; border-radius: 3px; overflow: hidden;
     border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
@@ -1300,8 +1323,15 @@ function renderHtml(webview) {
   .segA1 button.on .dot { background: var(--vscode-button-foreground); }
   .segA1.off button { opacity: .35; cursor: default; }
   .segA1 button:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
-  .form-foot { display: flex; gap: 6px; align-items: center; margin-top: var(--sp-block); }
-  .form-foot .spacer { flex: 1; }
+  /* Barre d'action EN TÊTE de « New conversation » (2026-09-29) : après un
+     collage de plusieurs lots, Annuler/Créer finissaient tout en bas, à
+     chercher. Hors de #batchForm pour rester au-dessus de l'aperçu. */
+  .form-actions { display: flex; justify-content: center; gap: 10px; margin: var(--sp-sep) 0 2px; }
+  .form-actions .btn { font-size: 12px; padding: 5px 16px; border-radius: 4px; min-width: 92px; font-weight: 600; }
+  .form-actions .btn.pri { box-shadow: 0 1px 3px color-mix(in srgb, var(--vscode-button-background) 45%, transparent); }
+  .form-adders { display: flex; justify-content: center; gap: 6px; flex-wrap: wrap; margin: 4px 0 var(--sp-block); }
+  .form-adders .btn { border-style: dashed; background: transparent; color: var(--muted); }
+  .form-adders .btn:hover { color: var(--vscode-foreground); }
   /* Badge d'écart intention/réel : le seul endroit du panneau qui parle de ce
      qui a été DEMANDÉ. Discret et non cliquable — c'est un constat, pas une
      action (la correction se fait par /model dans la conversation). */
@@ -2072,7 +2102,7 @@ function renderHtml(webview) {
     <div class="sec-head" id="convHead">
       <span class="chevron" id="convChevron">▾</span>
       <h2>${vscode.l10n.t('Conversations')} <span class="count" id="convCount"></span></h2>
-      <span class="spacer"></span>
+      <span class="rule"></span>
       <select class="sort-select" id="sortSelect" title="${vscode.l10n.t('Sort conversations by')}">
         <option value="tabOrder">${vscode.l10n.t('Tab order')}</option>
         <option value="lastActivity">${vscode.l10n.t('Last activity')}</option>
@@ -2100,9 +2130,10 @@ function renderHtml(webview) {
         <div class="sec-head sub" id="newConvHead" title="${vscode.l10n.t('Open several conversations at once, each with its own prompt, model and effort.')}">
           <span class="chevron" id="newConvChevron">▾</span>
           <h3>${vscode.l10n.t('New conversation')}</h3>
-          <span class="spacer"></span>
+          <span class="rule"></span>
         </div>
         <div class="sec-body" id="newConvBody">
+          <div id="batchActions"></div>
           <div class="notice" id="batchNotice"></div>
           <div id="batchForm"></div>
         </div>
@@ -2113,6 +2144,7 @@ function renderHtml(webview) {
     <div class="sec-head" id="quotaHead">
       <span class="chevron" id="quotaChevron">▾</span>
       <h2>${vscode.l10n.t('Quota')}</h2>
+      <span class="rule"></span>
     </div>
     <div class="sec-body" id="quotaBody">
       <div id="quota"></div>
@@ -3357,7 +3389,10 @@ function renderHtml(webview) {
     if (!tasks.length) return null;
     const box = el('div', 'master-preview');
     // Premier enfant : le segment de rail qui prolonge celui du lot (voir CSS).
-    box.appendChild(el('div', 'mp-rail'));
+    // Pas de lot à naître (flat : tâche seule, sans maîtresse ni cible) = pas
+    // de rail : la ligne plate qu'elle deviendra n'en a pas, le trait est celui
+    // d'un lot (décision user 2026-09-30). Reste la pastille de la ligne.
+    if (!flat) box.appendChild(el('div', 'mp-rail'));
     let wave = null;
     tasks.slice().sort(function (a, b) { return a.wave - b.wave; }).forEach(function (tk) {
       if (!flat && tk.wave !== wave) {
@@ -3583,17 +3618,18 @@ function renderHtml(webview) {
         // puis attache nulle part — invisible, alors que c'est lui qui montre
         // ce qui va etre pose (mesure du banc, 2026-08-29).
         else if (spot) spot.parent.appendChild(masterPreviewEl);
-        // AUCUNE MAÎTRESSE : le lot naîtra autonome, il n'a donc aucune ligne
-        // où s'accrocher. L'aperçu se pose en tête du CORPS de « New
-        // conversation » — juste sous son en-tête, comme la maquette validée
-        // (MOCKUP_refus_maitresse_2026-09-02, sa branche « pas de maîtresse »
-        // dans place()). Dans le
-        // corps et non après l'en-tête : c'est le corps qui porte le repli de
-        // la section, un aperçu posé à côté lui survivrait et flotterait seul.
-        // Pas d'agrafe ici, et c'est voulu : elle DIT la filiation, or il n'y
-        // en a plus (drawMasterCue ne trace que vers le haut, l'aperçu est
-        // dessous — rien à ajouter pour l'éteindre).
-        else newConvBodyEl.insertBefore(masterPreviewEl, newConvBodyEl.firstChild);
+        // AUCUNE MAÎTRESSE, AUCUNE CIBLE : l'aperçu se pose À LA SUITE de la
+        // liste des conversations, comme la nouvelle ligne qu'il deviendra
+        // (décision user 2026-09-30 — sous la barre d'action du formulaire, il
+        // s'intercalait entre les boutons et la case de prompt). Dernier
+        // enfant de #flow : layoutFlow place ses enfants par INDEX, et le
+        // routeur d'état le détache avant tout rendu (detachMasterPreview),
+        // il ne décale donc rien. Liste REPLIÉE : il y serait invisible, et
+        // plus rien ne montrerait ce que « Create » va lancer — il reste
+        // alors dans le corps de « New conversation », sous la barre d'action.
+        // Pas d'agrafe ici : elle DIT la filiation, or il n'y en a pas.
+        else if (!convBodyEl.classList.contains('collapsed')) flowEl.appendChild(masterPreviewEl);
+        else newConvBodyEl.insertBefore(masterPreviewEl, batchActionsEl.nextSibling);
       }
     }
     // Les vagues du lot-hote (2026-09-02, §9a) : la place SŒUR par défaut ne
@@ -4976,10 +5012,11 @@ function renderHtml(webview) {
   ];
   const batchFormEl = document.getElementById('batchForm');
   const batchNoticeEl = document.getElementById('batchNotice');
+  const batchActionsEl = document.getElementById('batchActions');
   // batchState AVANT form (lot 14) : blankTask() lit désormais batchState.inherit
   // pour pré-sélectionner le défaut résolu — l'inverse lèverait une
   // ReferenceError (zone morte temporelle du let) au tout premier rendu.
-  let batchState = { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null }, lastModel: null, lastEffort: null };
+  let batchState = { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null }, lastModel: null, lastEffort: null, modelVersions: {}, dictation: false };
   let form = { group: '', tasks: [blankTask(1)] };
   let createBtn = null;
 
@@ -5308,9 +5345,10 @@ function renderHtml(webview) {
     const n = tasks.length;
     // Cible FIXÉE : le bouton dit OÙ il va poser, à l'endroit même où on
     // valide. C'est la seconde moitié de la confirmation demandée — l'aperçu
-    // montre le résultat en haut du panneau, le bouton le nomme en bas.
+    // montre le résultat, le bouton le nomme là où l'on valide.
     const pin = insertPin && !insertPin.nested ? insertPin : null;
-    setText(createBtn, pin ? t('Create → wave {0}', pin.wave)
+    setText(createBtn, batchState.busy ? t('Opening…')
+      : pin ? t('Create → wave {0}', pin.wave)
       : (n > 1 ? t('Create {0}', n) : t('Create')));
     const unresolved = n && tasks.some(unresolvedTask);
     createBtn.disabled = !n || batchState.busy || unresolved;
@@ -5335,10 +5373,10 @@ function renderHtml(webview) {
   // point de couleur, l'actif se remplit de sa couleur + halo. « current » peut
   // être null (résolution impossible) : aucun bouton n'est alors allumé, ce qui
   // est exactement le WYSIWYG voulu (lot 14). colorOf(v) fournit la couleur CSS.
-  function segmentA1(values, current, disabled, colorOf, onPick) {
+  function segmentA1(values, current, disabled, colorOf, onPick, labelOf) {
     const wrap = el('span', 'segA1' + (disabled ? ' off' : ''));
     values.forEach(function (v) {
-      const label = v === 'medium' ? 'med' : v;
+      const label = labelOf ? labelOf(v) : (v === 'medium' ? 'med' : v);
       const b = el('button', v === current ? 'on' : '');
       b.type = 'button';
       b.title = v;
@@ -5433,6 +5471,191 @@ function renderHtml(webview) {
     renderForm();
   }
 
+  // ── Dictée (2.126.0) ─────────────────────────────────────────────────────
+  // Le webview ne peut pas ouvrir le micro : l'extension lance un auxiliaire
+  // (dictation.js) qui capture et transcrit, et renvoie ici des événements
+  // { type:'dictation', ev, id, text|v|code }. Ce module ne fait que DEUX
+  // choses : peindre l'état du bouton, et écrire le texte dans la tâche.
+  //
+  // Écriture : la tranche que la dictée a écrite est [provStart, provStart +
+  // provText.length) dans task.prompt. Un texte provisoire (« interim ») la
+  // REMPLACE, un texte figé (« final ») la remplace puis la referme — le suivant
+  // s'écrit derrière. Le brouillon n'est JAMAIS écrasé : la dictée n'écrit que
+  // si la tâche porte encore, au caractère près, le texte qu'elle y a laissé
+  // (« last ») ; une frappe, un brouillon vidé ou une tâche retirée l'arrêtent.
+  // Pas de vérification par positions : entre deux phrases la tranche est
+  // vide et « intacte » par définition — le banc §5 l'a pris en défaut (texte
+  // tapé avant elle, « trois » posé au milieu d'un mot). On écrit dans la
+  // TÂCHE, pas dans le nœud : renderForm recrée les cases, la tâche survit.
+  const MIC_PATH = 'M15.5 7.90039C15.8314 7.90039 16.0996 8.16863 16.0996 8.5V9C16.0996 12.1666 13.687 14.7681 10.5996 15.0693V16.9004H13.5C13.8314 16.9004 14.0996 17.1686 14.0996 17.5C14.0996 17.8314 13.8314 18.0996 13.5 18.0996H6.5C6.16863 18.0996 5.90039 17.8314 5.90039 17.5C5.90039 17.1686 6.16863 16.9004 6.5 16.9004H9.40039V15.0693C6.31298 14.7681 3.90039 12.1666 3.90039 9V8.5C3.90039 8.16863 4.16863 7.90039 4.5 7.90039C4.83137 7.90039 5.09961 8.16863 5.09961 8.5V9C5.09961 11.7062 7.2938 13.9004 10 13.9004C12.7062 13.9004 14.9004 11.7062 14.9004 9V8.5C14.9004 8.16863 15.1686 7.90039 15.5 7.90039ZM10 1.40039C11.7121 1.40039 13.0996 2.78792 13.0996 4.5V9C13.0996 10.7121 11.7121 12.0996 10 12.0996C8.28792 12.0996 6.90039 10.7121 6.90039 9V4.5C6.90039 2.78792 8.28792 1.40039 10 1.40039ZM10 2.59961C8.95066 2.59961 8.09961 3.45066 8.09961 4.5V9C8.09961 10.0493 8.95066 10.9004 10 10.9004C11.0493 10.9004 11.9004 10.0493 11.9004 9V4.5C11.9004 3.45066 11.0493 2.59961 10 2.59961Z';
+  // Barres de niveau : mêmes proportions que Claude Code (3 barres de 4 px,
+  // poids 0,6 / 1 / 0,75, de 4 à 16 px de haut sur une boîte de 20).
+  const MIC_BARS = [0.6, 1, 0.75];
+  const HOLD_MS = 400;               // appui plus long = « maintenir pour parler »
+  const taskTa = new WeakMap();      // tâche → sa case (la plus récente)
+  const taskMic = new WeakMap();     // tâche → son bouton
+  let dictSeq = 0;
+  let dict = null;                   // { id, task, busy, from, provStart, provText, last }
+  let dictErrTask = null, dictErrTimer = 0;
+  let holdFrom = 0;
+
+  function micButton(task, ta) {
+    const b = el('button', 'mic-btn');
+    b.type = 'button';
+    let bars = '';
+    MIC_BARS.forEach(function (_, i) { bars += '<rect x="' + (2 + i * 6) + '" y="8" width="4" height="4" rx="2" fill="currentColor"/>'; });
+    b.innerHTML = '<svg class="mic-bars" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">' + bars + '</svg>'
+      + '<span class="mic-puck"><svg class="mic-ico" viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="' + MIC_PATH + '"/></svg></span>';
+    // mousedown, pas click : maintenir le bouton EST le geste « parler tant
+    // que j'appuie ». preventDefault garde le focus — donc le curseur — dans
+    // la case.
+    b.addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      if (e.button !== 0) return;
+      if (dict && !dict.busy) { stopDictation(); return; }
+      if (dict) return;              // fin d'une dictée en cours de transcription
+      startDictation(task, ta);
+      holdFrom = Date.now();
+    });
+    const release = function () {
+      if (holdFrom && dict && dict.task === task && !dict.busy && Date.now() - holdFrom > HOLD_MS) stopDictation();
+      holdFrom = 0;
+    };
+    b.addEventListener('mouseup', release);
+    b.addEventListener('mouseleave', release);
+    taskMic.set(task, b);
+    paintMic(task);
+    return b;
+  }
+
+  function paintMic(task) {
+    const b = taskMic.get(task);
+    if (!b) return;
+    const mine = dict && dict.task === task;
+    const rec = !!(mine && !dict.busy);
+    const busy = !!(mine && dict.busy);
+    const err = dictErrTask === task && !mine;
+    b.classList.toggle('rec', rec);
+    b.classList.toggle('busy', busy);
+    b.classList.toggle('err', err);
+    b.disabled = !!(dict && dict.busy && !mine);
+    if (b.parentNode) b.parentNode.classList.toggle('rec', rec || busy);
+    const label = rec ? t('Stop recording')
+      : busy ? t('Transcribing…')
+      : err ? t('Dictation failed — see the message above')
+      : t('Voice dictation — tap or hold to record');
+    b.title = label;
+    b.setAttribute('aria-label', label);
+    if (!rec && !busy) paintLevel(b, 0);
+  }
+
+  function paintAllMics() { form.tasks.forEach(paintMic); }
+
+  // Mise à jour EN PLACE des barres, jamais un re-rendu : le bouton est peut-
+  // être sous le doigt (appui maintenu).
+  function paintLevel(b, v) {
+    const rects = b.querySelectorAll('.mic-bars rect');
+    for (let i = 0; i < rects.length; i++) {
+      const h = 4 + 12 * Math.max(0, Math.min(1, v)) * MIC_BARS[i];
+      rects[i].setAttribute('height', String(h));
+      rects[i].setAttribute('y', String((20 - h) / 2));
+    }
+  }
+
+  function startDictation(task, ta) {
+    const at = document.activeElement === ta && typeof ta.selectionStart === 'number'
+      ? ta.selectionStart : task.prompt.length;
+    dict = { id: ++dictSeq, task, busy: false, from: at, provStart: at, provText: '', last: task.prompt };
+    dictErrTask = null;
+    vscode.postMessage({ type: 'dictation', action: 'start', id: dict.id });
+    paintAllMics();
+  }
+
+  function stopDictation() {
+    if (!dict || dict.busy) return;
+    dict.busy = true;
+    vscode.postMessage({ type: 'dictation', action: 'stop', id: dict.id });
+    paintAllMics();
+  }
+
+  // Échap pendant l'écoute : rien de ce que la dictée a écrit ne reste.
+  function cancelDictation() {
+    if (!dict) return;
+    const d = dict;
+    const val = d.task.prompt;
+    if (dictUntouched(d)) setPrompt(d.task, val.slice(0, d.from) + val.slice(d.provStart + d.provText.length), d.from);
+    dropDictation('cancel');
+  }
+
+  function dropDictation(action) {
+    if (!dict) return;
+    vscode.postMessage({ type: 'dictation', action, id: dict.id });
+    const task = dict.task;
+    dict = null;
+    paintAllMics();
+    paintMic(task);
+  }
+
+  function dictUntouched(d) {
+    return form.tasks.indexOf(d.task) >= 0 && d.task.prompt === d.last;
+  }
+
+  function setPrompt(task, value, caret) {
+    task.prompt = value;
+    const ta = taskTa.get(task);
+    if (ta && ta.isConnected) {
+      ta.value = value;
+      try { ta.setSelectionRange(caret, caret); } catch (e) {}
+      // Le même chemin qu'une frappe : compteur de Create, aperçu.
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      refreshCreateBtn();
+      renderMasterCue();
+    }
+  }
+
+  function writeDictation(text, freeze) {
+    const d = dict;
+    if (!dictUntouched(d)) { dropDictation('cancel'); return; }
+    const val = d.task.prompt;
+    const head = val.slice(0, d.provStart);
+    const tail = val.slice(d.provStart + d.provText.length);
+    let piece = String(text || '').trim();
+    if (piece) {
+      if (head && !/\\s$/.test(head)) piece = ' ' + piece;
+      if (tail && !/^\\s/.test(tail)) piece += ' ';
+    }
+    d.provText = piece;
+    d.last = head + piece + tail;
+    setPrompt(d.task, d.last, d.provStart + piece.length);
+    if (freeze) { d.provStart += piece.length; d.provText = ''; }
+  }
+
+  function onDictationEvent(m) {
+    if (!dict || m.id !== dict.id) return;
+    if (m.ev === 'level') { const b = taskMic.get(dict.task); if (b) paintLevel(b, m.v); return; }
+    if (m.ev === 'interim') { writeDictation(m.text, false); return; }
+    if (m.ev === 'final') { writeDictation(m.text, true); return; }
+    if (m.ev === 'error') {
+      // Le message est dans le bandeau d'échec (état poussé par l'extension) ;
+      // le bouton, lui, garde la trace quelques secondes.
+      dictErrTask = dict.task;
+      if (dictErrTimer) clearTimeout(dictErrTimer);
+      dictErrTimer = setTimeout(function () { const tk = dictErrTask; dictErrTask = null; if (tk) paintMic(tk); }, 6000);
+      return;
+    }
+    if (m.ev === 'done') {
+      const task = dict.task;
+      dict = null;
+      paintAllMics();
+      paintMic(task);
+    }
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && dict && !dict.busy) cancelDictation();
+  });
+
   // Rafraîchissement différé de l'aperçu pendant la frappe (voir l'écouteur
   // input de taskCard).
   let cueTypingTimer = 0;
@@ -5470,7 +5693,15 @@ function renderHtml(webview) {
       compactWaves();
       renderForm();
     });
-    top.appendChild(ta);
+    taskTa.set(task, ta);
+    if (batchState.dictation) {
+      const wrap = el('div', 'ta-wrap');
+      wrap.appendChild(ta);
+      wrap.appendChild(micButton(task, ta));
+      top.appendChild(wrap);
+    } else {
+      top.appendChild(ta);
+    }
     top.appendChild(del);
     card.appendChild(top);
 
@@ -5495,7 +5726,7 @@ function renderHtml(webview) {
       // d'une tâche vierge doit refléter le dernier geste même sans lancement.
       vscode.postMessage({ type: 'setLastBatchChoice', field: 'model', value: v });
       renderForm();
-    })));
+    }, function (v) { return batchState.modelVersions[v] ? v + ' ' + batchState.modelVersions[v] : v; })));
     row.appendChild(pair('effort', segmentA1(EFFORTS, effectiveEffort(task), disabled || curModel === 'haiku', function (v) { return EFFORT_COLOR[EFFORTS.indexOf(v)]; }, function (v) {
       task.effort = v;
       vscode.postMessage({ type: 'setLastBatchChoice', field: 'effort', value: v });
@@ -5529,54 +5760,15 @@ function renderHtml(webview) {
     return card;
   }
 
-  // Pastille d'avertissement de la recherche de maîtresse (variante E de
-  // MOCKUP_master_cible_collage_2026-08-27) — UNIQUEMENT quand elle échoue.
-  // Le cas trouvé n'en a pas : l'agrafe le dit déjà, et sur la ligne
-  // elle-même. Ces deux échecs sont fréquents (bloc écrit à la main,
-  // conversation maîtresse fermée, jeton périmé) et un panneau muet se lirait
-  // comme une panne — d'où une phrase qui dit aussi la CONSÉQUENCE (« lot
-  // autonome », « aucune retenue »), pas seulement le constat.
-  function masterChip() {
-    const m = form.master;
-    // Aussi pour un prompt tapé (2026-09-06) : détacher d'un clic la
-    // maîtresse qu'on vient de désigner mérite la même pastille.
-    if (!m || m.sessionId || !activeTasks().length) return null;
-    const chip = el('div', 'master-chip');
-    // DÉTACHEMENT DÉLIBÉRÉ (2026-09-02) : un clic sur la ligne de la maîtresse
-    // l'a retirée. Ce n'est pas un échec de recherche — afficher « aucune
-    // trouvée » sous un ⚠ ferait passer le choix de l'utilisateur pour une
-    // panne. Même pastille (l'état « ce lot n'aura pas de maîtresse » mérite
-    // d'être vu), mais le glyphe du geste et ses mots.
-    const detached = m.reason === 'explicit-detach';
-    // PAS la classe « arrow » : elle appartient déjà à la flèche d'avancement
-    // des fenêtres de quota, qui est en position:absolute — le ⚠ partait se
-    // poser dans le coin haut-gauche du panneau, hors de sa pastille (mesuré
-    // en CDP le 2026-08-27, visible sur la capture).
-    chip.appendChild(el('span', 'sign', detached ? '⤴' : '⚠'));
-    const ambiguous = m.matches > 1;
-    chip.appendChild(el('span', 'who', detached
-      ? t('Master conversation detached')
-      : (ambiguous
-        ? t('{0} conversations contain this block', m.matches)
-        : t('No master conversation found'))));
-    chip.appendChild(el('span', 'tail', ambiguous && !detached ? t('none kept') : t('standalone batch')));
-    chip.title = detached
-      ? t('You detached this block from its master conversation — it will start as a standalone batch. Click another row to pick a new one.')
-      : (ambiguous
-        ? t('The block was found in more than one conversation — none is retained, and the batch starts without a parent. Use “Set master…” on the batch to link it yourself.')
-        : t('The pasted block was not found in any conversation of this panel — the batch starts without a parent. Use “Set master…” on the batch to link it yourself.'));
-    return chip;
-  }
-
   function renderForm() {
     batchFormEl.replaceChildren();
+    batchActionsEl.replaceChildren();
     createBtn = null;
-
-    // En TÊTE du formulaire, avant même le conflit d'environnement : c'est la
-    // réponse à ce que l'utilisateur vient de faire (coller), elle se lit là
-    // où il regarde.
-    const chip = masterChip();
-    if (chip) batchFormEl.appendChild(chip);
+    // Plus de pastille « aucune maîtresse trouvée / détachée » (2026-09-29,
+    // décision user : elle occupait la tête du formulaire pour une information
+    // rarement utile). Qui la porte désormais : l'aperçu et l'agrafe — une
+    // maîtresse retenue se voit par l'agrafe sur sa ligne, son absence par un
+    // aperçu posé à plat sous la barre d'action.
 
     const disabled = !!(batchState.envConflict && batchState.envConflict.length);
     if (disabled) {
@@ -5630,28 +5822,25 @@ function renderHtml(webview) {
         .forEach(function (tk) { batchFormEl.appendChild(taskCard(tk, disabled)); });
     });
 
-    // Rangée unique adders + pied (constat user 2026-08-06, liste étape 19) :
-    // les « + » à gauche, Annuler/Créer poussés à droite par le spacer — une
-    // ligne de formulaire gagnée. Les deux classes se complètent : task-row
-    // apporte le flex-wrap (sidebar étroite → retour à la ligne, jamais de
-    // débordement), form-foot le spacer et l'espacement (elle est définie
-    // APRÈS task-row dans la feuille, ses gap/margin priment).
-    const foot = el('div', 'task-row form-foot');
-    foot.appendChild(button('', t('+ Add task'), function () {
+    // Barre d'action EN TÊTE (2026-09-29, MOCKUP_formulaire_boutons_entetes) :
+    // Annuler/Créer centrés, puis les « + » dessous. En pied de formulaire, un
+    // collage de plusieurs lots les renvoyait tout en bas du panneau.
+    const actions = el('div', 'form-actions');
+    const adders = el('div', 'form-adders');
+    adders.appendChild(button('', t('+ Add task'), function () {
       form.tasks.push(blankTask(maxWave()));
       compactWaves();
       renderForm();
     }));
-    foot.appendChild(button('', t('+ Add wave divider'), function () {
+    adders.appendChild(button('', t('+ Add wave divider'), function () {
       form.tasks.push(blankTask(maxWave() + 1));
       compactWaves();
       renderForm();
     }));
-    foot.appendChild(el('span', 'spacer'));
     // Lot 12 : « form » n'est plus jamais « null » (le lanceur est toujours
     // là) — Cancel remet le brouillon à zéro (une tâche vierge, mode simple)
     // plutôt que de fermer un panneau qui n'existe plus.
-    foot.appendChild(button('', t('Cancel'), function () {
+    actions.appendChild(button('', t('Cancel'), function () {
       resetForm();
       renderForm();
     }));
@@ -5685,8 +5874,8 @@ function renderHtml(webview) {
       }
       submitCreateBatch();
     });
-    foot.appendChild(createBtn);
-    batchFormEl.appendChild(foot);
+    actions.appendChild(createBtn);
+    batchActionsEl.append(actions, adders);
     refreshCreateBtn();
     // Le décor de la maîtresse est produit par le formulaire autant que par le
     // flux : ajouter une tâche, changer un modèle ou vider le brouillon change
@@ -5700,9 +5889,6 @@ function renderHtml(webview) {
       envConflict: (b && b.envConflict) || [],
       busy: !!(b && b.busy),
       notice: (b && b.notice) || null,
-      // Disclaimer du menu officiel (plan repli-auto étape 6) : tooltip
-      // seulement, plus jamais concaténé au texte courant du notice.
-      noticeHint: (b && b.noticeHint) || null,
       // Lot 12 §3 : { model, effort } résolus de ~/.claude/settings.json côté
       // extension, jamais mis en cache ici non plus — repoussé à chaque push.
       inherit: (b && b.inherit) || { model: null, effort: null },
@@ -5710,6 +5896,11 @@ function renderHtml(webview) {
       // prime sur « inherit » dans resolvedModel()/resolvedEffort() ci-dessus.
       lastModel: (b && b.lastModel) || null,
       lastEffort: (b && b.lastEffort) || null,
+      // Plus haute version vue par famille (extension.js modelVersions) :
+      // « opus 5.5 » sur le bouton, l'alias envoyé reste « opus ».
+      modelVersions: (b && b.modelVersions) || {},
+      // Réglage dictationCommand renseigné : un micro par case (2.126.0).
+      dictation: !!(b && b.dictation),
     };
     // Ne re-rendre le formulaire que si ce qui le CONDITIONNE a bougé : sinon,
     // chaque push d'état (30 s, transitions) écraserait la saisie en cours.
@@ -5718,11 +5909,12 @@ function renderHtml(webview) {
       || next.inherit.model !== batchState.inherit.model
       || next.inherit.effort !== batchState.inherit.effort
       || next.lastModel !== batchState.lastModel
-      || next.lastEffort !== batchState.lastEffort;
+      || next.lastEffort !== batchState.lastEffort
+      || JSON.stringify(next.modelVersions) !== JSON.stringify(batchState.modelVersions)
+      || next.dictation !== batchState.dictation;
     batchState = next;
     setText(batchNoticeEl, next.notice || '');
     batchNoticeEl.classList.toggle('show', !!next.notice);
-    if (batchNoticeEl.title !== (next.noticeHint || '')) batchNoticeEl.title = next.noticeHint || '';
     if (changed) renderForm(); else refreshCreateBtn();
   }
 
@@ -5933,6 +6125,7 @@ function renderHtml(webview) {
     const msg = event.data;
     if (msg && msg.type === 'masterResolved') { onMasterResolved(msg); return; }
     if (msg && msg.type === 'focusRefused') { onFocusRefused(msg); return; }
+    if (msg && msg.type === 'dictation') { onDictationEvent(msg); return; }
     if (!msg || msg.type !== 'state') return;
     // Preuve de vie du canal hôte→webview : tout état reçu remet l'horloge du
     // heartbeat à zéro et lève la dégradation (cf. checkFreshness).

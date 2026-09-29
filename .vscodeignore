@@ -68,3 +68,6 @@ node_modules/**
 *.vsix
 **/*.map
 **/.DS_Store
+# Cache Python de l auxiliaire de dictee (2.126.0) : un py_compile ou un
+# lancement local le recree a cote du script ; jamais dans le paquet.
+**/__pycache__/**

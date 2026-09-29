@@ -91,7 +91,7 @@ const state = (conv, withGroup) => ({
   quota: { windows: [], burnRate: { greenMax: .85, yellowMax: 1 }, ageMin: 1, source: 'oauth' },
   sounds: { enabled: false }, canary: false,
   ui: { collapsedConversations: false, collapsedQuota: true, sortOrder: 'tabOrder' },
-  batch: { envConflict: [], busy: false, notice: null, noticeHint: null, inherit: { model: 'sonnet', effort: 'medium' }, lastModel: null, lastEffort: null },
+  batch: { envConflict: [], busy: false, notice: null, inherit: { model: 'sonnet', effort: 'medium' }, lastModel: null, lastEffort: null },
 });
 
 // ── plomberie CDP ──────────────────────────────────────────────────────────

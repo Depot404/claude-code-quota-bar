@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.126.2] - 2026-09-30
+
+### Changed
+- **A lone prompt's preview has no vertical line.** A single task with no master conversation opens as a plain row, and a plain row has no batch line: the dashed vertical segment of its preview is gone, only the row's round marker remains. Previews that will become a batch, or a sub-batch under a conversation, keep their line.
+
+## [2.126.1] - 2026-09-30
+
+### Changed
+- **The preview of what Create will open sits at the end of the conversation list.** With no row aimed and no master conversation, it used to wedge itself between the form's buttons and the prompt box; it now shows as the new row it will become, below the existing conversations. Hovering or clicking a row still moves it into that batch or under that conversation, as before. While the Conversations section is collapsed it stays under the form's buttons, so it never disappears.
+
+## [2.126.0] - 2026-09-30
+
+### Added
+- **Dictate a prompt (optional, local).** Set `claudeCodeQuotaBar.dictationCommand` to a Python interpreter that has `faster-whisper` and `sounddevice` installed (e.g. `python`) and every prompt box of the New conversation form gets a microphone, in the same place and with the same states as the one in Claude Code's own input: tap to start and tap to stop, or hold and release; three level bars while it listens; the end of the sentence is transcribed after you stop. Text is written at the cursor as you speak — the sentence in progress is rewritten about every 1.5 s, then frozen at each pause — and never overwrites your draft: typing while it listens hands the box back to you. Esc removes what the dictation wrote. Speech is transcribed on your machine by Whisper (large-v3-turbo, on the GPU when available) and never leaves it. A webview cannot open the microphone, so the extension starts a small bundled helper (`dictation/whisper_dictate.py`) on the first click and keeps it warm until VS Code closes. Errors — including Windows privacy settings refusing the microphone to desktop apps — show in the form's existing failure line. Empty setting (the default): no button, nothing started.
+
+## [2.125.0] - 2026-09-29
+
+### Changed
+- **Cancel and Create sit at the top of "New conversation".** After pasting several tasks they ended up at the very bottom of the panel, below every prompt, and had to be scrolled to. They are now centred right under the section title, a little larger; "+ Add task" and "+ Add wave divider" sit just below them. While conversations are opening, the Create button itself says "Opening…".
+- **The model buttons show the version.** "opus" alone did not say whether it meant Opus 5.1 or 5.5. Each button now reads e.g. `opus 5.5` — the highest version of that family your conversations have actually run, remembered across sessions. The button still sends the alias, which Claude Code resolves to the latest release; the last 30 days of conversation history are read once at startup, so every family you have used recently shows its version; a version never run on this machine yet appears after its first conversation.
+- **The three main sections stand out.** Conversations, New conversation and Quota now have a bolder title, an accent-coloured chevron and an accent rule running to the edge, so they read as collapsible sections at first glance.
+
+### Removed
+- **Informational messages above the first prompt.** The yellow "No master conversation found · standalone batch" / "Master conversation detached" chip and the grey "Opening N conversation(s)…" / "Added after batch…" line are gone — the preview and the rows already show the same thing. A launch failure is still shown there, in red.
+
 ## [2.124.0] - 2026-09-13
 
 ### Changed

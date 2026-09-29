@@ -34,12 +34,13 @@ const { logEvent: logAckEvent } = require('./ack-journal');
 const { convMatchesLabel } = require('./labels');
 const { createOpenSessionIds, createRendererActive } = require('./session-titles');
 const { createSoundPlayer } = require('./sounds');
+const { createDictation } = require('./dictation');
 // Fenêtre de stabilisation du tout premier rendu (lot micro-allègements
 // 2026-07-24) — cf. warmup.js pour le pourquoi (flash de conv fantôme post-reload).
 const { createBootSettler } = require('./warmup');
 // Création groupée de conversations (lot 1) : le métier est en Node pur dans
 // batch.js, l'orchestration du lancement dans launcher.js — ici, que du câblage.
-const { normalizeTasks, appendTasksAfterWave, conflictingEnvVars, createIntentStore, mismatchOf, readInheritSettings, MODELS, EFFORTS } = require('./batch');
+const { normalizeTasks, appendTasksAfterWave, conflictingEnvVars, createIntentStore, mismatchOf, readInheritSettings, latestModelVersions, scanModelVersions, MODELS, EFFORTS } = require('./batch');
 const { createBatchLauncher, samePath, OPEN_COMMAND: LAUNCH_OPEN_COMMAND, NEW_CONVERSATION_COMMAND: LAUNCH_NEW_CONVERSATION_COMMAND, SESSION_WAIT_MS } = require('./launcher');
 // Recalcul du message de « Create » (lot 6, correctif §3) : un membre lancé
 // mais dont aucun hook n'a encore tiré n'a pas d'entrée dans le snapshot de
@@ -98,6 +99,11 @@ let stateEngine;
 let tabTracker;
 let ackTracker;
 let soundPlayer;
+// Dictée des cases de prompt (dictation.js). Son échec s'affiche dans le
+// bandeau d'échec du formulaire (`batchStatus.notice`) ; `dictationNotice`
+// retient le texte posé pour ne retirer, au clic suivant, que LE SIEN.
+let dictation;
+let dictationNotice = null;
 let lastSource = null;
 // Ce qui a été DEMANDÉ à la création, par sessionId (lot 1). En mémoire : le
 // lot 2 le persistera avec les groupes. Sert UNIQUEMENT au badge d'écart —
@@ -135,6 +141,9 @@ const NEW_CONV_COLLAPSED_KEY = 'newConversationCollapsed';
 // qui ne sert plus que de repli au tout premier usage (jamais renseigné).
 const LAST_BATCH_MODEL_KEY = 'lastBatchModel';
 const LAST_BATCH_EFFORT_KEY = 'lastBatchEffort';
+// Plus haute version vue par famille de modèle (batch.js latestModelVersions) —
+// globale : la version d'un alias ne dépend pas du workspace.
+const MODEL_VERSIONS_KEY = 'modelVersions';
 // Ménage de stockage à l'activation : un groupe plus vieux que ça ET dont
 // aucune conversation n'est encore connue du panneau ne représente plus rien.
 // Jamais en continu : c'est du nettoyage, pas une règle d'affichage.
@@ -155,6 +164,10 @@ let lastAttachTry = 0;
 // (le bouton Link… aussi). Sont partis avec : le recompte à chaque push,
 // son suffixe statique et le cycle de vie qu'il fallait pour qu'un message
 // figé ne devienne pas faux. Un lot qui va mal se voit sur ses membres.
+// 2026-09-29 (demande user) — plus de message d'INFORMATION non plus
+// (« Ouverture de N… », « Ajouté après le lot… ») : le bouton Créer dit
+// l'ouverture en cours, les lignes disent le reste. `notice` ne porte plus
+// qu'un ÉCHEC de lancement.
 let batchStatus = { busy: false, notice: null };
 // Annonce d'ouverture de vague (lot 4, décision 5 : « une ouverture auto est
 // annoncée dans le panneau »). En mémoire, par groupe — un texte transitoire,
@@ -337,6 +350,13 @@ function activate(context) {
   // jamais sur un recompute qui ne change rien.
   soundPlayer = createSoundPlayer({ isEnabled: () => getConfig().soundsEnabled });
   context.subscriptions.push({ dispose: () => soundPlayer.dispose() });
+
+  dictation = createDictation({
+    getCommand: () => vscode.workspace.getConfiguration('claudeCodeQuotaBar').get('dictationCommand', ''),
+    getLanguage: () => vscode.env.language,
+    post: onDictationEvent,
+  });
+  context.subscriptions.push({ dispose: () => dictation.dispose() });
   // Le toggle peut déjà être `true` (settings.json édité à la main, ou profil
   // repris d'une machine où on l'avait activé) — pas seulement via l'icône.
   maybeWarnAccessibilityConflict(context);
@@ -425,6 +445,16 @@ function activate(context) {
     // une question, pas un acte ; le lien réel reste posé par createBatch, qui
     // re-résout de son côté sur un état forcément plus frais.
     resolveMasterPaste: (msg) => resolveMasterPaste(msg),
+    // Micro d'une case de prompt : start/stop/cancel vers l'auxiliaire. Un
+    // nouveau départ retire l'échec de dictée précédent du bandeau.
+    dictation: (msg) => {
+      if (msg && msg.action === 'start' && dictationNotice && batchStatus.notice === dictationNotice) {
+        batchStatus = { busy: batchStatus.busy, notice: null };
+        dictationNotice = null;
+        pushPanelState();
+      }
+      dictation.handle(msg);
+    },
     // Actions de groupe (lot 2). Renommer / dissoudre / lier passent par les
     // boîtes NATIVES de VS Code (InputBox, QuickPick, modale) plutôt que par des
     // champs dans le webview : un push d'état (transition de conv, tick quota)
@@ -661,6 +691,16 @@ function activate(context) {
   });
   workspaceStateRef = context.workspaceState;
   globalStateRef = context.globalState;
+  // Amorce des versions de modèle depuis l'historique récent (batch.js
+  // scanModelVersions) — hors du chemin d'activation, un seul passage.
+  scanModelVersions(path.join(os.homedir(), '.claude', 'projects'), Date.now() - 30 * 86400000).then((shown) => {
+    // Même garde que modelVersions() : un contexte sans globalState (bancs)
+    // ne doit pas faire tomber le process sur une promesse rejetée.
+    if (!globalStateRef) return;
+    const known = globalStateRef.get(MODEL_VERSIONS_KEY, {}) || {};
+    const next = latestModelVersions(shown, known);
+    if (JSON.stringify(next) !== JSON.stringify(known)) { globalStateRef.update(MODEL_VERSIONS_KEY, next); pushPanelState(); }
+  }, () => {});
   {
     const known = new Set(stateEngine.getSnapshot().conversations.map((c) => c.sessionId));
     const dropped = groupStore.prune(GROUP_MAX_AGE_MS, known);
@@ -750,6 +790,7 @@ function activate(context) {
         if (e.affectsConfiguration('claudeCodeQuotaBar.sounds.enabled')) {
           maybeWarnAccessibilityConflict(context);
         }
+        if (e.affectsConfiguration('claudeCodeQuotaBar.dictationCommand')) dictation.reset();
       }
     })
   );
@@ -833,7 +874,24 @@ function restartTimer() {
   startTimer(refreshMs);
 }
 
+// Événement de l'auxiliaire de dictée → webview (le bouton et le texte y
+// vivent). Un échec va AUSSI dans le bandeau d'échec du formulaire, le même
+// que celui d'un lancement raté : jamais une bannière de plus.
+function onDictationEvent(ev) {
+  if (!ev) return;
+  if (ev.ev === 'error') {
+    const detail = ev.message || ev.code || vscode.l10n.t('unknown error');
+    dictationNotice = ev.code === 'mic-denied'
+      ? vscode.l10n.t('Dictation: Windows privacy settings do not let desktop apps use the microphone.')
+      : vscode.l10n.t('Dictation failed: {0}', detail);
+    batchStatus = { busy: batchStatus.busy, notice: dictationNotice };
+    pushPanelState();
+  }
+  if (panelProvider) panelProvider.post(Object.assign({ type: 'dictation' }, ev));
+}
+
 function deactivate() {
+  if (dictation) dictation.dispose();
   clearInterval(timer);
   if (waveGateTimer) { clearTimeout(waveGateTimer); waveGateTimer = null; }
   stopGlobalCostScan();
@@ -1648,6 +1706,13 @@ function quotaState() {
   return { windows, burnRate, ageMin: Math.round((Date.now() - cached.timestamp) / 60000), source: lastSource };
 }
 
+function modelVersions(convs) {
+  const known = (globalStateRef && globalStateRef.get(MODEL_VERSIONS_KEY, {})) || {};
+  const next = latestModelVersions(convs.map((c) => c.model), known);
+  if (globalStateRef && JSON.stringify(next) !== JSON.stringify(known)) globalStateRef.update(MODEL_VERSIONS_KEY, next);
+  return next;
+}
+
 function buildPanelState() {
   const cfg = getConfig();
   // Une seule lecture de la redirection husk→successeur pour tout ce push, lue
@@ -1685,9 +1750,6 @@ function buildPanelState() {
       envConflict: envConflictVars(),
       busy: batchStatus.busy,
       notice: batchStatus.notice,
-      // Disclaimer du menu officiel : tooltip pendant l'ouverture, le seul
-      // moment où l'on regarde le sélecteur modèle/effort officiel.
-      noticeHint: batchStatus.busy ? BATCH_MENU_HINT() : null,
       // Lot 12 §3, pré-sélection au lot 14 : relu à CHAQUE push, jamais mis en
       // cache — /effort dans n'importe quelle conversation fait dériver ce
       // défaut global (NOTES). { model: null, effort: null } si le fichier est
@@ -1699,6 +1761,9 @@ function buildPanelState() {
       // n'a jamais été cliqué (repli sur `inherit`, premier usage seulement).
       lastModel: (workspaceStateRef && workspaceStateRef.get(LAST_BATCH_MODEL_KEY, null)) || null,
       lastEffort: (workspaceStateRef && workspaceStateRef.get(LAST_BATCH_EFFORT_KEY, null)) || null,
+      modelVersions: modelVersions(convs),
+      // Réglage `dictationCommand` renseigné : un micro par case de prompt.
+      dictation: !!(dictation && dictation.enabled()),
     },
     // Groupes persistés (lot 2), vagues résolues (lot 4).
     groups: groupsState(convs, sources, superseded),
@@ -1954,12 +2019,7 @@ async function createBatch(msg) {
         // moteur de vagues existant les ouvre à son rythme — décision 2 du
         // plan (« une vague déjà finie → prochain battement »).
         maybeAdvanceWaves();
-        batchStatus = {
-          busy: false,
-          notice: chainGroup.stamp
-            ? vscode.l10n.t('Added after batch {0}.', chainGroup.stamp)
-            : vscode.l10n.t('Added to the existing batch.'),
-        };
+        batchStatus = { busy: false, notice: null };
         pushPanelState();
         return;
       }
@@ -1967,7 +2027,7 @@ async function createBatch(msg) {
   }
 
   const wave1 = tasks.filter((t) => t.wave === 1);
-  batchStatus = { busy: true, notice: vscode.l10n.t('Opening {0} conversation(s)…', wave1.length) };
+  batchStatus = { busy: true, notice: null };
 
   // LE FORMULAIRE EST LE GROUPE (décision 3 du plan) — sauf pour une tâche
   // unique, où un groupe n'apporte que du chrome SANS RAISON : il ne naît que
@@ -2154,14 +2214,6 @@ function pendingLaunches(convById, sources) {
     });
   }
   return out;
-}
-
-// Limite cosmétique du menu officiel (README « Known limitations ») : son
-// sélecteur d'effort se cale sur le modèle par défaut PERSISTÉ tant que le
-// premier tour n'a pas tourné. Posé en TOOLTIP du compteur d'ouverture,
-// jamais en texte visible.
-function BATCH_MENU_HINT() {
-  return vscode.l10n.t('The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.');
 }
 
 // ── Moteur de vagues (lot 4), statuts résolus par la table de vérité (lot 10) ─

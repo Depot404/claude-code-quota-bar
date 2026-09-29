@@ -22,6 +22,7 @@
   "config.sounds.enabled.description": "Jouer un son système quand une conversation termine sa réponse ou vous rend la main (une question, une demande de permission). Désactivé par défaut — aucun son surprise à l'installation. À basculer depuis l'icône haut-parleur en haut du panneau, ou ici.",
   "config.conversationSortOrder.description": "Comment les conversations sont ordonnées dans le panneau. Modifiable aussi depuis le menu déroulant à côté de l'en-tête Conversations.",
   "config.collapsedConversations.description": "Si la section Conversations est repliée. Basculer en cliquant sur son en-tête.",
+  "config.dictationCommand.description": "Commande qui lance l'auxiliaire de dictée locale fourni avec l'extension — un interpréteur Python où faster-whisper et sounddevice sont installés, par exemple python ou py -3.13 (le chemin de l'auxiliaire est ajouté automatiquement). La voix est transcrite sur cette machine par Whisper et n'en sort jamais. Vide (par défaut) = aucun bouton micro dans le formulaire « New conversation ».",
   "config.collapsedQuota.description": "Si la section Quota est repliée. Basculer en cliquant sur son en-tête.",
   "config.conversationSortOrder.enum.tabOrder": "Même ordre que vos onglets VS Code, le plus à gauche en premier.",
   "config.conversationSortOrder.enum.lastActivity": "Conversation la plus récemment active en premier.",

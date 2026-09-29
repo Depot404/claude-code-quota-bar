@@ -22,6 +22,7 @@
   "config.sounds.enabled.description": "Play a system sound when a conversation finishes replying or hands control back to you (a question, a permission prompt). Off by default — no surprise sound on install. Toggle from the speaker icon at the top of the panel, or here.",
   "config.conversationSortOrder.description": "How conversations are ordered in the panel. Also changeable from the dropdown next to the Conversations header.",
   "config.collapsedConversations.description": "Whether the Conversations section is collapsed. Toggle by clicking its header.",
+  "config.dictationCommand.description": "Command that runs the bundled local dictation helper — a Python interpreter with faster-whisper and sounddevice installed, e.g. python or py -3.13 (the helper's path is appended automatically). Speech is transcribed on this machine by Whisper and never leaves it. Empty (default) = no microphone button in the New conversation form.",
   "config.collapsedQuota.description": "Whether the Quota section is collapsed. Toggle by clicking its header.",
   "config.conversationSortOrder.enum.tabOrder": "Same order as your VS Code tabs, leftmost first.",
   "config.conversationSortOrder.enum.lastActivity": "Most recently active conversation first.",

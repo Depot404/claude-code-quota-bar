@@ -71,5 +71,18 @@ const notObject = write('not-object.json', JSON.stringify(['oops']));
 check('tableau en racine → { model: null, effort: null }, pas d\'exception',
   readInheritSettings(notObject).model === null && readInheritSettings(notObject).effort === null);
 
+// Version affichée sur les boutons de modèle (2026-09-29) : la plus haute vue
+// par famille, jamais une régression vers une conversation plus ancienne.
+{
+  const { latestModelVersions } = require(path.join(__dirname, '..', 'batch.js'));
+  const r = latestModelVersions(['Opus 5.5', 'Opus 5.1', 'Sonnet 5.5', 'claude-weird-x', null, 'Opus 4.10'], { opus: '5.2', fable: '5' });
+  check('versions : la plus haute vue par famille, ids inconnus ignorés, mémoire gardée',
+    JSON.stringify(r) === JSON.stringify({ opus: '5.5', fable: '5', sonnet: '5.5' }), JSON.stringify(r));
+  check('versions : une conversation plus ancienne ne fait pas reculer la mémoire',
+    latestModelVersions(['Opus 5'], { opus: '5.5' }).opus === '5.5');
+  check('versions : nouvelle génération adoptée (6 > 5.5)',
+    latestModelVersions(['Opus 6'], { opus: '5.5' }).opus === '6');
+}
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

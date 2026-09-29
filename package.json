@@ -2,7 +2,7 @@
   "name": "claude-code-quota-bar",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "2.124.0",
+  "version": "2.126.2",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -187,6 +187,11 @@
           "type": "boolean",
           "default": false,
           "description": "%config.collapsedConversations.description%"
+        },
+        "claudeCodeQuotaBar.dictationCommand": {
+          "type": "string",
+          "default": "",
+          "description": "%config.dictationCommand.description%"
         },
         "claudeCodeQuotaBar.collapsedQuota": {
           "type": "boolean",

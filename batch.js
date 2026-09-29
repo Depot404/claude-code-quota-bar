@@ -27,7 +27,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { parseModelId } = require('./hooks/model-id.js');
+const { parseModelId, modelIdToDisplay } = require('./hooks/model-id.js');
 
 // Valeurs proposées par les boutons segmentés (aucun dropdown, décision 4 du
 // plan). Lot 14 : « inherit » a disparu — une conversation tout-défaut
@@ -470,8 +470,67 @@ function readInheritSettings(settingsPath = SETTINGS_PATH) {
   return { model, effort };
 }
 
+// Version à afficher sur chaque bouton de modèle (2026-09-29, demande user :
+// « opus » ne dit pas si c'est Opus 5.1 ou 5.5). Les boutons envoient un ALIAS
+// que Claude Code résout vers la dernière version de la famille : la seule
+// source fiable de ce qu'il résout est ce que les conversations ont RÉELLEMENT
+// tourné. On retient donc, par famille, la plus haute version vue — `known`
+// est ce qui a été retenu avant (survit à la fermeture des conversations).
+// `models` : noms affichés des conversations (« Opus 5.5 », id brut sinon).
+// Limite assumée : une version jamais encore utilisée ici n'apparaît qu'après
+// la première conversation qui la fait tourner.
+function latestModelVersions(models, known) {
+  const out = Object.assign({}, known || {});
+  const num = (v) => v.split('.').map(Number);
+  const newer = (a, b) => { const x = num(a), y = num(b); return x[0] !== y[0] ? x[0] > y[0] : (x[1] || 0) > (y[1] || 0); };
+  for (const m of models || []) {
+    const hit = /^([A-Za-z]+) (\d{1,2}(?:\.\d{1,2})?)$/.exec(m || '');
+    if (!hit) continue;
+    const fam = hit[1].toLowerCase();
+    if (!MODELS.includes(fam)) continue;
+    if (!out[fam] || newer(hit[2], out[fam])) out[fam] = hit[2];
+  }
+  return out;
+}
+
+// Amorce de latestModelVersions (2026-09-30) : les conversations du panneau
+// ne montrent souvent qu'UNE famille (toutes en Opus un jour donné) — les
+// autres boutons restaient sans version alors que l'historique les connaît.
+// Lit la FIN (64 Ko) des transcripts des 30 derniers jours, tous projets :
+// la version d'un alias ne dépend pas du projet. Rend des noms affichés,
+// comme `c.model`. Tout échec de lecture est ignoré : ce n'est qu'un libellé.
+async function scanModelVersions(projectsDir, sinceMs) {
+  const out = new Set();
+  const fsp = fs.promises;
+  let dirs = [];
+  try { dirs = await fsp.readdir(projectsDir); } catch { return []; }
+  for (const d of dirs) {
+    let files = [];
+    try { files = await fsp.readdir(path.join(projectsDir, d)); } catch { continue; }
+    for (const f of files) {
+      if (!f.endsWith('.jsonl')) continue;
+      const p = path.join(projectsDir, d, f);
+      try {
+        const st = await fsp.stat(p);
+        if (st.mtimeMs < sinceMs) continue;
+        const len = Math.min(st.size, 65536);
+        const fh = await fsp.open(p, 'r');
+        try {
+          const buf = Buffer.alloc(len);
+          await fh.read(buf, 0, len, st.size - len);
+          for (const m of buf.toString('utf8').matchAll(/"model":"(claude-[a-z]+-[0-9-]+)/g)) {
+            const shown = modelIdToDisplay(m[1].replace(/-$/, ''));
+            if (shown) out.add(shown);
+          }
+        } finally { await fh.close(); }
+      } catch { /* fichier disparu ou verrouillé : sans conséquence */ }
+    }
+  }
+  return [...out];
+}
+
 module.exports = {
-  MODELS, EFFORTS, ENV_MODEL, ENV_EFFORT, OUR_ENV_VARS,
+  MODELS, EFFORTS, ENV_MODEL, ENV_EFFORT, OUR_ENV_VARS, latestModelVersions, scanModelVersions,
   blankTask, normalizeTasks,
   resolveDefaultModel, resolveDefaultEffort,
   findClaudeConvsBlock, parseClaudeConvsBlock,

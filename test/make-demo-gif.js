@@ -171,7 +171,7 @@ function quota(w1pct, w1pace, w1cost, w2pct, w2pace, w2cost, ageMin) {
   };
 }
 const BATCH = {
-  envConflict: [], busy: false, notice: null, noticeHint: null,
+  envConflict: [], busy: false, notice: null,
   inherit: { model: 'sonnet', effort: 'medium' },
   lastModel: null, lastEffort: null,
 };

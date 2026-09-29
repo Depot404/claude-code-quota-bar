@@ -38,7 +38,7 @@ const ribbon = `(() => ({
   tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
   refused: !!document.querySelector('.ins-tag.no'),
   zones: document.querySelectorAll('.ins-zone').length,
-  btn: (function () { const b = document.querySelector('#batchForm button.pri'); return b ? b.textContent : null; })(),
+  btn: (function () { const b = document.querySelector('#newConvBody button.pri'); return b ? b.textContent : null; })(),
   masterTargets: document.querySelectorAll('.master-target').length,
   masterIsHead: !!document.querySelector('.grp-master-head .master-target'),
 }))()`;
@@ -49,7 +49,7 @@ function memberSel(text) {
 const HEAD_ROW = `document.querySelector('#flow .grp-master-head .conv')`;
 function hover(sel) { return `(() => { const n = ${sel}; if (!n) throw new Error('introuvable'); n.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()`; }
 function click(sel) { return `(() => { const n = ${sel}; if (!n) throw new Error('introuvable'); n.click(); return true; })()`; }
-const CLICK_CREATE = click(`document.querySelector('#batchForm button.pri')`);
+const CLICK_CREATE = click(`document.querySelector('#newConvBody button.pri')`);
 
 async function main() {
   if (!SLOW) {

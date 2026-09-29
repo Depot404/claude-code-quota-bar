@@ -230,19 +230,22 @@ async function run() {
       const p = document.querySelector('.master-preview');
       return {
         present: !!p,
-        underNewConv: !!p && !!p.closest('#newConvBody'),
+        endOfList: !!p && !!p.parentElement && p.parentElement.id === 'flow' && !p.nextElementSibling,
         inGroup: !!p && !!p.closest('.grp-body'),
         lines: p ? p.querySelectorAll('.m-pending').length : 0,
         waveHeaders: p ? p.querySelectorAll('.wave-hdr').length : 0,
+        rail: p ? !!p.querySelector('.mp-rail') : null,
         text: p ? (p.textContent || '').indexOf(${HIT}) !== -1 : false,
       };
     })()`);
-    check('APERÇU — le prompt tapé est prévisualisé, par défaut HORS de tout lot, sous « New conversation »',
-      previewDefault.present && previewDefault.underNewConv && !previewDefault.inGroup
+    check('APERÇU — le prompt tapé est prévisualisé, par défaut HORS de tout lot, à la suite de la liste des conversations',
+      previewDefault.present && previewDefault.endOfList && !previewDefault.inGroup
         && previewDefault.lines === 1 && previewDefault.text,
       JSON.stringify(previewDefault));
     check('… sans séparateur de vague : aucun lot ne naîtra, la ligne annoncée est la ligne plate',
       previewDefault.waveHeaders === 0, JSON.stringify(previewDefault));
+    check('… et sans trait vertical : le trait est celui d\'un lot, la ligne plate n\'en a pas (user 2026-09-30)',
+      previewDefault.rail === false, JSON.stringify(previewDefault));
 
     // Survol d'une ligne du lot vivant (vague 2, encore ouverte au dépôt) :
     // l'aperçu se déplace DANS le lot — mêmes cibles qu'un bloc collé.
@@ -265,10 +268,10 @@ async function run() {
     await wait(250);
     const previewBack = await h.eval(`(() => {
       const p = document.querySelector('.master-preview');
-      return { present: !!p, underNewConv: !!p && !!p.closest('#newConvBody') };
+      return { present: !!p, endOfList: !!p && !!p.parentElement && p.parentElement.id === 'flow' && !p.nextElementSibling };
     })()`);
-    check('… et revient sous « New conversation » quand la souris quitte le lot',
-      previewBack.present && previewBack.underNewConv, JSON.stringify(previewBack));
+    check('… et revient en fin de liste quand la souris quitte le lot',
+      previewBack.present && previewBack.endOfList, JSON.stringify(previewBack));
 
     // Create : conversation SEULE, aucun lot fondé, et une ligne « en attente »
     // dans la liste plate — l'invariant, mesuré sur l'écran.

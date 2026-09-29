@@ -1582,7 +1582,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     const stillPinned = await cdp.evaluate(`(() => ({
       zones: document.querySelectorAll('.ins-zone').length,
       tag: (function () { const t = document.querySelector('.ins-tag'); return t ? t.textContent : null; })(),
-      btn: (function () { const b = document.querySelector('#batchForm button.pri'); return b ? b.textContent : null; })(),
+      btn: (function () { const b = document.querySelector('#newConvBody button.pri'); return b ? b.textContent : null; })(),
     }))()`);
     check('… et elle TIENT quand la souris quitte la ligne (cadre + ruban toujours la)',
       stillPinned.zones === 1 && !!stillPinned.tag, JSON.stringify(stillPinned));
@@ -1590,7 +1590,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       !!stillPinned.btn && stillPinned.btn.indexOf('wave ' + lastWave) !== -1, JSON.stringify(stillPinned));
 
     await cdp.evaluate(`window.__sent = []`);
-    await cdp.evaluate(`document.querySelector('#batchForm button.pri').click()`);
+    await cdp.evaluate(`document.querySelector('#newConvBody button.pri').click()`);
     await sleep(150);
     const afterAdd = await cdp.evaluate(`window.__sent`);
     check('« Creer » depose alors addTasksToGroup, mode into, sur la vague de la ligne',
@@ -1691,7 +1691,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
         refusedStyle: !!document.querySelector('.ins-tag.no'),
         prevNext: p && p.nextElementSibling ? p.nextElementSibling.className : null,
         present: !!p,
-        inNewConv: !!p && !!p.closest('#newConvBody'),
+        endOfList: !!p && !!p.parentElement && p.parentElement.id === 'flow' && !p.nextElementSibling,
         inGroup: !!p && !!p.closest('.grp-body'),
       };
     })()`);
@@ -1704,11 +1704,11 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // Le contrat n'est pas « il n'a pas bouge depuis la mesure d'avant » (un
     // survol precedent pouvait encore le deplacer) mais « il est a sa place PAR
     // DEFAUT ». Ici le prompt est TAPE a la main, sans maitresse : sa place par
-    // defaut est HORS de tout lot, sous « New conversation » (decision user
-    // 2026-09-06 — avant, un prompt tape n'avait aucun apercu et cette
-    // assertion passait sur du vide, prevNext valant null faute d'apercu).
-    check('… et l apercu reste a sa place par defaut, hors du lot, sous New conversation',
-      past.present === true && past.inNewConv === true && past.inGroup === false, JSON.stringify(past));
+    // defaut est HORS de tout lot, a la suite de la liste des conversations
+    // (decisions user 2026-09-06 et 2026-09-30 — avant, un prompt tape n'avait
+    // aucun apercu et cette assertion passait sur du vide).
+    check('… et l apercu reste a sa place par defaut, hors du lot, en fin de liste',
+      past.present === true && past.endOfList === true && past.inGroup === false, JSON.stringify(past));
     await cdp.evaluate(`window.__sent = []`);
     await cdp.evaluate(`(() => {
       const r = Array.from(document.querySelectorAll('#flow [data-ins-wave]'))
@@ -1747,7 +1747,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     };
     const clickFormBtn = function (label) {
       return `(() => {
-        const b = Array.from(document.querySelectorAll('#batchForm button'))
+        const b = Array.from(document.querySelectorAll('#newConvBody button'))
           .find(function (x) { return x.textContent.indexOf(${JSON.stringify(label)}) !== -1; });
         if (b) b.click();
         return !!b;
@@ -2000,7 +2000,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(120);
     check('… le clic FIXE la cible sans rien envoyer (Create seul envoie)',
       await cdp.evaluate(`(window.__sent || []).filter(function (m) { return m.type === 'addTasksToGroup'; }).length`) === 0
-      && /wave/.test(await cdp.evaluate(`(document.querySelector('#batchForm button.pri') || {}).textContent || ''`)));
+      && /wave/.test(await cdp.evaluate(`(document.querySelector('#newConvBody button.pri') || {}).textContent || ''`)));
 
     // DEFAUT, rien survole : l'apercu est SOEUR, a PLAT dans le corps de g1 —
     // vague de la maitresse (1) + 1, donc vagues 2 et 3 pour ce bloc a 2 vagues.
@@ -2238,36 +2238,31 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
 
     // LOT AUTONOME — signalé par l'user sur la 2.102.0 : détacher la maîtresse
     // faisait disparaître TOUT l'aperçu, alors que c'est le seul endroit qui
-    // montre ce que « Créer » va produire. La maquette validée le pose sous
-    // l'en-tête « New conversation » ; il doit vivre DANS le corps de la
-    // section (c'est lui qui porte le repli), jamais à côté.
+    // montre ce que « Créer » va produire. Depuis le 2026-09-30 (décision
+    // user) il se pose à la suite de la liste des conversations, comme la
+    // ligne qu'il deviendra — sous la barre d'action seulement si la liste
+    // est repliée (il y serait invisible).
     const detachedDecor = await cdp.evaluate(`(() => {
       const prev = document.querySelector('.master-preview');
-      const chip = document.querySelector('.master-chip');
       return {
         preview: !!prev,
-        inNewConvBody: !!prev && !!prev.closest('#newConvBody'),
+        endOfList: !!prev && !!prev.parentElement && prev.parentElement.id === 'flow' && !prev.nextElementSibling,
         nested: !!prev && prev.classList.contains('nested'),
-        firstOfBody: !!prev && prev.parentElement.firstElementChild === prev,
         prompts: prev ? Array.from(prev.querySelectorAll('.m-prompt')).map(function (n) { return n.textContent; }) : [],
         masterTargets: document.querySelectorAll('.conv.master-target').length,
         cue: document.querySelectorAll('.mcue-v, .mcue-tip').length,
-        chipSign: chip ? (chip.querySelector('.sign') || {}).textContent : null,
-        chipWho: chip ? (chip.querySelector('.who') || {}).textContent : null,
       };
     })()`);
     check('maîtresse détachée : l\'aperçu des futures conversations EXISTE toujours',
       detachedDecor.preview === true, JSON.stringify(detachedDecor));
-    check('… posé en tête du CORPS de « New conversation » (il suit donc le repli de la section)',
-      detachedDecor.inNewConvBody === true && detachedDecor.firstOfBody === true, JSON.stringify(detachedDecor));
+    check('… posé à la suite de la liste des conversations, comme la future ligne',
+      detachedDecor.endOfList === true, JSON.stringify(detachedDecor));
     check('… à plat, jamais imbriqué (le lot naît autonome, à la racine)',
       detachedDecor.nested === false && detachedDecor.prompts.length === 1, JSON.stringify(detachedDecor));
     check('… plus AUCUNE ligne ne respire (plus de maîtresse désignée)',
       detachedDecor.masterTargets === 0, JSON.stringify(detachedDecor));
     check('… et AUCUNE agrafe : elle dit la filiation, il n\'y en a plus',
       detachedDecor.cue === 0, JSON.stringify(detachedDecor));
-    check('… la pastille dit le GESTE (⤴ détachée), jamais un échec de recherche (⚠ aucune trouvée)',
-      detachedDecor.chipSign === '⤴' && /detached/i.test(detachedDecor.chipWho || ''), JSON.stringify(detachedDecor));
 
     await cdp.evaluate(clickFormBtn('Create'));
     await sleep(120);
@@ -2286,18 +2281,16 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(200);
     const noMasterDecor = await cdp.evaluate(`(() => {
       const prev = document.querySelector('.master-preview');
-      const chip = document.querySelector('.master-chip');
       return {
-        preview: !!prev && !!prev.closest('#newConvBody'),
-        chipSign: chip ? (chip.querySelector('.sign') || {}).textContent : null,
-        chipWho: chip ? (chip.querySelector('.who') || {}).textContent : null,
+        preview: !!prev && !!prev.parentElement && prev.parentElement.id === 'flow' && !prev.nextElementSibling,
+        // Pastille « aucune maîtresse trouvée » retirée le 2026-09-29 (décision user).
+        chip: document.querySelectorAll('.master-chip').length,
       };
     })()`);
     check('recherche sans résultat : l\'aperçu est là aussi, au même endroit',
       noMasterDecor.preview === true, JSON.stringify(noMasterDecor));
-    check('… et la pastille garde son ⚠ « aucune trouvée » (là, c\'est bien un échec)',
-      noMasterDecor.chipSign === '⚠' && /No master conversation found/i.test(noMasterDecor.chipWho || ''),
-      JSON.stringify(noMasterDecor));
+    check('… et plus aucune pastille au-dessus du formulaire (retirée 2026-09-29)',
+      noMasterDecor.chip === 0, JSON.stringify(noMasterDecor));
     await cdp.evaluate(clickFormBtn('Cancel'));
     await sleep(120);
 
@@ -2401,7 +2394,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // « + Add task » étend automatiquement en mode « batch » (lot 12 §2) :
     // 2 tâches dans la même vague → l'en-tête annonce le parallélisme (lot 10).
     const formHdrs = await cdp.evaluate(`(() => {
-      const btn = Array.from(document.querySelectorAll('#batchForm button')).find(b => b.textContent.indexOf('Add task') !== -1);
+      const btn = Array.from(document.querySelectorAll('#newConvBody button')).find(b => b.textContent.indexOf('Add task') !== -1);
       if (!btn) return { error: 'no + Add task button' };
       btn.click();
       return { texts: Array.from(document.querySelectorAll('#batchForm .wave-hdr')).map(h => h.textContent) };
@@ -2410,7 +2403,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       !!formHdrs.texts && formHdrs.texts.length === 1 && formHdrs.texts[0] === '1 wave — all parallel',
       JSON.stringify(formHdrs));
     const formHdrs2 = await cdp.evaluate(`(() => {
-      const btn = Array.from(document.querySelectorAll('#batchForm button')).find(b => b.textContent.indexOf('Add wave divider') !== -1);
+      const btn = Array.from(document.querySelectorAll('#newConvBody button')).find(b => b.textContent.indexOf('Add wave divider') !== -1);
       if (!btn) return { error: 'no add-wave button' };
       btn.click();
       return { texts: Array.from(document.querySelectorAll('#batchForm .wave-hdr')).map(h => h.textContent) };
@@ -2439,7 +2432,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const modelPair = pairs.find(p => p.querySelector('.lbl').textContent === 'model');
       const labels = Array.from(modelPair.querySelectorAll('.segA1 button')).map(b => b.textContent);
       const on = modelPair.querySelector('.segA1 button.on');
-      const createBtn = Array.from(document.querySelectorAll('#batchForm button')).find(b => b.textContent.indexOf('Create') === 0);
+      const createBtn = Array.from(document.querySelectorAll('#newConvBody button')).find(b => b.textContent.indexOf('Create') === 0);
       return { labels, onLabel: on ? on.textContent : null, createDisabled: createBtn.disabled, createTitle: createBtn.title };
     })()`);
     check('plus jamais de bouton « inherit » dans les libellés',
@@ -2455,7 +2448,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const effortPair = pairs.find(p => p.querySelector('.lbl').textContent === 'effort');
       const modelOn = modelPair.querySelector('.segA1 button.on');
       const effortOn = effortPair.querySelector('.segA1 button.on');
-      const createBtn = Array.from(document.querySelectorAll('#batchForm button')).find(b => b.textContent.indexOf('Create') === 0);
+      const createBtn = Array.from(document.querySelectorAll('#newConvBody button')).find(b => b.textContent.indexOf('Create') === 0);
       return { modelText: modelOn ? modelOn.textContent : null, effortText: effortOn ? effortOn.textContent : null, createDisabled: createBtn.disabled };
     })()`);
     check('modèle résolu ⇒ bouton concret allumé (alias [1m] ramené à la famille « opus »)',
@@ -2547,13 +2540,12 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       Array.isArray(sentToggle) && sentToggle.some((m) => m && m.type === 'toggleCollapse' && m.section === 'newConversation'),
       JSON.stringify(sentToggle));
 
-    console.log('\n12d. Plan repli-auto étape 6 — notice de batch : texte réduit, disclaimer en tooltip');
+    console.log('\n12d. Notice de batch : ne porte plus qu\'un échec de lancement (2026-09-29)');
     await cdp.evaluate(`window.postMessage(${JSON.stringify({
       type: 'state',
       state: { batch: {
         envConflict: [], busy: false,
-        notice: '2 tasks lost their link before sending — use “Relaunch”.',
-        noticeHint: 'The official menu may briefly show the wrong model/effort until the first turn — this panel’s model · effort badges are the real state.',
+        notice: 'Batch failed: boom',
         inherit: { model: null, effort: null },
       } },
     })}, '*')`);
@@ -2562,15 +2554,13 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const n = document.getElementById('batchNotice');
       return { text: n.textContent, title: n.title, shown: n.classList.contains('show') };
     })()`);
-    check('texte du notice = EXACTEMENT le compteur actionnable, aucun texte de groupe/maîtresse/vagues concaténé',
-      noticeShown.text === '2 tasks lost their link before sending — use “Relaunch”.', JSON.stringify(noticeShown));
-    check('disclaimer menu officiel posé en tooltip (title), jamais dans le texte visible',
-      noticeShown.title.indexOf('official menu') !== -1 && noticeShown.text.indexOf('official menu') === -1, JSON.stringify(noticeShown));
+    check('texte du notice = EXACTEMENT l\'échec transmis, sans tooltip',
+      noticeShown.text === 'Batch failed: boom' && noticeShown.title === '', JSON.stringify(noticeShown));
     check('notice visible (classe show)', noticeShown.shown === true);
 
     await cdp.evaluate(`window.postMessage(${JSON.stringify({
       type: 'state',
-      state: { batch: { envConflict: [], busy: false, notice: null, noticeHint: null, inherit: { model: null, effort: null } } },
+      state: { batch: { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null } } },
     })}, '*')`);
     await sleep(80);
     const noticeGone = await cdp.evaluate(`(() => {
@@ -2580,8 +2570,8 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     // Cycle de vie (plan étape 6) : le notice ET son tooltip s'effacent
     // ensemble — un tooltip qui traîne pour un texte déjà vide serait le même
     // défaut de classe (état d'affichage qui survit à son objet).
-    check('groupe/lot dissous → notice ET tooltip effacés ensemble',
-      noticeGone.text === '' && noticeGone.title === '' && noticeGone.shown === false, JSON.stringify(noticeGone));
+    check('notice null → effacé',
+      noticeGone.text === '' && noticeGone.shown === false, JSON.stringify(noticeGone));
 
     console.log('\n13. Capsule v2 — ligne master au format standard + grip au-dessus (plan repli-auto étape 9, 2026-08-05)');
     // La master DEVIENT une ligne de conversation STANDARD (même fabrique
@@ -2667,7 +2657,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     await sleep(200);
     const headHover = await cdp.evaluate(`(() => {
       const prev = document.querySelector('.master-preview');
-      const btn = document.querySelector('#batchForm button.pri');
+      const btn = document.querySelector('#newConvBody button.pri');
       return {
         btnText: btn ? btn.textContent : null,
         btnOff: btn ? btn.disabled : null,
@@ -2692,10 +2682,10 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('clic sur la tête : la cible est fixée, rien n\'est envoyé (ni dépôt, ni focusConv)',
       await cdp.evaluate(`(window.__sent || []).length`) === 0);
     const btnBefore = await cdp.evaluate(`(() => {
-      const b = document.querySelector('#batchForm button.pri');
+      const b = document.querySelector('#newConvBody button.pri');
       return { text: b ? b.textContent : null, off: b ? b.disabled : null, title: b ? b.title : null };
     })()`);
-    await cdp.evaluate(`document.querySelector('#batchForm button.pri').click()`);
+    await cdp.evaluate(`document.querySelector('#newConvBody button.pri').click()`);
     await sleep(150);
     const afterNewWave = await cdp.evaluate(`window.__sent`);
     check('puis « Créer » : addTasksToGroup en mode before sur la vague qui n\'existe pas encore',
