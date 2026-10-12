@@ -386,7 +386,7 @@ async function captureTheme(cdp, fileUrl, themeName, themeVars) {
       await cdp.evaluate(`(() => {
         const ta = document.querySelector('#batchForm .task-top textarea');
         ta.value = ${JSON.stringify(frame.paste)};
-        ta.dispatchEvent(new Event('change'));
+        ta.dispatchEvent(new Event('paste'));
       })()`);
       await sleep(220);
     }

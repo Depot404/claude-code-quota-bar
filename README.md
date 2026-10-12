@@ -78,6 +78,10 @@ It's common to paste a `claude-convs` block *inside* a conversation that already
 
 Batch-created conversations honour the requested model/effort at the CLI level; the official Claude menu inside the tab can briefly display its own persisted default instead, until the first turn resyncs it — the badge on the conversation row (read from the transcript) is the real state. See [Known limitations](#known-limitations) for this and for how the master lookup can come up empty.
 
+### Pasting an image into a prompt
+
+**Ctrl+V** a screenshot or photo in any prompt box: the image is saved under `.claude/pasted-images/` in your workspace and its path is inserted at the cursor, as `[image: …]`. When the conversation opens, Claude reads the image from that path. The folder ignores itself in git, and images older than 7 days are deleted on the next paste. Claude Code only accepts text from another extension, so the image travels as a file — no thumbnail in the prompt. A clipboard that also holds text (a copy from a word processor) is pasted as text, as before.
+
 ### Dictating a prompt (optional)
 
 Each prompt box can carry a microphone, placed and behaving like the one in Claude Code's own input: **tap** to start and tap again to stop, or **hold** and release; three level bars show it hears you, and the pastille pulses while the end of the sentence is transcribed. The text appears **at the cursor while you speak** — the sentence in progress is rewritten about every 1.5 s and frozen at each pause — and it never overwrites your draft: if you type while it listens, it stops and leaves the box to you. **Esc** removes what the dictation wrote.

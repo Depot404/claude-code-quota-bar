@@ -2,7 +2,7 @@
   "name": "claude-code-quota-bar",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "2.126.2",
+  "version": "2.127.0",
   "publisher": "AnthonyDame",
   "license": "MIT",
   "icon": "images/icon.png",

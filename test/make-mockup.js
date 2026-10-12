@@ -166,7 +166,7 @@ const boot = `<script nonce="${nonce}">
     var ta = document.querySelector('.task-top textarea.inp');
     if (!ta) return;
     ta.value = ${JSON.stringify(BLOCK)};
-    ta.dispatchEvent(new Event('change'));
+    ta.dispatchEvent(new Event('paste'));
   }, 120);
   setTimeout(function () {
     var b = document.createElement('button');

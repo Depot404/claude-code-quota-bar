@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.127.0] - 2026-10-13
+
+### Added
+- **Paste an image into a prompt.** Ctrl+V of a screenshot or photo in a prompt box saves it under `.claude/pasted-images/` in your workspace (ignored by git, cleaned after 7 days) and inserts its path where the cursor was. The conversation opens with that path in its prompt and Claude reads the image from there — Claude Code's own prompt only accepts text from another extension, so the image travels as a file.
+
+## [2.126.5] - 2026-10-03
+
+### Changed
+- **Buttons that would do nothing are hidden.** Cancel only shows once two or more prompts are filled; below that, the task's × does the same job, and on the last task it now clears the form exactly like Cancel (master conversation included). The × itself is hidden on an empty form.
+
+## [2.126.4] - 2026-10-03
+
+### Fixed
+- **One click on Create is enough.** After typing a prompt, the first click on Create used to do nothing: leaving the prompt box rebuilt the form, replacing the button under your mouse mid-click. The box is now only re-read when you paste, so the click lands.
+- **Editing a pasted one-task block keeps its master conversation.** Retyping its prompt no longer drops the link.
+
+## [2.126.3] - 2026-10-02
+
+### Changed
+- **The prompt box grows with your text.** While you dictate (or type), the box now stretches to fit instead of overflowing, up to 60% of the panel height, then scrolls. No more resizing it by hand.
+
 ## [2.126.2] - 2026-09-30
 
 ### Changed

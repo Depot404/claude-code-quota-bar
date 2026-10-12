@@ -387,7 +387,7 @@ async function run() {
         await cdp.evaluate(`(() => {
           const ta = document.querySelector('#batchForm .task-top textarea');
           ta.value = ${JSON.stringify(scene.paste)};
-          ta.dispatchEvent(new Event('change'));
+          ta.dispatchEvent(new Event('paste'));
         })()`);
         await sleep(250);
       }

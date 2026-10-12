@@ -292,12 +292,13 @@ async function run() {
             const conv = Object.assign({}, BASE_CONV, c.extra);
             await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: state(conv, inGroup) })}, '*')`);
             await sleep(180);
-            const armed = await cdp.evaluate(`(() => {
+            const armed = await cdp.evaluate(`(async () => {
               const ta = document.querySelector('#batchForm .task-top textarea.inp');
               if (!ta) return 'pas de champ prompt';
               window.__sent.length = 0;
               ta.value = ${JSON.stringify(asMaster ? MASTER_BLOCK : '')};
-              ta.dispatchEvent(new Event('change', { bubbles: true }));
+              ta.dispatchEvent(new Event('paste', { bubbles: true }));
+              await new Promise((r) => setTimeout(r, 0));
               if (!${asMaster}) return 'off';
               const ask = window.__sent.filter((m) => m && m.type === 'resolveMasterPaste').pop();
               if (!ask) return 'aucune recherche demandee';
@@ -350,15 +351,17 @@ async function run() {
         for (const tinted of [false, true]) {
           await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: state(Object.assign({}, BASE_CONV), inGroup) })}, '*')`);
           await sleep(180);
-          const armed = await cdp.evaluate(`(() => {
+          const armed = await cdp.evaluate(`(async () => {
             const ta = document.querySelector('#batchForm .task-top textarea.inp');
             if (!ta) return 'pas de champ prompt';
             window.__sent.length = 0;
             ta.value = ${JSON.stringify(MASTER_BLOCK)};
-            ta.dispatchEvent(new Event('change', { bubbles: true }));
+            ta.dispatchEvent(new Event('paste', { bubbles: true }));
+            await new Promise((r) => setTimeout(r, 0));
             if (!${tinted}) {
               ta.value = '';
-              ta.dispatchEvent(new Event('change', { bubbles: true }));
+              ta.dispatchEvent(new Event('paste', { bubbles: true }));
+              await new Promise((r) => setTimeout(r, 0));
               return 'off';
             }
             const ask = window.__sent.filter((m) => m && m.type === 'resolveMasterPaste').pop();

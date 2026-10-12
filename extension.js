@@ -78,6 +78,7 @@ const { computeNesting } = require('./nesting');
 // de transcripts restent ici — et sont PONCTUELLES, déclenchées par un Create,
 // jamais en tâche de fond (le cadrage a rejeté toute détection permanente).
 const { resolveMaster } = require('./master');
+const { savePastedImage } = require('./paste-image');
 const { readSlice, parseSlice } = require('./hooks/transcript.js');
 // Purge d'une conv fermée (lot 5) et accusé de lecture (lot 6). On require la
 // lib des hooks au lieu de réécrire l'accès : sessions-state.json est écrit par
@@ -445,6 +446,9 @@ function activate(context) {
     // une question, pas un acte ; le lien réel reste posé par createBatch, qui
     // re-résout de son côté sur un état forcément plus frais.
     resolveMasterPaste: (msg) => resolveMasterPaste(msg),
+    // Image collée dans une case de prompt : écrite sur disque, son chemin
+    // revient au webview qui l'insère dans le texte (paste-image.js).
+    pasteImage: (msg) => pasteImage(msg),
     // Micro d'une case de prompt : start/stop/cancel vers l'auxiliaire. Un
     // nouveau départ retire l'échec de dictée précédent du bandeau.
     dictation: (msg) => {
@@ -2845,6 +2849,19 @@ function explicitMasterCandidate(master, paste, token) {
 //     pourrait peindre une filiation périmée par-dessus un collage plus récent.
 //
 // Aucun effet de bord : ni groupe, ni setMaster, ni journal — une lecture.
+function pasteImage(msg) {
+  const seq = msg && typeof msg.seq === 'number' ? msg.seq : null;
+  if (!panelProvider || seq === null) return;
+  const folders = vscode.workspace.workspaceFolders;
+  let file = null;
+  try {
+    file = savePastedImage({ workspaceRoot: folders && folders.length ? folders[0].uri.fsPath : null, mime: msg.mime, base64: msg.data });
+  } catch (e) {
+    vscode.window.showErrorMessage(vscode.l10n.t('QuotaSaver: could not save the pasted image — {0}', (e && e.message) || String(e)));
+  }
+  panelProvider.post({ type: 'imageSaved', seq, path: file });
+}
+
 function resolveMasterPaste(msg) {
   const seq = msg && typeof msg.seq === 'number' ? msg.seq : null;
   if (!panelProvider || seq === null) return;

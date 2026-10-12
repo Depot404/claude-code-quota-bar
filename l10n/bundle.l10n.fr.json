@@ -187,5 +187,6 @@
   "Dictation failed — see the message above": "Échec de la dictée — voir le message au-dessus",
   "Voice dictation — tap or hold to record": "Dictée vocale — cliquer ou maintenir pour enregistrer",
   "Dictation: Windows privacy settings do not let desktop apps use the microphone.": "Dictée : les paramètres de confidentialité de Windows interdisent le micro aux applications de bureau.",
-  "Dictation failed: {0}": "Échec de la dictée : {0}"
+  "Dictation failed: {0}": "Échec de la dictée : {0}",
+  "QuotaSaver: could not save the pasted image — {0}": "QuotaSaver : impossible d’enregistrer l’image collée — {0}"
 }

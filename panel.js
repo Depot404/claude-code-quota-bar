@@ -5019,6 +5019,7 @@ function renderHtml(webview) {
   let batchState = { envConflict: [], busy: false, notice: null, inherit: { model: null, effort: null }, lastModel: null, lastEffort: null, modelVersions: {}, dictation: false };
   let form = { group: '', tasks: [blankTask(1)] };
   let createBtn = null;
+  let cancelBtn = null;
 
   // Numéro du dernier collage (plan agrafe 2026-08-27). La recherche de la
   // conversation maîtresse est un aller-retour vers l'extension : ce compteur
@@ -5353,6 +5354,16 @@ function renderHtml(webview) {
     const unresolved = n && tasks.some(unresolvedTask);
     createBtn.disabled = !n || batchState.busy || unresolved;
     createBtn.title = unresolved ? t('pick a model') : '';
+    // Un bouton sans effet possible ne s'affiche pas (décision user
+    // 2026-10-03). « Cancel » n'apparaît qu'à partir de DEUX prompts remplis :
+    // en dessous, la croix de la tâche fait la même chose. La croix, elle, se
+    // cache sur le formulaire vierge (une tâche vide), où elle ne ferait rien ;
+    // visibility et non display, pour que le champ ne s'élargisse pas sous
+    // les doigts à la première frappe. Recalculé ici car appelé à chaque
+    // frappe, sans renderForm() qui ôterait le focus du champ.
+    if (cancelBtn) cancelBtn.hidden = n < 2;
+    const blank = form.tasks.length === 1 && !form.tasks[0].prompt.trim();
+    batchFormEl.querySelectorAll('.task-del').forEach(function (b) { b.style.visibility = blank ? 'hidden' : ''; });
   }
 
   function maxWave() {
@@ -5656,9 +5667,58 @@ function renderHtml(webview) {
     if (e.key === 'Escape' && dict && !dict.busy) cancelDictation();
   });
 
+  // ── Image collée (2.127.0) ───────────────────────────────────────────────
+  // Le prompt ne voyage qu'en texte (paste-image.js) : l'extension écrit
+  // l'image sur disque et renvoie son chemin, inséré là où était le curseur.
+  // Un presse-papier qui porte AUSSI du texte (copie depuis un traitement de
+  // texte) reste un collage de texte.
+  let imageSeq = 0;
+  const imageWaits = new Map();      // seq → { task, at }
+
+  function clipboardImage(e) {
+    const cd = e.clipboardData;
+    if (!cd || cd.getData('text/plain')) return null;
+    for (let i = 0; i < cd.items.length; i++) {
+      const it = cd.items[i];
+      if (it.kind === 'file' && /^image\\//.test(it.type)) return it.getAsFile();
+    }
+    return null;
+  }
+
+  function pasteImage(task, ta, file) {
+    const seq = ++imageSeq;
+    imageWaits.set(seq, { task, at: typeof ta.selectionStart === 'number' ? ta.selectionStart : task.prompt.length });
+    const r = new FileReader();
+    r.onload = function () {
+      const s = String(r.result || '');
+      vscode.postMessage({ type: 'pasteImage', seq, mime: file.type, data: s.slice(s.indexOf(',') + 1) });
+    };
+    r.readAsDataURL(file);
+  }
+
+  function onImageSaved(m) {
+    const w = imageWaits.get(m.seq);
+    imageWaits.delete(m.seq);
+    if (!w || !m.path || form.tasks.indexOf(w.task) < 0) return;
+    const val = w.task.prompt;
+    const at = Math.min(w.at, val.length);
+    const head = val.slice(0, at), tail = val.slice(at);
+    let piece = '[image: ' + m.path + ']';
+    if (head && !/\\s$/.test(head)) piece = ' ' + piece;
+    if (tail && !/^\\s/.test(tail)) piece += ' ';
+    setPrompt(w.task, head + piece + tail, at + piece.length);
+  }
+
   // Rafraîchissement différé de l'aperçu pendant la frappe (voir l'écouteur
   // input de taskCard).
   let cueTypingTimer = 0;
+  // Le cadre suit le texte (dictée comprise : writeDictation passe par l'évènement
+  // input). Plafond à 60 % de la hauteur du panneau, au-delà il défile.
+  function autoGrow(ta) {
+    if (!ta.isConnected) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight + 2, Math.round(window.innerHeight * 0.6)) + 'px';
+  }
   function taskCard(task, disabled) {
     const card = el('div', 'task');
     const top = el('div', 'task-top');
@@ -5669,6 +5729,7 @@ function renderHtml(webview) {
     // oninput n'appelle PAS renderForm : re-créer le nœud pendant la frappe
     // volerait le curseur. Seul le compteur du bouton Create bouge.
     ta.addEventListener('input', function () {
+      autoGrow(ta);
       const had = !!task.prompt.trim();
       task.prompt = ta.value;
       refreshCreateBtn();
@@ -5682,18 +5743,31 @@ function renderHtml(webview) {
       if (cueTypingTimer) clearTimeout(cueTypingTimer);
       cueTypingTimer = setTimeout(function () { cueTypingTimer = 0; renderMasterCue(); }, 250);
     });
-    ta.addEventListener('paste', function () { setTimeout(function () { applyBlockPaste(ta); }, 0); });
-    ta.addEventListener('change', function () { applyBlockPaste(ta); });
-    const del = el('button', 'xdel', '×');
+    // Le bloc se reconnaît au COLLAGE, et seulement là (2026-10-03). Un second
+    // écouteur sur « change » le relisait à la perte du focus : le mousedown
+    // sur « Créer » ôte le focus au champ, renderForm() remplaçait le bouton
+    // sous la souris, et le mouseup tombait sur un autre nœud — pas de click,
+    // il fallait cliquer deux fois (signalé par l'user). Il défaisait aussi la
+    // maîtresse d'un bloc à une tâche dès qu'on retouchait son prompt.
+    ta.addEventListener('paste', function (e) {
+      const img = clipboardImage(e);
+      if (img) { e.preventDefault(); pasteImage(task, ta, img); return; }
+      setTimeout(function () { applyBlockPaste(ta); }, 0);
+    });
+    const del = el('button', 'xdel task-del', '×');
     del.type = 'button';
     del.title = t('Remove this task');
     del.addEventListener('click', function () {
-      form.tasks.splice(form.tasks.indexOf(task), 1);
-      if (!form.tasks.length) form.tasks.push(blankTask(1));
+      // Dernière tâche : la croix REMPLACE « Cancel », masqué en dessous de
+      // deux prompts — elle remet donc le formulaire à zéro comme lui
+      // (maîtresse oubliée comprise), sinon l'agrafe survivrait au prompt.
+      if (form.tasks.length === 1) resetForm();
+      else form.tasks.splice(form.tasks.indexOf(task), 1);
       compactWaves();
       renderForm();
     });
     taskTa.set(task, ta);
+    setTimeout(function () { autoGrow(ta); }, 0);
     if (batchState.dictation) {
       const wrap = el('div', 'ta-wrap');
       wrap.appendChild(ta);
@@ -5764,6 +5838,7 @@ function renderHtml(webview) {
     batchFormEl.replaceChildren();
     batchActionsEl.replaceChildren();
     createBtn = null;
+    cancelBtn = null;
     // Plus de pastille « aucune maîtresse trouvée / détachée » (2026-09-29,
     // décision user : elle occupait la tête du formulaire pour une information
     // rarement utile). Qui la porte désormais : l'aperçu et l'agrafe — une
@@ -5840,10 +5915,11 @@ function renderHtml(webview) {
     // Lot 12 : « form » n'est plus jamais « null » (le lanceur est toujours
     // là) — Cancel remet le brouillon à zéro (une tâche vierge, mode simple)
     // plutôt que de fermer un panneau qui n'existe plus.
-    actions.appendChild(button('', t('Cancel'), function () {
+    cancelBtn = button('', t('Cancel'), function () {
       resetForm();
       renderForm();
-    }));
+    });
+    actions.appendChild(cancelBtn);
     createBtn = button('pri', t('Create'), function () {
       // Défaut SŒUR (2026-09-02, §9a) : maîtresse MEMBRE d'un lot vivant →
       // addTasksToGroup dans SON lot, jamais un second lot fondé en silence.
@@ -6124,6 +6200,7 @@ function renderHtml(webview) {
   window.addEventListener('message', function (event) {
     const msg = event.data;
     if (msg && msg.type === 'masterResolved') { onMasterResolved(msg); return; }
+    if (msg && msg.type === 'imageSaved') { onImageSaved(msg); return; }
     if (msg && msg.type === 'focusRefused') { onFocusRefused(msg); return; }
     if (msg && msg.type === 'dictation') { onDictationEvent(msg); return; }
     if (!msg || msg.type !== 'state') return;

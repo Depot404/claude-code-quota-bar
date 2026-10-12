@@ -1741,7 +1741,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       await cdp.evaluate(`(() => {
         const ta = document.querySelector('.task-top textarea.inp');
         ta.value = ${JSON.stringify(txt)};
-        ta.dispatchEvent(new Event('change'));
+        ta.dispatchEvent(new Event('paste'));
       })()`);
       await sleep(80);
     };
@@ -3065,6 +3065,74 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
     check('clic ✕ ne replie pas le groupe au passage (classe .gbtn ignorée par le handler de repli)',
       Array.isArray(sentClose) && !sentClose.some((m) => m.type === 'toggleGroupCollapse'), JSON.stringify(sentClose));
 
+    console.log('\n13quater. Un prompt TAPÉ puis UN clic réel sur « Créer » lance (2026-10-03)');
+    // Vrai geste souris (mousePressed → mouseReleased), pas .click() : le bug
+    // tenait justement à ce que le mousedown ôte le focus au champ, qu'un
+    // écouteur « change » reconstruisait alors le formulaire, et que le
+    // mouseup tombait sur un AUTRE bouton — donc aucun click, deux clics requis.
+    await cdp.evaluate(`Array.from(document.querySelectorAll('#newConvBody button')).find((b) => b.textContent.trim() === 'Cancel').click()`);
+    await sleep(50);
+    // Un défaut résolu, sinon « Créer » reste grisé (« pick a model ») et le
+    // clic ne prouverait rien.
+    await cdp.evaluate(`window.postMessage(${JSON.stringify({ type: 'state', state: { batch: { envConflict: [], busy: false, notice: null, inherit: { model: 'sonnet', effort: 'medium' } } } })}, '*')`);
+    await sleep(80);
+    await cdp.evaluate(`document.querySelector('#batchForm .task textarea').focus()`);
+    await cdp.send('Input.insertText', { text: 'Corriger le double clic' });
+    await sleep(50);
+    const createRect = await cdp.evaluate(`(() => {
+      const b = Array.from(document.querySelectorAll('#newConvBody button')).find((x) => x.classList.contains('pri'));
+      b.scrollIntoView({ block: 'center' });
+      const r = b.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, focused: document.activeElement && document.activeElement.tagName };
+    })()`);
+    await cdp.evaluate(`window.__sent = []`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: createRect.x, y: createRect.y, buttons: 0 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: createRect.x, y: createRect.y, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: createRect.x, y: createRect.y, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(80);
+    const sentOneClick = await cdp.evaluate(`window.__sent.filter((m) => m && (m.type === 'createBatch' || m.type === 'addTasksToGroup')).map((m) => m.type)`);
+    check('le champ avait le focus au moment du clic (condition du bug)', createRect.focused === 'TEXTAREA', JSON.stringify(createRect));
+    check('UN seul clic réel sur « Créer » après frappe → exactement un lancement', Array.isArray(sentOneClick) && sentOneClick.length === 1, JSON.stringify(sentOneClick));
+
+    console.log('\n13sexies. Boutons sans effet possible masqués : « Cancel » dès 2 prompts, croix hors formulaire vierge (2026-10-03)');
+    const formButtons = `(() => {
+      const cancel = Array.from(document.querySelectorAll('#batchActions button')).find((b) => b.textContent.trim() === 'Cancel');
+      const dels = Array.from(document.querySelectorAll('#batchForm .task-del'));
+      return {
+        cancelShown: !!cancel && !cancel.hidden && cancel.offsetParent !== null,
+        delsShown: dels.map((d) => getComputedStyle(d).visibility !== 'hidden'),
+        tasks: document.querySelectorAll('#batchForm .task textarea').length,
+        prompts: Array.from(document.querySelectorAll('#batchForm .task textarea')).map((t) => t.value),
+      };
+    })()`;
+    const typeInto = async function (i, text) {
+      await cdp.evaluate(`document.querySelectorAll('#batchForm .task textarea')[${i}].focus()`);
+      await cdp.send('Input.insertText', { text });
+      await sleep(40);
+    };
+    await cdp.evaluate(`Array.from(document.querySelectorAll('#newConvBody button')).find((b) => b.textContent.trim() === 'Cancel').click()`);
+    await sleep(50);
+    const vierge = await cdp.evaluate(formButtons);
+    check('formulaire vierge : ni « Cancel » ni croix', !vierge.cancelShown && vierge.delsShown.join() === 'false', JSON.stringify(vierge));
+    await typeInto(0, 'Premier');
+    const un = await cdp.evaluate(formButtons);
+    check('un prompt tapé : la croix apparaît (sans re-rendu), « Cancel » reste masqué', !un.cancelShown && un.delsShown.join() === 'true', JSON.stringify(un));
+    await cdp.evaluate(clickFormBtn('+ Add task'));
+    await sleep(50);
+    const carteVide = await cdp.evaluate(formButtons);
+    check('deux cartes dont une vide : les deux croix visibles, « Cancel » masqué (un seul prompt rempli)',
+      !carteVide.cancelShown && carteVide.delsShown.join() === 'true,true', JSON.stringify(carteVide));
+    await typeInto(1, 'Second');
+    const deux = await cdp.evaluate(formButtons);
+    check('deux prompts remplis : « Cancel » apparaît', deux.cancelShown, JSON.stringify(deux));
+    await cdp.evaluate(`document.querySelectorAll('#batchForm .task-del')[1].click()`);
+    await sleep(50);
+    await cdp.evaluate(`document.querySelectorAll('#batchForm .task-del')[0].click()`);
+    await sleep(50);
+    const fin = await cdp.evaluate(formButtons);
+    check('croix de la DERNIÈRE tâche : formulaire remis à zéro, comme « Cancel »',
+      fin.tasks === 1 && fin.prompts.join() === '' && !fin.cancelShown && fin.delsShown.join() === 'false', JSON.stringify(fin));
+
     console.log('\n14. Lot micro-allègements 2026-07-24 — dismiss du feedback de collage');
     // Bloc claude-convs BARE (pas de fence ``` — la zone de collage EST le
     // champ prompt, lot 2026-07-23) reconnu comme valide : bannière info avec ×.
@@ -3072,7 +3140,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const ta = document.querySelector('#batchForm .task textarea');
       ta.value = 'model: sonnet\\neffort: medium\\nFaire le lot 3';
       ta.dispatchEvent(new Event('input', { bubbles: true }));
-      ta.dispatchEvent(new Event('change', { bubbles: true }));
+      ta.dispatchEvent(new Event('paste', { bubbles: true }));
     })()`);
     await sleep(50);
     const pasted = await cdp.evaluate(`(() => ({
@@ -3091,7 +3159,7 @@ window.QUOTABAR_STALE_TUNING = { pullAfterMs: 1e9, frozenAfterMs: 1e9 };`,
       const ta = document.querySelector('#batchForm .task textarea');
       ta.value = 'model: bidon\\nFaire autre chose';
       ta.dispatchEvent(new Event('input', { bubbles: true }));
-      ta.dispatchEvent(new Event('change', { bubbles: true }));
+      ta.dispatchEvent(new Event('paste', { bubbles: true }));
     })()`);
     await sleep(50);
     const invalid = await cdp.evaluate(`(() => {

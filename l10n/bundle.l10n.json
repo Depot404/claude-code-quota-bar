@@ -187,5 +187,6 @@
   "Dictation failed — see the message above": "Dictation failed — see the message above",
   "Voice dictation — tap or hold to record": "Voice dictation — tap or hold to record",
   "Dictation: Windows privacy settings do not let desktop apps use the microphone.": "Dictation: Windows privacy settings do not let desktop apps use the microphone.",
-  "Dictation failed: {0}": "Dictation failed: {0}"
+  "Dictation failed: {0}": "Dictation failed: {0}",
+  "QuotaSaver: could not save the pasted image — {0}": "QuotaSaver: could not save the pasted image — {0}"
 }
